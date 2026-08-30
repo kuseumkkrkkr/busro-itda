@@ -70,6 +70,23 @@
     return clean;
   }
 
+  function journeyServiceDate(value) {
+    const clean = String(value || "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(clean)) throw new Error("여행 날짜를 YYYY-MM-DD 형식으로 선택해 주세요.");
+    const [year, month, day] = clean.split("-").map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) {
+      throw new Error("유효한 여행 날짜를 선택해 주세요.");
+    }
+    return clean;
+  }
+
+  function journeyDepartureTime(value) {
+    const clean = String(value || "");
+    if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(clean)) throw new Error("출발 시각을 HH:MM 형식으로 선택해 주세요.");
+    return clean;
+  }
+
   async function request(path, options = {}) {
     const controller = new AbortController();
     const timeout = global.setTimeout(() => controller.abort(), options.timeout || 6500);
@@ -216,8 +233,14 @@
         return request(`/stops?${official.toString()}`);
       }
     },
-    generateJourneys(payload) {
-      return request("/journeys/generate", { method: "POST", timeout: 20000, body: payload });
+    generateJourneys(payload = {}) {
+      const serviceDate = journeyServiceDate(payload.service_date);
+      const departureTime = journeyDepartureTime(payload.departure_time);
+      return request("/journeys/generate", {
+        method: "POST",
+        timeout: 20000,
+        body: { ...payload, service_date: serviceDate, departure_time: departureTime },
+      });
     },
     hydrateRoute(cityCode, routeId) {
       return request("/network/hydrate", { method: "POST", timeout: 12000, body: {
@@ -249,6 +272,7 @@
         dates: pastDates(days),
         legs: (legs || []).slice(0, 12).map((leg) => {
           if (!leg.timeEvidenceVerified || !leg.timeEvidenceSource) throw new Error("검증된 실제 시간표 출처가 없는 구간은 재생할 수 없습니다.");
+          if (!leg.timeEvidenceFeedId || !leg.nextTimeEvidenceFeedId) throw new Error("시간표 feed 버전 근거가 없는 구간은 재생할 수 없습니다.");
           if (!leg.alightNodeId || !Number.isInteger(Number(leg.alightNodeOrder))) throw new Error("도착 정류장 ID와 순번이 없는 구간은 재생할 수 없습니다.");
           if (!Number.isInteger(Number(leg.minimumTransfer))) throw new Error("실제 최소 환승시간이 없는 구간은 재생할 수 없습니다.");
           return {
@@ -261,10 +285,12 @@
             minimum_transfer_minutes: Number(leg.minimumTransfer),
             time_evidence_source: String(leg.timeEvidenceSource),
             time_evidence_trip_id: String(leg.timeEvidenceTripId),
+            time_evidence_feed_id: String(leg.timeEvidenceFeedId),
             next_route_id: String(leg.nextRouteId),
             next_node_id: String(leg.nextNodeId),
             next_node_order: Number(leg.nextNodeOrder),
             next_time_evidence_trip_id: String(leg.nextTimeEvidenceTripId),
+            next_time_evidence_feed_id: String(leg.nextTimeEvidenceFeedId),
           };
         }),
       } });

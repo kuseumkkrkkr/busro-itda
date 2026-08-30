@@ -46,11 +46,12 @@ function ExploreScreen({ form, setForm, connection, simulation, onSearch, onOpen
 
 function LiveScreen({ journey, connection, legs, selectedLeg, setSelectedLeg, arrivals, history, passageCoverage, mappingSummary, loading, error, notice, onRefresh, onCollect, onExplore }) {
   if (!journey || legs.length === 0) {
+    const directWithoutTransfer = journey?.scheduled === true && Number(journey?.transfers) === 0;
     return (
       <main className="screen content-screen">
-        <ScreenHeading eyebrow="실시간" title="조회할 여행이 없습니다" detail={journey ? "선택한 후보에 연속 버스 이동 구간이 없습니다." : "전국 탐색에서 실제 생성된 여행 후보를 먼저 선택하세요."} />
+        <ScreenHeading eyebrow="실시간" title={directWithoutTransfer ? "환승 관측 구간이 없습니다" : "조회할 여행이 없습니다"} detail={directWithoutTransfer ? "직통 경로에는 환승 체크포인트가 없어 연결 이력 수집 대상이 아닙니다." : journey ? "선택한 후보에 검증된 환승 체크포인트가 없습니다." : "전국 탐색에서 실제 생성된 여행 후보를 먼저 선택하세요."} />
         <GlassCard className="stop-board">
-          <InlineNotice tone="warning" icon="map-trifold" title="DATA_GAP · 전국 여행 후보 필요">기본 고정 경로나 샘플 도착정보로 대신 표시하지 않습니다.</InlineNotice>
+          <InlineNotice tone={directWithoutTransfer ? "neutral" : "warning"} icon={directWithoutTransfer ? "minus-circle" : "map-trifold"} title={directWithoutTransfer ? "직통 · 연결 관측 비대상" : "DATA_GAP · 전국 여행 후보 필요"}>{directWithoutTransfer ? "환승 성공·실패 판정을 위한 도착 관측은 만들지 않습니다." : "기본 고정 경로나 샘플 도착정보로 대신 표시하지 않습니다."}</InlineNotice>
         </GlassCard>
         <button className="liquid-button sticky-action" type="button" onClick={onExplore}>전국 탐색으로 가기 <Icon name="arrow-right" /></button>
       </main>
@@ -73,7 +74,7 @@ function LiveScreen({ journey, connection, legs, selectedLeg, setSelectedLeg, ar
 
       {notice && <InlineNotice tone="success" icon="database" title="이력 저장">{notice}</InlineNotice>}
       <GlassCard className="stop-board">
-        <div className="stop-board-head"><div><p className="eyebrow">{leg.city} · {leg.routeNo}</p><h2>{leg.board}</h2><p>{leg.alight} 방면 · 승차 순번 {Number.isInteger(leg.nodeOrder) ? leg.nodeOrder : "DATA_GAP"}</p></div><span className="route-orb">{leg.routeNo}</span></div>
+        <div className="stop-board-head"><div><p className="eyebrow">{leg.city} · {leg.routeNo}</p><h2>{leg.board}</h2><p>{leg.alight} 방면 · {leg.transferCheckpoint ? "환승 도착 순번" : "승차 순번"} {Number.isInteger(leg.nodeOrder) ? leg.nodeOrder : "DATA_GAP"}</p></div><span className="route-orb">{leg.routeNo}</span></div>
         {loading ? <LoadingRows count={2} /> : (
           <div className="arrival-list">
             {error && <InlineNotice tone="warning" icon="warning-circle" title="실시간 데이터 없음">{error}</InlineNotice>}
@@ -101,7 +102,7 @@ function LiveScreen({ journey, connection, legs, selectedLeg, setSelectedLeg, ar
   );
 }
 
-function SimulationScreen({ journey, replayReady, connection, simulation, days, setDays, passageCoverage, mappingSummary, loading, onRun, onExplore }) {
+function SimulationScreen({ journey, replayReady, replayApplicability, connection, simulation, days, setDays, passageCoverage, mappingSummary, loading, onRun, onExplore }) {
   if (!journey) {
     return (
       <main className="screen content-screen simulation-screen">
@@ -112,36 +113,38 @@ function SimulationScreen({ journey, replayReady, connection, simulation, days, 
     );
   }
   const summary = simulation.summary || { probability: 0, successfulDays: 0, totalDays: days, weakestLeg: "집계 전", coverage: 0 };
+  const notApplicable = replayApplicability === "not_applicable";
   const allMapped = mappingSummary.total > 0 && mappingSummary.verified === mappingSummary.total;
-  const canReplay = replayReady && connection.mode === "live" && allMapped;
+  const canReplay = !notApplicable && replayReady && connection.mode === "live" && allMapped;
   return (
     <main className="screen content-screen simulation-screen">
       <ScreenHeading eyebrow="이력 재생" title="날짜별 연결 결과" detail="검증된 시간표와 저장된 차량 통과 이력으로만 판정합니다." />
       <CoverageStrip mappingSummary={mappingSummary} coverage={passageCoverage} />
       {mappingSummary.verified < mappingSummary.total && <InlineNotice tone="warning" icon="map-pin-line" title="DATA_GAP · 공식 매핑 미완료">선택 여행 {mappingSummary.total}개 구간이 모두 검증되기 전에는 날짜별 결과를 판정하지 않습니다.</InlineNotice>}
-      {!replayReady && <InlineNotice tone="warning" icon="clock" title="DATA_GAP · 실제 환승 시각 필요">후보에 검증된 시간표 출처, 도착 예정시각, 다음 출발시각, 최소 환승시간이 없습니다. 임의 시각이나 fixture 성공률을 사용하지 않습니다.</InlineNotice>}
-      {replayReady && connection.mode !== "live" && <InlineNotice tone="warning" icon="database" title="DATA_GAP · TAGO LIVE 필요">실제 차량 통과 이력이 적재된 TAGO LIVE 연결 뒤에만 재생합니다.</InlineNotice>}
+      {notApplicable && <InlineNotice tone="neutral" icon="minus-circle" title="환승 연결 시뮬레이션 비대상">이 후보는 직통 경로라 환승 연결의 성공·실패가 없습니다. 성공률을 만들지 않습니다.</InlineNotice>}
+      {!notApplicable && !replayReady && <InlineNotice tone="warning" icon="clock" title="DATA_GAP · 실제 환승 시각 필요">후보에 검증된 시간표 출처, 도착 예정시각, 다음 출발시각, 최소 환승시간이 없습니다. 임의 시각이나 fixture 성공률을 사용하지 않습니다.</InlineNotice>}
+      {!notApplicable && replayReady && connection.mode !== "live" && <InlineNotice tone="warning" icon="database" title="DATA_GAP · TAGO LIVE 필요">실제 차량 통과 이력이 적재된 TAGO LIVE 연결 뒤에만 재생합니다.</InlineNotice>}
       <GlassCard className="sim-control">
         <label>분석 기간<Segmented value={days} onChange={setDays} label="분석 기간" options={[{ value: 7, label: "7일" }, { value: 14, label: "14일" }, { value: 30, label: "30일" }]} /></label>
-        <button className="liquid-button" type="button" onClick={onRun} disabled={loading || !canReplay}>{loading ? "통과 이력 재생 중…" : "날짜별 실제 이력 재생"}<Icon name="sparkle" /></button>
+        <button className="liquid-button" type="button" onClick={onRun} disabled={loading || !canReplay}>{notApplicable ? "직통 경로 · 재생 비대상" : loading ? "통과 이력 재생 중…" : "날짜별 실제 이력 재생"}<Icon name={notApplicable ? "minus-circle" : "sparkle"} /></button>
       </GlassCard>
 
       <GlassCard className="sim-summary">
         <ProbabilityRing value={summary.probability || 0} />
-        <div><p className="eyebrow">관측 결과</p><h2>{summary.dataGap ? "자료 부족" : summary.successfulDays}<span>{summary.dataGap ? " · DATA_GAP" : ` / ${summary.totalDays}일 성공`}</span></h2><p>{summary.dataGap ? "검증된 시각과 해당 날짜 통과 이력이 모두 필요합니다." : <>결과 요약은 <strong>{summary.weakestLeg}</strong>입니다.</>}</p><div className="coverage-row"><span><Icon name="database" /> 적재 통과 이벤트</span><strong>{summary.coverage || 0}건</strong></div></div>
+        <div><p className="eyebrow">관측 결과</p><h2>{notApplicable ? "비대상" : summary.dataGap ? "자료 부족" : summary.successfulDays}<span>{notApplicable ? " · 직통" : summary.dataGap ? " · DATA_GAP" : ` / ${summary.totalDays}일 성공`}</span></h2><p>{notApplicable ? "환승 연결이 없어 성공률을 산출하지 않습니다." : summary.dataGap ? "검증된 시각과 해당 날짜 통과 이력이 모두 필요합니다." : <>결과 요약은 <strong>{summary.weakestLeg}</strong>입니다.</>}</p><div className="coverage-row"><span><Icon name="database" /> 적재 통과 이벤트</span><strong>{summary.coverage || 0}건</strong></div></div>
       </GlassCard>
 
       <section className="daily-results">
-        <div className="card-title"><div><p className="eyebrow">날짜별</p><h3>연결 성공 여부</h3></div><SourceBadge mode={simulation.mode || "offline"} label={simulation.mode === "live" ? "실제 통과 이력" : "DATA_GAP"} /></div>
+        <div className="card-title"><div><p className="eyebrow">날짜별</p><h3>연결 성공 여부</h3></div><SourceBadge mode={simulation.mode || "offline"} label={notApplicable ? "비대상" : simulation.mode === "live" ? "실제 통과 이력" : "DATA_GAP"} /></div>
         {simulation.perDay?.map((day) => (
           <article className="day-row" key={day.date}>
             <div className={`day-state ${day.status === "gap" ? "gap" : day.success ? "success" : "fail"}`}><Icon name={day.status === "gap" ? "question" : day.success ? "check" : "x"} /></div>
-            <div className="day-copy"><strong>{day.date}</strong><small>{day.status === "gap" ? "DATA_GAP · 관측 부족" : day.success ? "모든 환승 성공" : (day.reasons?.[0] || "환승 실패")}</small></div>
+            <div className="day-copy"><strong>{day.date}</strong><small>{notApplicable ? "비대상 · 환승 없음" : day.status === "gap" ? "DATA_GAP · 관측 부족" : day.success ? "모든 환승 성공" : (day.reasons?.[0] || "환승 실패")}</small></div>
             <div className="day-score"><strong>{Number.isFinite(day.probability) ? `${day.probability}%` : "—"}</strong><span><i style={{ width: `${Number.isFinite(day.probability) ? day.probability : 0}%` }} /></span></div>
           </article>
         ))}
       </section>
-      <InlineNotice tone="neutral" icon="flask" title="결과 해석">TAGO는 과거 운행 이력을 소급 제공하지 않습니다. 연결 이후 적재한 실제 차량 통과와 검증된 시간표 시각이 함께 있는 날짜만 성공·실패로 판정하며, 나머지는 DATA_GAP입니다.</InlineNotice>
+      <InlineNotice tone="neutral" icon="flask" title="결과 해석">{notApplicable ? "직통 경로는 환승 연결 판정 대상이 아니며 성공·실패 또는 성공률을 만들지 않습니다." : "TAGO는 과거 운행 이력을 소급 제공하지 않습니다. 연결 이후 적재한 실제 차량 통과와 검증된 시간표 시각이 함께 있는 날짜만 성공·실패로 판정하며, 나머지는 DATA_GAP입니다."}</InlineNotice>
     </main>
   );
 }
@@ -541,14 +544,14 @@ function SettingsSheet({ open, onClose, apiBase, setApiBase, connection, journey
           </section>
         ) : <section className="mapping-settings" aria-labelledby="mapping-title">
           <div className="mapping-settings-head"><div><p className="eyebrow">공식 식별자</p><h3 id="mapping-title">노선 매핑</h3></div><strong>{mappingSummary.verified}/{mappingSummary.total}</strong></div>
-          <p className="mapping-help">선택한 전국 여행의 승차 정류장 cityCode · nodeId · routeId만 로컬에 저장합니다. 서버가 해당 노선의 경유 정류장으로 검증하지 못하면 DATA_GAP입니다.</p>
+          <p className="mapping-help">실시간 승차 정류장과 환승 재생 체크포인트를 구분해 검증합니다. cityCode · nodeId · routeId만 로컬에 저장하며, 서버가 공식 경유 정류장으로 확인하지 못하면 DATA_GAP입니다.</p>
           <div className="mapping-leg-list">
             {legs.map((leg, index) => {
               const mapping = mappings[leg.id] || {};
               const complete = Boolean(mapping.cityCode && mapping.nodeId && mapping.routeId);
               return (
                 <article className="mapping-leg" key={leg.id}>
-                    <div className="mapping-leg-title"><span>{index + 1}</span><div><strong>{leg.city} {leg.routeNo}</strong><small>{leg.board} → {leg.alight} · 순번 {Number.isInteger(leg.nodeOrder) ? leg.nodeOrder : "DATA_GAP"}</small></div><MappingBadge state={mapping.state} /></div>
+                    <div className="mapping-leg-title"><span>{index + 1}</span><div><strong>{leg.city} {leg.routeNo}</strong><small>{leg.transferCheckpoint ? "환승 재생 체크포인트" : "실시간 승차"} · {leg.board} → {leg.alight} · 순번 {Number.isInteger(leg.nodeOrder) ? leg.nodeOrder : "DATA_GAP"}</small></div><MappingBadge state={mapping.state} /></div>
                   <div className="mapping-fields">
                     <label><span>cityCode</span><input value={mapping.cityCode || ""} onChange={(event) => onMappingChange(leg.id, "cityCode", event.target.value)} inputMode="numeric" autoComplete="off" aria-label={`${leg.city} ${leg.routeNo} cityCode`} /></label>
                     <label><span>nodeId</span><input value={mapping.nodeId || ""} onChange={(event) => onMappingChange(leg.id, "nodeId", event.target.value)} autoCapitalize="characters" autoComplete="off" aria-label={`${leg.city} ${leg.routeNo} nodeId`} /></label>

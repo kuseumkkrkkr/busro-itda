@@ -9,9 +9,11 @@ ordered route topology.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from collections import Counter
+from collections import Counter, OrderedDict
+import copy
+import heapq
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import csv
 import hashlib
 import io
@@ -20,6 +22,7 @@ from pathlib import Path
 import re
 import sqlite3
 import threading
+import time
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import urlparse
 
@@ -60,9 +63,30 @@ MAX_GTFS_EVIDENCE_TRIPS = 100
 MAX_GTFS_EVIDENCE_STOP_TIMES = 10_000
 MAX_GTFS_PATTERNS = 500_000
 MAX_GTFS_STAGE_BYTES = 64 * 1024 * 1024 * 1024
+MAX_GTFS_SCHEDULE_EXPANSIONS = 20_000
+MAX_GTFS_SCHEDULE_DEPARTURES_PER_STOP = 256
+MAX_GTFS_SCHEDULE_TRIP_STOPS = 512
+MAX_GTFS_SCHEDULE_HORIZON_SECONDS = 24 * 60 * 60
+MAX_GTFS_SCHEDULE_PARALLEL_SEARCHES = 4
+MAX_GTFS_SCHEDULE_CACHED_TRIPS = 4_096
+MAX_GTFS_SCHEDULE_CACHED_STOP_ROWS = 250_000
+MAX_GTFS_SCHEDULE_ACTIVE_SERVICE_ROWS = 750_000
+GTFS_SCHEDULE_WALL_CLOCK_SECONDS = 12.0
+GTFS_SCHEDULE_CACHE_TTL_SECONDS = 30.0
+MAX_GTFS_SCHEDULE_CACHE_ENTRIES = 32
+GTFS_SCHEDULE_ADMISSION_TIMEOUT_SECONDS = 0.25
+GTFS_TRANSFER_BUFFER_SECONDS = 5 * 60
+SEOUL_TIMEZONE = timezone(timedelta(hours=9), name="Asia/Seoul")
 _CODE = re.compile(r"^[0-9A-Za-z_.:-]{1,96}$")
 _TRANSPORT_IDENTIFIER = re.compile(r"^[0-9A-Za-z가-힣_.:-]{1,96}$")
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+_SCHEDULE_COORDINATOR_LOCK = threading.Lock()
+_SCHEDULE_PROCESS_SLOTS = threading.BoundedSemaphore(
+    MAX_GTFS_SCHEDULE_PARALLEL_SEARCHES
+)
+_SCHEDULE_CACHE: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+_SCHEDULE_FLIGHTS: dict[str, dict[str, Any]] = {}
 
 
 class CatalogError(ValueError):
@@ -279,6 +303,7 @@ class NetworkCatalog:
         self._cache_lock = threading.RLock()
         self._snapshot_cache: CatalogSnapshot | None = None
         self._planning_cache: CatalogSnapshot | None = None
+        self._schedule_slots = _SCHEDULE_PROCESS_SLOTS
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -470,6 +495,8 @@ class NetworkCatalog:
                       REFERENCES gtfs_services(feed_id,raw_service_id) ON DELETE CASCADE,
                     CHECK(exception_type IN (1,2))
                 );
+                CREATE INDEX IF NOT EXISTS idx_gtfs_calendar_dates_day
+                    ON gtfs_calendar_dates(feed_id,service_date,raw_service_id);
                 CREATE TABLE IF NOT EXISTS gtfs_patterns (
                     feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id) ON DELETE CASCADE,
                     pattern_id TEXT NOT NULL,
@@ -533,6 +560,12 @@ class NetworkCatalog:
                     ON gtfs_trips(feed_id,pattern_id,raw_trip_id);
                 CREATE INDEX IF NOT EXISTS idx_gtfs_stop_times_stop
                     ON gtfs_stop_times(feed_id,raw_stop_id,raw_trip_id);
+                CREATE INDEX IF NOT EXISTS idx_gtfs_stop_times_departure
+                    ON gtfs_stop_times(
+                      feed_id,raw_stop_id,departure_seconds,raw_trip_id,stop_sequence
+                    );
+                CREATE INDEX IF NOT EXISTS idx_gtfs_trips_service_pattern
+                    ON gtfs_trips(feed_id,raw_service_id,pattern_id,raw_trip_id);
                 CREATE TABLE IF NOT EXISTS topology_targets (
                     provider TEXT NOT NULL,
                     city_code TEXT NOT NULL,
@@ -1778,6 +1811,918 @@ class NetworkCatalog:
             "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE",
             "eligible_for_success_rate": False,
             "success_probability": None,
+        }
+
+    @staticmethod
+    def _gtfs_operating_predicate(weekday_column: str) -> str:
+        if weekday_column not in {
+            "monday", "tuesday", "wednesday", "thursday",
+            "friday", "saturday", "sunday",
+        }:
+            raise CatalogValidationError("service_date weekday is invalid")
+        return (
+            "CASE WHEN cd.exception_type IS NOT NULL THEN cd.exception_type=1 "
+            f"ELSE (s.start_date<=? AND s.end_date>=? AND s.{weekday_column}=1) END"
+        )
+
+    def gtfs_exact_stop_time_record(
+        self,
+        *,
+        provider: str,
+        service_date: str,
+        graph_route_id: str,
+        node_id: str,
+        node_order: int,
+        trip_namespace_id: str,
+        expected_feed_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Read one exact active-feed trip/route/stop/date record.
+
+        This avoids the evidence-list LIMIT used by human-facing inspection.
+        Every identifier remains in the provider-owned GTFS namespace.
+        """
+        provider_id = _safe_code(provider, "provider")
+        day = _source_date(service_date)
+        route_id = _safe_transport_identifier(graph_route_id, "graph_route_id")
+        stop_id = _safe_transport_identifier(node_id, "node_id")
+        trip_id = _safe_transport_identifier(trip_namespace_id, "trip_namespace_id")
+        pinned_feed_id = (
+            _safe_code(expected_feed_id, "expected_feed_id")
+            if expected_feed_id is not None
+            else None
+        )
+        try:
+            sequence = int(node_order)
+        except (TypeError, ValueError) as exc:
+            raise CatalogValidationError("node_order must be an integer") from exc
+        if not 0 <= sequence <= 100_000:
+            raise CatalogValidationError("node_order is outside its range")
+        calendar_day = date.fromisoformat(day)
+        weekday = (
+            "monday", "tuesday", "wednesday", "thursday",
+            "friday", "saturday", "sunday",
+        )[calendar_day.weekday()]
+        predicate = self._gtfs_operating_predicate(weekday)
+        with self.connect() as connection:
+            connection.execute("BEGIN")
+            active_feed = connection.execute(
+                "SELECT feed_id FROM active_gtfs_feeds WHERE provider=?",
+                (provider_id,),
+            ).fetchone()
+            if active_feed is None:
+                return {
+                    "data_gap": True,
+                    "reason": "ACTIVE_GTFS_FEED_REQUIRED",
+                    "provider": provider_id,
+                    "service_date": day,
+                    "graph_route_id": route_id,
+                    "node_id": stop_id,
+                    "node_order": sequence,
+                    "trip_id": trip_id,
+                }
+            if pinned_feed_id is not None and active_feed["feed_id"] != pinned_feed_id:
+                return {
+                    "data_gap": True,
+                    "reason": "ACTIVE_GTFS_FEED_VERSION_MISMATCH",
+                    "provider": provider_id,
+                    "expected_feed_id": pinned_feed_id,
+                    "active_feed_id": active_feed["feed_id"],
+                    "service_date": day,
+                    "graph_route_id": route_id,
+                    "node_id": stop_id,
+                    "node_order": sequence,
+                    "trip_id": trip_id,
+                }
+            row = connection.execute(
+                "SELECT f.feed_id,f.source_url,f.source_date,f.sha256,f.imported_at,"
+                "p.graph_city_code,p.graph_route_id,t.trip_namespace_id,"
+                "st.stop_sequence,st.arrival_time,st.arrival_seconds,"
+                "st.departure_time,st.departure_seconds,st.pickup_type,st.drop_off_type,"
+                "gs.node_id,gs.stop_name,gs.latitude,gs.longitude "
+                "FROM active_gtfs_feeds a "
+                "JOIN gtfs_feed_versions f ON f.feed_id=a.feed_id "
+                "JOIN gtfs_trips t ON t.feed_id=f.feed_id AND t.trip_namespace_id=? "
+                "JOIN gtfs_patterns p ON p.feed_id=t.feed_id AND p.pattern_id=t.pattern_id "
+                "JOIN gtfs_services s ON s.feed_id=t.feed_id AND s.raw_service_id=t.raw_service_id "
+                "LEFT JOIN gtfs_calendar_dates cd ON cd.feed_id=s.feed_id "
+                "AND cd.raw_service_id=s.raw_service_id AND cd.service_date=? "
+                "JOIN gtfs_stop_times st ON st.feed_id=t.feed_id "
+                "AND st.raw_trip_id=t.raw_trip_id AND st.stop_sequence=? "
+                "JOIN gtfs_stops gs ON gs.feed_id=st.feed_id AND gs.raw_stop_id=st.raw_stop_id "
+                "WHERE a.provider=? AND p.graph_route_id=? AND gs.node_id=? AND "
+                + predicate,
+                (trip_id, day, sequence, provider_id, route_id, stop_id, day, day),
+            ).fetchone()
+        if row is None:
+            return {
+                "data_gap": True,
+                "reason": "EXACT_ACTIVE_GTFS_STOP_TIME_REQUIRED",
+                "provider": provider_id,
+                "service_date": day,
+                "graph_route_id": route_id,
+                "node_id": stop_id,
+                "node_order": sequence,
+                "trip_id": trip_id,
+            }
+        return {
+            "data_gap": False,
+            "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE",
+            "provider": provider_id,
+            "feed": {
+                "feed_id": row["feed_id"],
+                "source_date": row["source_date"],
+                "sha256": row["sha256"],
+                "imported_at": row["imported_at"],
+            },
+            "service_date": day,
+            "graph_city_code": row["graph_city_code"],
+            "graph_route_id": row["graph_route_id"],
+            "trip_id": row["trip_namespace_id"],
+            "node_id": row["node_id"],
+            "node_order": int(row["stop_sequence"]),
+            "stop_name": row["stop_name"],
+            "latitude": row["latitude"],
+            "longitude": row["longitude"],
+            "arrival_time": row["arrival_time"],
+            "arrival_seconds": row["arrival_seconds"],
+            "departure_time": row["departure_time"],
+            "departure_seconds": row["departure_seconds"],
+            "pickup_type": row["pickup_type"],
+            "drop_off_type": row["drop_off_type"],
+        }
+
+    def plan_gtfs_schedule(
+        self,
+        *,
+        provider: str,
+        schedule_source_id: str,
+        origin_node_id: str,
+        destination_node_id: str,
+        service_date: str,
+        departure_time: str,
+    ) -> dict[str, Any]:
+        """Singleflight and briefly cache one exact schedule search."""
+        provider_id = _safe_code(provider, "provider")
+        source_id = _safe_code(schedule_source_id, "schedule_source_id")
+        origin_id = _safe_transport_identifier(origin_node_id, "origin_node_id")
+        destination_id = _safe_transport_identifier(
+            destination_node_id, "destination_node_id"
+        )
+        day = _source_date(service_date)
+        clock = str(departure_time or "")
+        if re.fullmatch(r"([01][0-9]|2[0-3]):([0-5][0-9])", clock) is None:
+            raise CatalogValidationError("departure_time must use HH:MM")
+        with self.connect() as connection:
+            revision_row = connection.execute(
+                "SELECT value FROM catalog_meta WHERE key='revision'"
+            ).fetchone()
+            active_row = connection.execute(
+                "SELECT feed_id FROM active_gtfs_feeds WHERE provider=?",
+                (provider_id,),
+            ).fetchone()
+        cache_key = hashlib.sha256(
+            _canonical(
+                [
+                    str(self.path.resolve()),
+                    int(revision_row[0] if revision_row else 0),
+                    active_row[0] if active_row else None,
+                    provider_id, source_id, origin_id, destination_id, day, clock,
+                ]
+            ).encode("utf-8")
+        ).hexdigest()
+        now = time.monotonic()
+        with _SCHEDULE_COORDINATOR_LOCK:
+            stale = [
+                key for key, (expires, _value) in _SCHEDULE_CACHE.items()
+                if expires <= now
+            ]
+            for key in stale:
+                _SCHEDULE_CACHE.pop(key, None)
+            cached = _SCHEDULE_CACHE.get(cache_key)
+            if cached is not None:
+                _SCHEDULE_CACHE.move_to_end(cache_key)
+                return copy.deepcopy(cached[1])
+            flight = _SCHEDULE_FLIGHTS.get(cache_key)
+            leader = flight is None
+            if leader:
+                flight = {
+                    "event": threading.Event(), "value": None, "error": None
+                }
+                _SCHEDULE_FLIGHTS[cache_key] = flight
+
+        assert flight is not None
+        if not leader:
+            if not flight["event"].wait(GTFS_SCHEDULE_WALL_CLOCK_SECONDS + 1.0):
+                return {
+                    "status": "DATA_GAP",
+                    "reason": "SCHEDULE_BUSY",
+                    "schedule": {
+                        "status": "DATA_GAP", "reason": "SCHEDULE_BUSY",
+                        "service_date": day, "departure_time": clock,
+                        "provider": provider_id, "basis": None, "feed_id": None,
+                        "timezone": "Asia/Seoul",
+                    },
+                    "graph": {
+                        "algorithm": "bounded_time_dependent_dijkstra",
+                        "search_complete": False,
+                    },
+                    "alternatives": [],
+                }
+            if flight["error"] is not None:
+                raise flight["error"]
+            return copy.deepcopy(flight["value"])
+
+        try:
+            result = self._plan_gtfs_schedule_uncached(
+                provider=provider_id,
+                schedule_source_id=source_id,
+                origin_node_id=origin_id,
+                destination_node_id=destination_id,
+                service_date=day,
+                departure_time=clock,
+            )
+            flight["value"] = copy.deepcopy(result)
+            if result.get("reason") != "SCHEDULE_BUSY":
+                with _SCHEDULE_COORDINATOR_LOCK:
+                    _SCHEDULE_CACHE[cache_key] = (
+                        time.monotonic() + GTFS_SCHEDULE_CACHE_TTL_SECONDS,
+                        copy.deepcopy(result),
+                    )
+                    _SCHEDULE_CACHE.move_to_end(cache_key)
+                    while len(_SCHEDULE_CACHE) > MAX_GTFS_SCHEDULE_CACHE_ENTRIES:
+                        _SCHEDULE_CACHE.popitem(last=False)
+            return result
+        except BaseException as exc:
+            flight["error"] = exc
+            raise
+        finally:
+            flight["event"].set()
+            with _SCHEDULE_COORDINATOR_LOCK:
+                if _SCHEDULE_FLIGHTS.get(cache_key) is flight:
+                    del _SCHEDULE_FLIGHTS[cache_key]
+
+    def _plan_gtfs_schedule_uncached(
+        self,
+        *,
+        provider: str,
+        schedule_source_id: str,
+        origin_node_id: str,
+        destination_node_id: str,
+        service_date: str,
+        departure_time: str,
+    ) -> dict[str, Any]:
+        """Bounded earliest-arrival Dijkstra over one active official GTFS feed.
+
+        ``service_date`` and ``departure_time`` are a civil local date/time.
+        The previous GTFS service day's 24:xx-47:xx records and the selected
+        day's 00:xx records therefore compete on one absolute timeline.  No
+        TAGO, name, or geographic stop join is attempted.
+        """
+        provider_id = _safe_code(provider, "provider")
+        source_id = _safe_code(schedule_source_id, "schedule_source_id")
+        origin_id = _safe_transport_identifier(origin_node_id, "origin_node_id")
+        destination_id = _safe_transport_identifier(
+            destination_node_id, "destination_node_id"
+        )
+        if origin_id == destination_id:
+            raise CatalogValidationError("origin and destination must differ")
+        civil_day_text = _source_date(service_date)
+        civil_day = date.fromisoformat(civil_day_text)
+        match = re.fullmatch(r"([01][0-9]|2[0-3]):([0-5][0-9])", str(departure_time or ""))
+        if match is None:
+            raise CatalogValidationError("departure_time must use HH:MM")
+        requested_seconds = int(match.group(1)) * 3600 + int(match.group(2)) * 60
+        horizon_end = requested_seconds + MAX_GTFS_SCHEDULE_HORIZON_SECONDS
+        service_days = tuple(civil_day + timedelta(days=offset) for offset in (-1, 0, 1))
+
+        admitted = self._schedule_slots.acquire(
+            timeout=GTFS_SCHEDULE_ADMISSION_TIMEOUT_SECONDS
+        )
+        if not admitted:
+            return {
+                "status": "DATA_GAP",
+                "reason": "SCHEDULE_BUSY",
+                "schedule": {
+                    "status": "DATA_GAP", "reason": "SCHEDULE_BUSY",
+                    "service_date": civil_day_text, "departure_time": departure_time,
+                    "provider": provider_id, "basis": None, "feed_id": None,
+                    "timezone": "Asia/Seoul",
+                },
+                "graph": {
+                    "algorithm": "bounded_time_dependent_dijkstra",
+                    "search_complete": False,
+                },
+                "alternatives": [],
+            }
+        deadline_at = time.monotonic() + GTFS_SCHEDULE_WALL_CLOCK_SECONDS
+        deadline_hit = threading.Event()
+        feed_id_for_gap: str | None = None
+        try:
+            with self.connect() as connection:
+                def abort_long_sql() -> int:
+                    if time.monotonic() >= deadline_at:
+                        deadline_hit.set()
+                        return 1
+                    return 0
+
+                connection.set_progress_handler(abort_long_sql, 10_000)
+                connection.execute("BEGIN")
+                feed = connection.execute(
+                    "SELECT f.* FROM active_gtfs_feeds a "
+                    "JOIN gtfs_feed_versions f ON f.feed_id=a.feed_id WHERE a.provider=?",
+                    (provider_id,),
+                ).fetchone()
+                if feed is None:
+                    return self._gtfs_schedule_gap(
+                        provider_id, civil_day_text, departure_time,
+                        "ACTIVE_GTFS_FEED_REQUIRED",
+                    )
+                feed_id = str(feed["feed_id"])
+                feed_id_for_gap = feed_id
+                endpoints = {}
+                for key, node_id in (("origin", origin_id), ("destination", destination_id)):
+                    rows = connection.execute(
+                        "SELECT raw_stop_id,node_id,stop_name,latitude,longitude "
+                        "FROM gtfs_stops WHERE feed_id=? AND node_id=? LIMIT 2",
+                        (feed_id, node_id),
+                    ).fetchall()
+                    if len(rows) != 1:
+                        return self._gtfs_schedule_gap(
+                            provider_id, civil_day_text, departure_time,
+                            "STOP_NOT_IN_ACTIVE_GTFS_FEED", feed_id=feed_id,
+                        )
+                    endpoints[key] = dict(rows[0])
+
+                weekday_names = (
+                    "monday", "tuesday", "wednesday", "thursday",
+                    "friday", "saturday", "sunday",
+                )
+                # Resolve each civil-adjacent service day once. Exceptions
+                # override the base weekday calendar before any stop search.
+                connection.execute(
+                    "CREATE TEMP TABLE active_schedule_services("
+                    "service_date TEXT NOT NULL,raw_service_id TEXT NOT NULL,"
+                    "PRIMARY KEY(service_date,raw_service_id)) WITHOUT ROWID"
+                )
+                active_service_rows = 0
+                for operating_day in service_days:
+                    if time.monotonic() >= deadline_at:
+                        deadline_hit.set()
+                        break
+                    day_text = operating_day.isoformat()
+                    predicate = self._gtfs_operating_predicate(
+                        weekday_names[operating_day.weekday()]
+                    )
+                    connection.execute(
+                        "INSERT INTO temp.active_schedule_services "
+                        "SELECT ?,s.raw_service_id FROM gtfs_services s "
+                        "LEFT JOIN gtfs_calendar_dates cd ON cd.feed_id=s.feed_id "
+                        "AND cd.raw_service_id=s.raw_service_id AND cd.service_date=? "
+                        "WHERE s.feed_id=? AND " + predicate,
+                        (day_text, day_text, feed_id, day_text, day_text),
+                    )
+                    active_service_rows = int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM temp.active_schedule_services"
+                        ).fetchone()[0]
+                    )
+                    if active_service_rows > MAX_GTFS_SCHEDULE_ACTIVE_SERVICE_ROWS:
+                        gap = self._gtfs_schedule_gap(
+                            provider_id, civil_day_text, departure_time,
+                            "ACTIVE_SERVICE_SET_LIMIT_REACHED", feed_id=feed_id,
+                        )
+                        gap["graph"]["active_service_rows"] = active_service_rows
+                        return gap
+                if deadline_hit.is_set():
+                    return self._gtfs_schedule_gap(
+                        provider_id, civil_day_text, departure_time,
+                        "SCHEDULE_DEADLINE_REACHED", feed_id=feed_id,
+                    )
+                trip_cache: dict[str, tuple[dict[str, Any], ...] | None] = {}
+                best: dict[str, int] = {
+                    str(endpoints["origin"]["raw_stop_id"]): requested_seconds
+                }
+                previous: dict[str, tuple[str, dict[str, Any]]] = {}
+                queue: list[tuple[int, str]] = [
+                    (requested_seconds, str(endpoints["origin"]["raw_stop_id"]))
+                ]
+                goal_raw = str(endpoints["destination"]["raw_stop_id"])
+                expansions = 0
+                departures_scanned = 0
+                timetable_rows_skipped = 0
+                trip_stop_limit_hits = 0
+                invalid_trip_time_hits = 0
+                boarding_limit_hit = False
+                cache_limit_hit = False
+                cached_stop_rows = 0
+                goal_finalized = False
+
+                while queue and expansions < MAX_GTFS_SCHEDULE_EXPANSIONS:
+                    if time.monotonic() >= deadline_at:
+                        deadline_hit.set()
+                        break
+                    if cache_limit_hit:
+                        break
+                    arrival_absolute, raw_stop_id = heapq.heappop(queue)
+                    if best.get(raw_stop_id) != arrival_absolute:
+                        continue
+                    expansions += 1
+                    if raw_stop_id == goal_raw:
+                        goal_finalized = True
+                        break
+                    ready_absolute = arrival_absolute + (
+                        GTFS_TRANSFER_BUFFER_SECONDS if raw_stop_id in previous else 0
+                    )
+                    boarding_rows: list[dict[str, Any]] = []
+                    for operating_day in service_days:
+                        if time.monotonic() >= deadline_at:
+                            deadline_hit.set()
+                            break
+                        offset_seconds = (operating_day - civil_day).days * 86_400
+                        lower = max(0, ready_absolute - offset_seconds)
+                        upper = min(172_799, horizon_end - offset_seconds)
+                        if lower > upper:
+                            continue
+                        day_text = operating_day.isoformat()
+                        rows = connection.execute(
+                            "SELECT st.raw_trip_id,st.stop_sequence,st.departure_time,"
+                            "st.departure_seconds,t.trip_namespace_id,p.graph_city_code,"
+                            "p.graph_route_id,r.route_short_name,r.route_long_name "
+                            "FROM gtfs_stop_times st "
+                            "JOIN gtfs_trips t ON t.feed_id=st.feed_id "
+                            "AND t.raw_trip_id=st.raw_trip_id AND t.pattern_id IS NOT NULL "
+                            "JOIN temp.active_schedule_services active_service "
+                            "ON active_service.service_date=? "
+                            "AND active_service.raw_service_id=t.raw_service_id "
+                            "JOIN gtfs_patterns p ON p.feed_id=t.feed_id AND p.pattern_id=t.pattern_id "
+                            "JOIN gtfs_routes r ON r.feed_id=t.feed_id AND r.raw_route_id=t.raw_route_id "
+                            "WHERE st.feed_id=? AND st.raw_stop_id=? "
+                            "AND st.departure_seconds BETWEEN ? AND ? "
+                            "AND COALESCE(st.pickup_type,0)=0 "
+                            "ORDER BY st.departure_seconds,st.raw_trip_id,st.stop_sequence LIMIT ?",
+                            (
+                                day_text, feed_id, raw_stop_id, lower, upper,
+                                MAX_GTFS_SCHEDULE_DEPARTURES_PER_STOP + 1,
+                            ),
+                        ).fetchall()
+                        if len(rows) > MAX_GTFS_SCHEDULE_DEPARTURES_PER_STOP:
+                            boarding_limit_hit = True
+                            rows = rows[:MAX_GTFS_SCHEDULE_DEPARTURES_PER_STOP]
+                        for row in rows:
+                            item = dict(row)
+                            item["gtfs_service_date"] = day_text
+                            item["day_offset_seconds"] = offset_seconds
+                            item["departure_absolute"] = (
+                                int(item["departure_seconds"]) + offset_seconds
+                            )
+                            boarding_rows.append(item)
+                    boarding_rows.sort(
+                        key=lambda item: (
+                            item["departure_absolute"], item["trip_namespace_id"],
+                            item["stop_sequence"],
+                        )
+                    )
+                    if len(boarding_rows) > MAX_GTFS_SCHEDULE_DEPARTURES_PER_STOP:
+                        boarding_limit_hit = True
+                        boarding_rows = boarding_rows[:MAX_GTFS_SCHEDULE_DEPARTURES_PER_STOP]
+                    departures_scanned += len(boarding_rows)
+
+                    for board in boarding_rows:
+                        if time.monotonic() >= deadline_at:
+                            deadline_hit.set()
+                            break
+                        raw_trip_id = str(board["raw_trip_id"])
+                        if raw_trip_id not in trip_cache:
+                            if len(trip_cache) >= MAX_GTFS_SCHEDULE_CACHED_TRIPS:
+                                cache_limit_hit = True
+                                break
+                            stop_rows = connection.execute(
+                                "SELECT st.stop_sequence,st.raw_stop_id,st.arrival_time,"
+                                "st.arrival_seconds,st.departure_time,st.departure_seconds,"
+                                "st.pickup_type,st.drop_off_type,s.node_id,s.stop_name,"
+                                "s.latitude,s.longitude "
+                                "FROM gtfs_stop_times st JOIN gtfs_stops s "
+                                "ON s.feed_id=st.feed_id AND s.raw_stop_id=st.raw_stop_id "
+                                "WHERE st.feed_id=? AND st.raw_trip_id=? "
+                                "ORDER BY st.stop_sequence LIMIT ?",
+                                (feed_id, raw_trip_id, MAX_GTFS_SCHEDULE_TRIP_STOPS + 1),
+                            ).fetchall()
+                            if len(stop_rows) > MAX_GTFS_SCHEDULE_TRIP_STOPS:
+                                trip_cache[raw_trip_id] = None
+                                trip_stop_limit_hits += 1
+                            else:
+                                previous_departure: int | None = None
+                                monotonic = True
+                                for stop_row in stop_rows:
+                                    arrival_value = stop_row["arrival_seconds"]
+                                    departure_value = stop_row["departure_seconds"]
+                                    if arrival_value is None or departure_value is None:
+                                        monotonic = False
+                                        break
+                                    arrival_value = int(arrival_value)
+                                    departure_value = int(departure_value)
+                                    if (
+                                        arrival_value > departure_value
+                                        or (
+                                            previous_departure is not None
+                                            and arrival_value < previous_departure
+                                        )
+                                    ):
+                                        monotonic = False
+                                        break
+                                    previous_departure = departure_value
+                                if not monotonic:
+                                    trip_cache[raw_trip_id] = None
+                                    invalid_trip_time_hits += 1
+                                    continue
+                                if (
+                                    cached_stop_rows + len(stop_rows)
+                                    > MAX_GTFS_SCHEDULE_CACHED_STOP_ROWS
+                                ):
+                                    cache_limit_hit = True
+                                    trip_cache[raw_trip_id] = None
+                                    break
+                                trip_cache[raw_trip_id] = tuple(dict(row) for row in stop_rows)
+                                cached_stop_rows += len(stop_rows)
+                        trip_rows = trip_cache[raw_trip_id]
+                        if trip_rows is None:
+                            continue
+                        board_sequence = int(board["stop_sequence"])
+                        board_absolute = int(board["departure_absolute"])
+                        for downstream in trip_rows:
+                            if time.monotonic() >= deadline_at:
+                                deadline_hit.set()
+                                break
+                            sequence = int(downstream["stop_sequence"])
+                            if sequence <= board_sequence:
+                                continue
+                            arrival_seconds = downstream.get("arrival_seconds")
+                            if arrival_seconds is None or downstream.get("drop_off_type") not in (None, 0):
+                                continue
+                            downstream_absolute = (
+                                int(arrival_seconds) + int(board["day_offset_seconds"])
+                            )
+                            if downstream_absolute < board_absolute or downstream_absolute > horizon_end:
+                                timetable_rows_skipped += 1
+                                continue
+                            target_raw = str(downstream["raw_stop_id"])
+                            if downstream_absolute >= best.get(target_raw, horizon_end + 1):
+                                continue
+                            best[target_raw] = downstream_absolute
+                            previous[target_raw] = (
+                                raw_stop_id,
+                                {
+                                    "raw_trip_id": raw_trip_id,
+                                    "trip_id": board["trip_namespace_id"],
+                                    "route_id": board["graph_route_id"],
+                                    "city_code": board["graph_city_code"],
+                                    "route_no": board["route_short_name"] or board["route_long_name"] or board["graph_route_id"],
+                                    "gtfs_service_date": board["gtfs_service_date"],
+                                    "day_offset_seconds": board["day_offset_seconds"],
+                                    "board_sequence": board_sequence,
+                                    "alight_sequence": sequence,
+                                    "departure_time": board["departure_time"],
+                                    "departure_seconds": board["departure_seconds"],
+                                    "departure_absolute": board_absolute,
+                                    "arrival_time": downstream["arrival_time"],
+                                    "arrival_seconds": arrival_seconds,
+                                    "arrival_absolute": downstream_absolute,
+                                },
+                            )
+                            heapq.heappush(queue, (downstream_absolute, target_raw))
+
+                search_bound_hit = (
+                    boarding_limit_hit
+                    or cache_limit_hit
+                    or trip_stop_limit_hits > 0
+                    or invalid_trip_time_hits > 0
+                )
+                if not goal_finalized or search_bound_hit:
+                    detail = (
+                        "SCHEDULE_DEADLINE_REACHED"
+                        if deadline_hit.is_set()
+                        else "SEARCH_EXPANSION_LIMIT_REACHED"
+                        if queue and expansions >= MAX_GTFS_SCHEDULE_EXPANSIONS
+                        else "SCHEDULE_SEARCH_BOUND_REACHED"
+                        if search_bound_hit
+                        else "NO_OPERATING_GTFS_PATH_AT_REQUESTED_TIME"
+                    )
+                    gap = self._gtfs_schedule_gap(
+                        provider_id, civil_day_text, departure_time,
+                        detail, feed_id=feed_id,
+                    )
+                    gap["reason"] = "SCHEDULE_DATA_GAP"
+                    gap["schedule"]["reason"] = "SCHEDULE_DATA_GAP"
+                    gap["schedule"]["detail_reason"] = detail
+                    gap["graph"].update(
+                        {
+                            "expanded_stops": expansions,
+                            "departures_scanned": departures_scanned,
+                            "boarding_limit_hit": boarding_limit_hit,
+                            "trip_stop_limit_hits": trip_stop_limit_hits,
+                            "invalid_trip_time_hits": invalid_trip_time_hits,
+                            "cache_limit_hit": cache_limit_hit,
+                            "search_complete": (
+                                detail == "NO_OPERATING_GTFS_PATH_AT_REQUESTED_TIME"
+                            ),
+                        }
+                    )
+                    return gap
+
+                rides_reversed: list[dict[str, Any]] = []
+                cursor = goal_raw
+                origin_raw = str(endpoints["origin"]["raw_stop_id"])
+                while cursor != origin_raw:
+                    parent = previous.get(cursor)
+                    if parent is None:
+                        return self._gtfs_schedule_gap(
+                            provider_id, civil_day_text, departure_time,
+                            "SCHEDULE_PREDECESSOR_DATA_GAP", feed_id=feed_id,
+                        )
+                    cursor, ride = parent
+                    rides_reversed.append(ride)
+                rides = list(reversed(rides_reversed))
+                candidate = self._gtfs_schedule_candidate(
+                    rides=rides,
+                    trip_cache=trip_cache,
+                    civil_day=civil_day,
+                    requested_seconds=requested_seconds,
+                    feed_id=feed_id,
+                    provider=provider_id,
+                    schedule_source_id=source_id,
+                )
+                return {
+                    "status": "READY",
+                    "reason": None,
+                    "schedule": {
+                        "status": "READY", "reason": None,
+                        "service_date": civil_day_text,
+                        "departure_time": departure_time,
+                        "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE",
+                        "provider": provider_id,
+                        "feed_id": feed_id,
+                        "source_date": feed["source_date"],
+                        "timezone": "Asia/Seoul",
+                        "actual_operation_observed": False,
+                        "limitations": [
+                            "CALENDAR_TXT_REQUIRED",
+                            "CALENDAR_DATES_ONLY_FEED_UNSUPPORTED",
+                            "TRANSFERS_TXT_NOT_INGESTED",
+                            "WALKING_TRANSFER_NOT_IN_SCHEDULE_SEARCH",
+                        ],
+                    },
+                    "graph": {
+                        "algorithm": "bounded_time_dependent_dijkstra",
+                        "time_axis": "civil_local_absolute_seconds",
+                        "service_days_considered": [item.isoformat() for item in service_days],
+                        "exact_stop_identity_only": True,
+                        "name_or_distance_join": False,
+                        "expanded_stops": expansions,
+                        "departures_scanned": departures_scanned,
+                        "timetable_rows_skipped": timetable_rows_skipped,
+                        "trip_stop_limit_hits": trip_stop_limit_hits,
+                        "invalid_trip_time_hits": invalid_trip_time_hits,
+                        "max_expansions": MAX_GTFS_SCHEDULE_EXPANSIONS,
+                        "max_departures_per_stop": MAX_GTFS_SCHEDULE_DEPARTURES_PER_STOP,
+                        "max_parallel_searches": MAX_GTFS_SCHEDULE_PARALLEL_SEARCHES,
+                        "active_service_rows": active_service_rows,
+                        "transfer_buffer_minutes": GTFS_TRANSFER_BUFFER_SECONDS // 60,
+                        "transfer_buffer_source": "server_safety_policy",
+                        "transfer_model": "EXACT_STOP_SERVER_5_MIN",
+                        "search_complete": True,
+                        "wall_clock_deadline_seconds": GTFS_SCHEDULE_WALL_CLOCK_SECONDS,
+                    },
+                    "alternatives": [candidate],
+                }
+        except sqlite3.OperationalError as exc:
+            if deadline_hit.is_set() or "interrupted" in str(exc).lower():
+                return self._gtfs_schedule_gap(
+                    provider_id, civil_day_text, departure_time,
+                    "SCHEDULE_DEADLINE_REACHED", feed_id=feed_id_for_gap,
+                )
+            raise
+        finally:
+            self._schedule_slots.release()
+
+    @staticmethod
+    def _gtfs_schedule_gap(
+        provider: str,
+        service_date: str,
+        departure_time: str,
+        detail_reason: str,
+        *,
+        feed_id: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "status": "DATA_GAP",
+            "reason": "SCHEDULE_DATA_GAP",
+            "schedule": {
+                "status": "DATA_GAP", "reason": "SCHEDULE_DATA_GAP",
+                "detail_reason": detail_reason,
+                "service_date": service_date,
+                "departure_time": departure_time,
+                "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE" if feed_id else None,
+                "provider": provider,
+                "feed_id": feed_id,
+                "timezone": "Asia/Seoul",
+                "limitations": [
+                    "CALENDAR_TXT_REQUIRED",
+                    "CALENDAR_DATES_ONLY_FEED_UNSUPPORTED",
+                    "TRANSFERS_TXT_NOT_INGESTED",
+                    "WALKING_TRANSFER_NOT_IN_SCHEDULE_SEARCH",
+                ],
+            },
+            "graph": {
+                "algorithm": "bounded_time_dependent_dijkstra",
+                "exact_stop_identity_only": True,
+                "name_or_distance_join": False,
+                "search_complete": False,
+            },
+            "alternatives": [],
+        }
+
+    @staticmethod
+    def _gtfs_civil_timestamp(
+        civil_day: date, absolute_seconds: int
+    ) -> str:
+        value = datetime.combine(
+            civil_day, datetime.min.time(), tzinfo=SEOUL_TIMEZONE
+        ) + timedelta(
+            seconds=absolute_seconds
+        )
+        return value.isoformat(timespec="seconds")
+
+    def _gtfs_schedule_candidate(
+        self,
+        *,
+        rides: list[dict[str, Any]],
+        trip_cache: Mapping[str, tuple[dict[str, Any], ...] | None],
+        civil_day: date,
+        requested_seconds: int,
+        feed_id: str,
+        provider: str,
+        schedule_source_id: str,
+    ) -> dict[str, Any]:
+        steps: list[dict[str, Any]] = []
+        replay_candidates: list[dict[str, Any]] = []
+        replay_gaps: list[dict[str, Any]] = []
+        route_ids: list[str] = []
+        route_labels: dict[str, str] = {}
+        ride_endpoints: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for ride_index, ride in enumerate(rides):
+            route_id = str(ride["route_id"])
+            if not route_ids or route_ids[-1] != route_id:
+                route_ids.append(route_id)
+            route_labels[route_id] = str(ride["route_no"])
+            rows = trip_cache[str(ride["raw_trip_id"])] or ()
+            selected = [
+                row for row in rows
+                if int(ride["board_sequence"]) <= int(row["stop_sequence"]) <= int(ride["alight_sequence"])
+            ]
+            if len(selected) < 2:
+                raise CatalogValidationError("selected GTFS trip segment is incomplete")
+            ride_endpoints.append((selected[0], selected[-1]))
+            for before, after in zip(selected, selected[1:]):
+                steps.append(
+                    {
+                        "kind": "ride",
+                        "route_id": route_id,
+                        "route_no": ride["route_no"],
+                        "trip_id": ride["trip_id"],
+                        "gtfs_service_date": ride["gtfs_service_date"],
+                        "departure_time": before["departure_time"],
+                        "departure_seconds": before["departure_seconds"],
+                        "arrival_time": after["arrival_time"],
+                        "arrival_seconds": after["arrival_seconds"],
+                        "departure_datetime": self._gtfs_civil_timestamp(
+                            civil_day,
+                            int(before["departure_seconds"]) + int(ride["day_offset_seconds"]),
+                        ) if before["departure_seconds"] is not None else None,
+                        "arrival_datetime": self._gtfs_civil_timestamp(
+                            civil_day,
+                            int(after["arrival_seconds"]) + int(ride["day_offset_seconds"]),
+                        ) if after["arrival_seconds"] is not None else None,
+                        "from": {
+                            "city_code": ride["city_code"], "node_id": before["node_id"],
+                            "node_name": before["stop_name"], "node_order": int(before["stop_sequence"]),
+                            "latitude": before["latitude"], "longitude": before["longitude"],
+                        },
+                        "to": {
+                            "city_code": ride["city_code"], "node_id": after["node_id"],
+                            "node_name": after["stop_name"], "node_order": int(after["stop_sequence"]),
+                            "latitude": after["latitude"], "longitude": after["longitude"],
+                        },
+                        "distance_m": 0.0,
+                        "evidence": {
+                            "type": "official_gtfs_stop_times",
+                            "source": schedule_source_id,
+                            "feed_id": feed_id,
+                        },
+                    }
+                )
+            if ride_index:
+                previous_ride = rides[ride_index - 1]
+                previous_stop = ride_endpoints[ride_index - 1][1]
+                next_stop = selected[0]
+                transfer_step = {
+                    "kind": "transfer", "route_id": None,
+                    "from": {
+                        "city_code": previous_ride["city_code"],
+                        "node_id": previous_stop["node_id"],
+                        "node_name": previous_stop["stop_name"],
+                        "node_order": int(previous_stop["stop_sequence"]),
+                        "latitude": previous_stop["latitude"], "longitude": previous_stop["longitude"],
+                    },
+                    "to": {
+                        "city_code": ride["city_code"], "node_id": next_stop["node_id"],
+                        "node_name": next_stop["stop_name"],
+                        "node_order": int(next_stop["stop_sequence"]),
+                        "latitude": next_stop["latitude"], "longitude": next_stop["longitude"],
+                    },
+                    "distance_m": 0.0,
+                    "scheduled_arrival": previous_ride["arrival_time"],
+                    "next_departure": ride["departure_time"],
+                    "evidence": {"type": "shared_node_id", "source": schedule_source_id, "feed_id": feed_id},
+                }
+                steps.insert(len(steps) - (len(selected) - 1), transfer_step)
+                replay_leg = {
+                    "id": f"transfer-{ride_index}",
+                    "route_id": previous_ride["route_id"],
+                    "node_id": previous_stop["node_id"],
+                    "node_order": int(previous_stop["stop_sequence"]),
+                    "scheduled_arrival": previous_ride["arrival_time"],
+                    "next_departure": ride["departure_time"],
+                    "minimum_transfer_minutes": GTFS_TRANSFER_BUFFER_SECONDS // 60,
+                    "minimum_transfer_source": "server_safety_policy",
+                    "time_evidence_source": schedule_source_id,
+                    "time_evidence_verified": True,
+                    "time_evidence_feed_id": feed_id,
+                    "time_evidence_trip_id": previous_ride["trip_id"],
+                    "next_route_id": ride["route_id"],
+                    "next_node_id": next_stop["node_id"],
+                    "next_node_order": int(next_stop["stop_sequence"]),
+                    "next_time_evidence_trip_id": ride["trip_id"],
+                    "next_time_evidence_feed_id": feed_id,
+                    "gtfs_service_date": previous_ride["gtfs_service_date"],
+                    "next_gtfs_service_date": ride["gtfs_service_date"],
+                }
+                if previous_ride["gtfs_service_date"] == ride["gtfs_service_date"]:
+                    replay_candidates.append(replay_leg)
+                else:
+                    replay_gaps.append(
+                        {**replay_leg, "reason": "CROSS_SERVICE_DAY_REPLAY_UNSUPPORTED"}
+                    )
+
+        replay_legs = [] if replay_gaps else replay_candidates
+        departure_absolute = int(rides[0]["departure_absolute"])
+        arrival_absolute = int(rides[-1]["arrival_absolute"])
+        return {
+            "criterion": "earliest_arrival",
+            "status": "READY",
+            "reasons": [],
+            "scheduled": True,
+            "schedule_status": "READY",
+            "success_probability": None,
+            "probability_basis": None,
+            "probability_scope": None,
+            "estimated_minutes": round((arrival_absolute - requested_seconds) / 60.0, 1),
+            "in_vehicle_and_wait_minutes": round((arrival_absolute - departure_absolute) / 60.0, 1),
+            "departure_time": rides[0]["departure_time"],
+            "arrival_time": rides[-1]["arrival_time"],
+            "departure_datetime": self._gtfs_civil_timestamp(civil_day, departure_absolute),
+            "arrival_datetime": self._gtfs_civil_timestamp(civil_day, arrival_absolute),
+            "operating_assumption": False,
+            "transfers": max(0, len(rides) - 1),
+            "walking_m": 0.0,
+            "transfer_model": "EXACT_STOP_SERVER_5_MIN",
+            "route_ids": route_ids,
+            "route_labels": route_labels,
+            "steps": steps,
+            "replay_ready": bool(replay_legs),
+            "replay_legs": replay_legs,
+            "replay_data_gaps": replay_gaps,
+            "gtfs_service_dates": sorted({str(ride["gtfs_service_date"]) for ride in rides}),
+            "evidence": {
+                "topology": "active_official_gtfs_patterns",
+                "schedule": "active_official_gtfs_calendar_trips_stop_times",
+                "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE",
+                "provider": provider,
+                "source_id": schedule_source_id,
+                "feed_id": feed_id,
+                "actual_operation_observed": False,
+                "success_rate_eligible": False,
+                "service_routes": len(route_ids),
+                "passage_routes": 0,
+            },
+            "coverage": {
+                "structural": 1.0,
+                "service_routes": len(route_ids),
+                "schedule_routes": len(route_ids),
+                "observed_service_routes": 0,
+                "passage_routes": 0,
+                "total_routes": len(route_ids),
+                "minimum_passage_samples": 8,
+            },
         }
 
     def create_topology_run(

@@ -165,20 +165,136 @@ function StopLookup({ label, value, onChange, selected, onSelect, cityCode }) {
 function formatCount(value) {
   return Number.isFinite(Number(value)) ? Number(value).toLocaleString("ko-KR") : "\u2014";
 }
+function localDateValue(date = /* @__PURE__ */ new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+function localTimeValue(date = /* @__PURE__ */ new Date()) {
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+function gtfsClockMinutes(value) {
+  const clean = String(value ?? "").trim();
+  const matched = clean.match(/^(\d{1,3}):([0-5]\d)(?::[0-5]\d)?$/);
+  return matched ? Number(matched[1]) * 60 + Number(matched[2]) : null;
+}
+function formatGtfsClock(value, secondsValue) {
+  let totalMinutes = gtfsClockMinutes(value);
+  if (totalMinutes === null && secondsValue !== null && secondsValue !== void 0 && String(secondsValue).trim() !== "" && Number.isFinite(Number(secondsValue))) totalMinutes = Math.floor(Number(secondsValue) / 60);
+  if (!Number.isFinite(totalMinutes) || totalMinutes < 0) return null;
+  const dayOffset = Math.floor(totalMinutes / 1440);
+  const minuteOfDay = totalMinutes % 1440;
+  const hour = String(Math.floor(minuteOfDay / 60)).padStart(2, "0");
+  const minute = String(minuteOfDay % 60).padStart(2, "0");
+  return `${hour}:${minute}${dayOffset ? ` (+${dayOffset}\uC77C)` : ""}`;
+}
+function replayClock(value, minutesValue) {
+  const fromRaw = gtfsClockMinutes(value);
+  const minutes = fromRaw ?? (minutesValue === null || minutesValue === void 0 || String(minutesValue).trim() === "" ? NaN : Number(minutesValue));
+  if (!Number.isFinite(minutes) || minutes < 0) return null;
+  const minuteOfDay = Math.floor(minutes) % 1440;
+  return `${String(Math.floor(minuteOfDay / 60)).padStart(2, "0")}:${String(minuteOfDay % 60).padStart(2, "0")}`;
+}
+function normalizeSchedule(result) {
+  const schedule = result?.schedule && typeof result.schedule === "object" ? result.schedule : {};
+  const status = String(schedule.status || result?.schedule_status || "DATA_GAP").toUpperCase();
+  const ready = ["READY", "AVAILABLE", "SCHEDULE_READY", "OK"].includes(status);
+  return {
+    ready,
+    status: ready ? "READY" : "DATA_GAP",
+    reason: schedule.reason || result?.schedule_reason || result?.reason || "SCHEDULE_DATA_GAP",
+    serviceDate: schedule.service_date || result?.service_date || "",
+    departureTime: schedule.departure_time || result?.departure_time || "",
+    basis: schedule.basis || result?.schedule_basis || "",
+    provider: schedule.provider || result?.schedule_provider || "",
+    feedId: schedule.feed_id || result?.schedule_feed_id || ""
+  };
+}
+function scheduleEvidence(resultSchedule, candidate) {
+  const provenance = candidate?.provenance && typeof candidate.provenance === "object" ? candidate.provenance : {};
+  const candidateEvidence = candidate?.evidence && typeof candidate.evidence === "object" ? candidate.evidence : {};
+  const replaySource = Array.isArray(candidate?.replay_legs) ? candidate.replay_legs.find((item) => item?.time_evidence_source)?.time_evidence_source : "";
+  const source = replaySource && typeof replaySource === "object" ? replaySource : {};
+  const providerRaw = provenance.provider || candidateEvidence.provider || resultSchedule.provider || source.provider || "";
+  const provider = String(providerRaw).toLowerCase() === "ktdb" ? "KTDB" : String(providerRaw);
+  const basis = provenance.basis || candidateEvidence.basis || resultSchedule.basis || source.basis || "";
+  const feedId = provenance.feed_id || candidateEvidence.feed_id || candidateEvidence.source_id || resultSchedule.feedId || source.source_id || (typeof replaySource === "string" ? replaySource : "");
+  const official = /OFFICIAL/i.test(String(basis));
+  const basisLabel = basis === "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE" ? "\uACF5\uC2DD \uC815\uC801 GTFS \uC6D0\uBCF8 \uADFC\uAC70" : String(basis || "").replaceAll("_", " ");
+  return {
+    ready: Boolean(provider || feedId || basis),
+    label: [provider ? `${provider}${official ? " \uACF5\uC2DD GTFS" : " GTFS"}` : "", feedId, basisLabel].filter(Boolean).join(" \xB7 ")
+  };
+}
 function summarizeJourneyLegs(candidate) {
   const legs = [];
   for (const step of Array.isArray(candidate?.steps) ? candidate.steps : []) {
     if (step?.kind !== "ride" || !step.route_id) continue;
     const routeId = String(step.route_id);
+    const tripId = String(step.trip_id || "");
+    const departureTime = formatGtfsClock(step.departure_time ?? step.from?.departure_time, step.departure_seconds ?? step.from?.departure_seconds);
+    const arrivalTime = formatGtfsClock(step.arrival_time ?? step.to?.arrival_time, step.arrival_seconds ?? step.to?.arrival_seconds);
     const previous = legs[legs.length - 1];
-    if (previous && previous.routeId === routeId) {
+    if (previous && previous.routeId === routeId && (!previous.tripId || !tripId || previous.tripId === tripId)) {
       previous.to = step.to || previous.to;
       previous.edgeCount += 1;
+      previous.arrivalTime = arrivalTime || previous.arrivalTime;
     } else {
-      legs.push({ routeId, from: step.from || {}, to: step.to || {}, edgeCount: 1 });
+      legs.push({ routeId, tripId, from: step.from || {}, to: step.to || {}, edgeCount: 1, departureTime, arrivalTime });
     }
   }
+  const replayRows = Array.isArray(candidate?.replay_legs) ? candidate.replay_legs : [];
+  legs.forEach((leg, index) => {
+    const replayRow = replayRows[index] || {};
+    const scheduledSeconds = replayRow.scheduled_minutes === null || replayRow.scheduled_minutes === void 0 ? void 0 : Number(replayRow.scheduled_minutes) * 60;
+    const nextDepartureSeconds = replayRow.next_departure_minutes === null || replayRow.next_departure_minutes === void 0 ? void 0 : Number(replayRow.next_departure_minutes) * 60;
+    leg.arrivalTime ||= formatGtfsClock(replayRow.scheduled_arrival, scheduledSeconds);
+    leg.nextDepartureTime = formatGtfsClock(replayRow.next_departure, nextDepartureSeconds);
+  });
   return legs;
+}
+function prepareJourneyForDetail(candidate, context) {
+  const replayLegs = (Array.isArray(candidate?.replay_legs) ? candidate.replay_legs : []).map((row) => {
+    const sourceId = typeof row.time_evidence_source === "object" ? String(row.time_evidence_source.source_id || "") : String(row.time_evidence_source || "");
+    const scheduledMinutes = gtfsClockMinutes(row.scheduled_arrival) ?? (row.scheduled_minutes !== null && row.scheduled_minutes !== void 0 && Number.isFinite(Number(row.scheduled_minutes)) ? Number(row.scheduled_minutes) : null);
+    const nextDepartureMinutes = gtfsClockMinutes(row.next_departure) ?? (row.next_departure_minutes !== null && row.next_departure_minutes !== void 0 && Number.isFinite(Number(row.next_departure_minutes)) ? Number(row.next_departure_minutes) : null);
+    return {
+      ...row,
+      scheduled_gtfs_time: String(row.scheduled_arrival || ""),
+      next_departure_gtfs_time: String(row.next_departure || ""),
+      scheduled_minutes: scheduledMinutes,
+      next_departure_minutes: nextDepartureMinutes,
+      scheduled_day_offset: scheduledMinutes === null ? null : Math.floor(scheduledMinutes / 1440),
+      next_departure_day_offset: nextDepartureMinutes === null ? null : Math.floor(nextDepartureMinutes / 1440),
+      scheduled_arrival: replayClock(row.scheduled_arrival, scheduledMinutes),
+      next_departure: replayClock(row.next_departure, nextDepartureMinutes),
+      time_evidence_source: sourceId,
+      time_evidence_verified: row.time_evidence_verified === true || Boolean(row.time_evidence_trip_id && sourceId),
+      time_evidence_feed_id: String(row.time_evidence_feed_id || ""),
+      next_time_evidence_feed_id: String(row.next_time_evidence_feed_id || "")
+    };
+  });
+  return { ...candidate, ...context, replay_legs: replayLegs };
+}
+const JOURNEY_CRITERION_LABELS = {
+  minimum_transfers: "\uCD5C\uC18C \uD658\uC2B9",
+  generalized_cost: "\uADE0\uD615 \uACBD\uB85C",
+  explorer: "\uD0D0\uD5D8 \uACBD\uB85C",
+  earliest_arrival: "\uAC00\uC7A5 \uC774\uB978 \uB3C4\uCC29"
+};
+function JourneyCandidateCard({ candidate, index, schedule, structural = false, context, onChooseJourney }) {
+  const routeIds = Array.isArray(candidate?.route_ids) ? candidate.route_ids.filter(Boolean) : [];
+  const legs = summarizeJourneyLegs(candidate);
+  const coverage = candidate?.coverage && typeof candidate.coverage === "object" ? candidate.coverage : {};
+  const evidence = candidate?.evidence && typeof candidate.evidence === "object" ? candidate.evidence : {};
+  const provenance = scheduleEvidence(schedule, candidate);
+  const hasProbability = typeof candidate?.success_probability === "number" && Number.isFinite(candidate.success_probability);
+  const departureTime = formatGtfsClock(candidate?.departure_time, candidate?.departure_seconds);
+  const arrivalTime = formatGtfsClock(candidate?.arrival_time, candidate?.arrival_seconds);
+  const minutes = Number(candidate?.estimated_minutes);
+  const timeSummary = [departureTime ? `\uCD9C\uBC1C ${departureTime}` : "", arrivalTime ? `\uB3C4\uCC29 ${arrivalTime}` : "", Number.isFinite(minutes) ? `${Math.max(0, Math.round(minutes))}\uBD84` : ""].filter(Boolean);
+  return /* @__PURE__ */ React.createElement("article", { className: structural ? "structural-candidate" : "scheduled-candidate" }, /* @__PURE__ */ React.createElement("div", { className: "candidate-rank" }, index + 1), /* @__PURE__ */ React.createElement("div", { className: "candidate-copy" }, /* @__PURE__ */ React.createElement("div", { className: "candidate-title" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", null, JOURNEY_CRITERION_LABELS[candidate?.criterion] || candidate?.criterion || (structural ? "\uBC29\uD5A5 \uACBD\uB85C \uD6C4\uBCF4" : "\uC2DC\uAC04\uD45C \uACBD\uB85C")), /* @__PURE__ */ React.createElement("h3", null, routeIds.length > 0 ? `${candidate?.transfers || 0}\uD68C \uD658\uC2B9 \xB7 ${routeIds.length}\uAC1C \uB178\uC120` : "\uB178\uC120 DATA_GAP")), /* @__PURE__ */ React.createElement("small", { className: structural ? "schedule-gap" : "schedule-ready" }, structural ? "\uC2DC\uAC04 \uBBF8\uAC80\uC99D" : "\uC2DC\uAC04\uD45C \uD655\uC778")), !structural && timeSummary.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "schedule-summary" }, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), /* @__PURE__ */ React.createElement("strong", null, timeSummary.join(" \xB7 "))), structural && /* @__PURE__ */ React.createElement("div", { className: "schedule-gap-copy" }, /* @__PURE__ */ React.createElement(Icon, { name: "warning-circle" }), /* @__PURE__ */ React.createElement("span", null, "\uC815\uB958\uC7A5 \uC9C4\uD589 \uBC29\uD5A5\uB9CC \uD655\uC778\uD588\uC2B5\uB2C8\uB2E4. \uC774 \uB0A0\uC9DC\xB7\uC2DC\uAC01\uC5D0 \uC2E4\uC81C \uC6B4\uD589 \uAC00\uB2A5\uD55C \uACBD\uB85C\uB85C \uD655\uC815\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.")), /* @__PURE__ */ React.createElement("div", { className: "candidate-leg-list" }, legs.map((leg, legIndex) => /* @__PURE__ */ React.createElement("div", { className: "candidate-leg", key: `${leg.routeId}-${leg.tripId}-${legIndex}` }, /* @__PURE__ */ React.createElement("span", { className: "timeline-rail" }, /* @__PURE__ */ React.createElement("i", null), /* @__PURE__ */ React.createElement("b", null)), /* @__PURE__ */ React.createElement("div", { className: "leg-copy" }, /* @__PURE__ */ React.createElement("span", { className: "route-pill" }, /* @__PURE__ */ React.createElement(Icon, { name: "bus" }), " ", leg.routeId), /* @__PURE__ */ React.createElement("strong", null, leg.from?.node_name || leg.from?.node_id || "\uC2B9\uCC28 \uC815\uB958\uC7A5"), !structural && leg.departureTime && /* @__PURE__ */ React.createElement("span", { className: "leg-time" }, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), " ", leg.departureTime, " \uCD9C\uBC1C"), /* @__PURE__ */ React.createElement("small", null, "\uCD1D ", leg.edgeCount + 1, "\uAC1C \uC815\uB958\uC7A5"), /* @__PURE__ */ React.createElement("strong", null, leg.to?.node_name || leg.to?.node_id || "\uD558\uCC28 \uC815\uB958\uC7A5"), !structural && leg.arrivalTime && /* @__PURE__ */ React.createElement("span", { className: "leg-time arrival" }, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), " ", leg.arrivalTime, " \uB3C4\uCC29"), !structural && leg.nextDepartureTime && /* @__PURE__ */ React.createElement("span", { className: "transfer-time" }, "\uB2E4\uC74C \uBC84\uC2A4 ", leg.nextDepartureTime, " \uCD9C\uBC1C"))))), /* @__PURE__ */ React.createElement("footer", null, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "arrows-left-right" }), " ", typeof candidate?.transfers === "number" ? `${candidate.transfers}\uD68C \uD658\uC2B9` : "\uD658\uC2B9 DATA_GAP"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "database" }), " \uC2B9\uCC28 ", evidence.ride_edges ?? "\u2014", " \xB7 \uD658\uC2B9 ", evidence.transfer_edges ?? "\u2014", " \uAC04\uC120"), /* @__PURE__ */ React.createElement("strong", null, hasProbability ? `\uC131\uACF5\uB960 ${Math.round(candidate.success_probability * 100)}%` : "\uC131\uACF5\uB960 DATA_GAP")), !structural && /* @__PURE__ */ React.createElement("small", { className: provenance.ready ? "official-schedule-evidence" : "schedule-evidence-gap" }, /* @__PURE__ */ React.createElement(Icon, { name: provenance.ready ? "shield-check" : "warning-circle" }), " ", provenance.ready ? provenance.label : "\uC2DC\uAC04\uD45C \uCD9C\uCC98 DATA_GAP"), typeof coverage.schedule_routes === "number" && typeof coverage.total_routes === "number" && /* @__PURE__ */ React.createElement("small", { className: "evidence-copy" }, "\uC2DC\uAC04\uD45C \uADFC\uAC70 ", coverage.schedule_routes, "/", coverage.total_routes, typeof coverage.passage_routes === "number" ? ` \xB7 \uD1B5\uACFC \uC774\uB825 ${coverage.passage_routes}/${coverage.total_routes}` : ""), /* @__PURE__ */ React.createElement("button", { className: structural ? "open-candidate structural" : "open-candidate", type: "button", onClick: () => onChooseJourney?.(prepareJourneyForDetail(candidate, context)) }, structural ? "\uC815\uB958\uC7A5 \uC21C\uC11C \uBCF4\uAE30" : "\uC2DC\uAC04\uD45C \uACBD\uB85C \uC790\uC138\uD788 \uBCF4\uAE30", " ", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" }))));
 }
 function GraphCoverage({ networkStatus, result }) {
   const sources = Array.isArray(networkStatus?.sources) ? networkStatus.sources : [];
@@ -194,11 +310,16 @@ function GraphCoverage({ networkStatus, result }) {
   const graphReady = networkStatus?.graph_ready === true;
   const nationwideComplete = networkStatus?.nationwide_graph_complete === true;
   const graph = result?.graph && typeof result.graph === "object" ? result.graph : null;
+  const schedule = normalizeSchedule(result);
   const topologyReady = graph && Number(graph.nodes) > 0 && Number(graph.edges) > 0;
+  const scheduleGraph = Boolean(graph && (result?.schedule || String(graph.algorithm || "").includes("time_dependent") || ["expanded_stops", "departures_scanned", "search_complete", "detail_reason"].some((key) => Object.prototype.hasOwnProperty.call(graph, key))));
+  const staticAlternativeCount = Array.isArray(result?.static_alternatives) ? result.static_alternatives.length : 0;
+  const scheduleSearchState = graph?.search_complete === true ? "\uAC80\uC0C9 \uC644\uB8CC" : graph?.search_complete === false ? "\uAC80\uC0C9 \uBBF8\uC644\uB8CC" : "\uC644\uB8CC \uC0C1\uD0DC DATA_GAP";
+  const scheduleDetailReason = graph?.detail_reason || result?.schedule?.detail_reason || "";
   const primaryStatus = nationwideComplete ? "\uC804\uAD6D \uACBD\uB85C\uB9DD \uC5F0\uACB0\uB428" : graphReady ? "\uACF5\uC2DD \uAC80\uC99D \uAD6C\uAC04 \uC5F0\uACB0\uB428" : "\uC804\uAD6D \uACBD\uB85C\uB9DD \uC900\uBE44 \uC911";
   const catalogSummary = stopRows && routeRows ? `\uC815\uB958\uC7A5 ${formatCount(stopRows)} \xB7 \uB178\uC120 ${formatCount(routeRows)}` : "\uC804\uAD6D \uBAA9\uB85D DATA_GAP";
   const topologySummary = activeRoutes ? `\uBC29\uD5A5 \uB178\uC120 ${formatCount(activeRoutes)} \xB7 \uADF8\uB798\uD504 \uC815\uB958\uC7A5 ${formatCount(activeStops)}` : topologyTargets ? `\uBC29\uD5A5 \uC21C\uC11C ${formatCount(topologyComplete)}/${formatCount(topologyTargets)}` : "\uBC29\uD5A5 \uC21C\uC11C DATA_GAP";
-  return /* @__PURE__ */ React.createElement("div", { className: `graph-coverage ${graphReady ? "catalog-ready" : "catalog-gap"}` }, /* @__PURE__ */ React.createElement("span", { className: "graph-pulse", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement("p", null, /* @__PURE__ */ React.createElement("strong", null, primaryStatus), /* @__PURE__ */ React.createElement("small", null, catalogSummary, " \xB7 ", topologySummary)), /* @__PURE__ */ React.createElement("span", { className: "graph-method" }, "\uB2E8\uBC29\uD5A5 Dijkstra"), graphReady && !nationwideComplete && /* @__PURE__ */ React.createElement("small", { className: "coverage-query" }, "\uACF5\uC2DD \uACBD\uC720 \uC21C\uC11C\uAC00 \uC5F0\uACB0\uB41C ", formatCount(activeCities), "\uAC1C \uC9C0\uC5ED\uBD80\uD130 \uC2E4\uC81C \uBC29\uD5A5\uC73C\uB85C \uAC80\uC0C9\uD569\uB2C8\uB2E4. \uC804\uAD6D \uD655\uB300 \uC911\uC785\uB2C8\uB2E4."), !graphReady && /* @__PURE__ */ React.createElement("small", { className: "coverage-gap" }, "TAGO \uB178\uC120\uBCC4 \uACBD\uC720 \uC21C\uC11C\uC758 \uC804\uAD6D \uC801\uC7AC\uAC00 \uB05D\uB098\uC9C0 \uC54A\uC544, \uD655\uC778\uB41C \uAD6C\uAC04\uB9CC \uAC80\uC0C9\uD569\uB2C8\uB2E4."), graph && /* @__PURE__ */ React.createElement("small", { className: topologyReady ? "coverage-query" : "coverage-gap" }, "\uC774\uBC88 \uAC80\uC0C9: ", formatCount(graph.nodes), "\uAC1C \uC0C1\uD0DC \xB7 ", formatCount(graph.edges), "\uAC1C \uC2B9\uCC28 \uAC04\uC120 \xB7 ", graph.algorithm || "directed_dijkstra"), graph && !topologyReady && /* @__PURE__ */ React.createElement("small", { className: "coverage-gap" }, "DATA_GAP \xB7 \uAC80\uC0C9 \uAC00\uB2A5\uD55C \uAC80\uC99D \uB178\uC120 \uC21C\uC11C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."));
+  return /* @__PURE__ */ React.createElement("div", { className: `graph-coverage ${graphReady ? "catalog-ready" : "catalog-gap"}` }, /* @__PURE__ */ React.createElement("span", { className: "graph-pulse", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement("p", null, /* @__PURE__ */ React.createElement("strong", null, primaryStatus), /* @__PURE__ */ React.createElement("small", null, catalogSummary, " \xB7 ", topologySummary)), /* @__PURE__ */ React.createElement("span", { className: "graph-method" }, scheduleGraph ? "\uC2DC\uAC04\uC758\uC874 Dijkstra" : "\uB2E8\uBC29\uD5A5 Dijkstra"), graphReady && !nationwideComplete && /* @__PURE__ */ React.createElement("small", { className: "coverage-query" }, "\uACF5\uC2DD \uACBD\uC720 \uC21C\uC11C\uAC00 \uC5F0\uACB0\uB41C ", formatCount(activeCities), "\uAC1C \uC9C0\uC5ED\uBD80\uD130 \uC2E4\uC81C \uBC29\uD5A5\uC73C\uB85C \uAC80\uC0C9\uD569\uB2C8\uB2E4. \uC804\uAD6D \uD655\uB300 \uC911\uC785\uB2C8\uB2E4."), !graphReady && /* @__PURE__ */ React.createElement("small", { className: "coverage-gap" }, "TAGO \uB178\uC120\uBCC4 \uACBD\uC720 \uC21C\uC11C\uC758 \uC804\uAD6D \uC801\uC7AC\uAC00 \uB05D\uB098\uC9C0 \uC54A\uC544, \uD655\uC778\uB41C \uAD6C\uAC04\uB9CC \uAC80\uC0C9\uD569\uB2C8\uB2E4."), scheduleGraph && /* @__PURE__ */ React.createElement("small", { className: schedule.ready ? "coverage-query" : "coverage-gap" }, "\uC774\uBC88 \uC77C\uC815 \uAC80\uC0C9: ", formatCount(graph.expanded_stops), "\uAC1C \uC815\uB958\uC7A5 \uD655\uC7A5 \xB7 ", formatCount(graph.departures_scanned), "\uAC1C \uCD9C\uBC1C\uD3B8 \uD655\uC778 \xB7 ", scheduleSearchState, " \xB7 ", graph.algorithm), scheduleGraph && scheduleDetailReason && /* @__PURE__ */ React.createElement("small", { className: "coverage-gap" }, "\uC2DC\uAC04\uD45C \uC0C1\uC138: ", scheduleDetailReason), staticAlternativeCount > 0 && /* @__PURE__ */ React.createElement("small", { className: "coverage-query" }, "\uBC29\uD5A5 \uAD6C\uC870 \uD6C4\uBCF4 ", formatCount(staticAlternativeCount), "\uAC74 \uD655\uC778 \xB7 \uC2DC\uAC04\uD45C \uC6B4\uD589 \uAC00\uB2A5\uC131 \uBBF8\uD655\uC815"), graph && !scheduleGraph && /* @__PURE__ */ React.createElement("small", { className: topologyReady ? "coverage-query" : "coverage-gap" }, "\uC774\uBC88 \uAC80\uC0C9: ", formatCount(graph.nodes), "\uAC1C \uC0C1\uD0DC \xB7 ", formatCount(graph.edges), "\uAC1C \uC2B9\uCC28 \uAC04\uC120 \xB7 ", graph.algorithm || "directed_dijkstra"), graph && !scheduleGraph && !topologyReady && staticAlternativeCount === 0 && /* @__PURE__ */ React.createElement("small", { className: "coverage-gap" }, "DATA_GAP \xB7 \uAC80\uC0C9 \uAC00\uB2A5\uD55C \uAC80\uC99D \uB178\uC120 \uC21C\uC11C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."));
 }
 function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
   const [fromText, setFromText] = useState("");
@@ -207,6 +328,8 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
   const [toStop, setToStop] = useState(null);
   const [preference, setPreference] = useState("diverse");
   const [result, setResult] = useState(null);
+  const [serviceDate, setServiceDate] = useState(() => localDateValue());
+  const [departureTime, setDepartureTime] = useState(() => localTimeValue());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [networkStatus, setNetworkStatus] = useState(null);
@@ -235,37 +358,32 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
     setError("");
     setResult(null);
     try {
-      setResult(await BusroApi.generateJourneys({ from_stop_id: fromStop.node_id, to_stop_id: toStop.node_id, from_city_code: fromStop.city_code || void 0, to_city_code: toStop.city_code || void 0, preference, max_alternatives: 1 }));
+      setResult(await BusroApi.generateJourneys({ from_stop_id: fromStop.node_id, to_stop_id: toStop.node_id, from_city_code: fromStop.city_code || void 0, to_city_code: toStop.city_code || void 0, service_date: serviceDate, departure_time: departureTime, preference, max_alternatives: 3 }));
     } catch (reason) {
       setError(reason.message || "\uD604\uC7AC \uC801\uC7AC\uB41C \uB178\uC120 \uADF8\uB798\uD504\uB85C \uC5EC\uD589\uC744 \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
     } finally {
       setLoading(false);
     }
   }
-  const candidates = result?.alternatives || result?.candidates || result?.journeys || [];
-  const criterionLabels = {
-    minimum_transfers: "\uCD5C\uC18C \uD658\uC2B9",
-    generalized_cost: "\uADE0\uD615 \uACBD\uB85C",
-    explorer: "\uD0D0\uD5D8 \uACBD\uB85C"
-  };
+  const schedule = normalizeSchedule(result);
+  const candidateRows = result?.candidates || result?.journeys || result?.alternatives || [];
+  const returnedCandidates = Array.isArray(candidateRows) ? candidateRows : [];
+  const scheduled = schedule.ready ? returnedCandidates.filter((candidate) => candidate?.scheduled !== false) : [];
+  const staticRows = Array.isArray(result?.static_alternatives) ? result.static_alternatives : [];
+  const structuralCandidates = [...staticRows, ...returnedCandidates.filter((candidate) => !scheduled.includes(candidate) && !staticRows.includes(candidate))];
+  const journeyContext = { from_stop: fromStop, to_stop: toStop, preference, service_date: schedule.serviceDate || serviceDate, departure_time: schedule.departureTime || departureTime, schedule: result?.schedule || { status: schedule.status, reason: schedule.reason } };
   const gapReasons = {
     STOP_NOT_IN_HYDRATED_SEQUENCE: "\uC120\uD0DD\uD55C \uC815\uB958\uC7A5\uC740 \uC804\uAD6D \uBAA9\uB85D\uC5D0 \uC788\uC9C0\uB9CC \uAC80\uC99D\uB41C \uB178\uC120 \uC21C\uC11C \uADF8\uB798\uD504\uC5D0\uB294 \uC544\uC9C1 \uD3EC\uD568\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.",
     NO_DIRECTED_PATH_IN_HYDRATED_GRAPH: "\uD604\uC7AC \uAC80\uC99D \uADF8\uB798\uD504\uC5D0\uC11C \uCD9C\uBC1C \uBC29\uD5A5\uBD80\uD130 \uB3C4\uCC29 \uBC29\uD5A5\uAE4C\uC9C0 \uC774\uC5B4\uC9C0\uB294 \uACBD\uB85C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4. \uC5ED\uBC29\uD5A5 \uAC04\uC120\uC744 \uC784\uC758\uB85C \uB9CC\uB4E4\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",
-    EVIDENCE_INCOMPLETE: "\uACBD\uB85C \uAD6C\uC870\uB294 \uCC3E\uC558\uC9C0\uB9CC \uC2DC\uAC04\uD45C \uB610\uB294 \uD1B5\uACFC \uC774\uB825\uC774 \uBD80\uC871\uD569\uB2C8\uB2E4."
+    EVIDENCE_INCOMPLETE: "\uACBD\uB85C \uAD6C\uC870\uB294 \uCC3E\uC558\uC9C0\uB9CC \uC2DC\uAC04\uD45C \uB610\uB294 \uD1B5\uACFC \uC774\uB825\uC774 \uBD80\uC871\uD569\uB2C8\uB2E4.",
+    SCHEDULE_DATA_GAP: "\uC120\uD0DD\uD55C \uB0A0\uC9DC\xB7\uCD9C\uBC1C \uC2DC\uAC01\uC5D0 \uC801\uC6A9\uD560 \uACF5\uC2DD GTFS \uC6B4\uD589 \uAE30\uB85D\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uC544\uB798 \uAD6C\uC870 \uD6C4\uBCF4\uAC00 \uC788\uB354\uB77C\uB3C4 \uC2E4\uC81C \uC6B4\uD589 \uAC00\uB2A5 \uACBD\uB85C\uB85C \uD655\uC815\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."
   };
-  return /* @__PURE__ */ React.createElement("section", { className: "journey-generator" }, /* @__PURE__ */ React.createElement(GlassCard, { className: "generator-card" }, /* @__PURE__ */ React.createElement("div", { className: "generator-heading" }, /* @__PURE__ */ React.createElement("div", { className: "generator-kicker" }, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uC804\uAD6D \uBC84\uC2A4 \uC5EC\uD589"), /* @__PURE__ */ React.createElement(SourceBadge, { mode: connection.mode, label: connection.label })), /* @__PURE__ */ React.createElement("h1", null, "\uC5B4\uB514\uAE4C\uC9C0 \uAC00\uC138\uC694?"), /* @__PURE__ */ React.createElement("p", null, "\uCD9C\uBC1C\uC9C0\uC640 \uB3C4\uCC29\uC9C0\uB9CC \uACE0\uB974\uBA74, \uC804\uAD6D \uB178\uC120\uC758 \uC2E4\uC81C \uC9C4\uD589 \uBC29\uD5A5\uC744 \uB530\uB77C \uAE38\uC744 \uCC3E\uC544\uB4DC\uB824\uC694.")), /* @__PURE__ */ React.createElement("form", { onSubmit: generate }, /* @__PURE__ */ React.createElement("div", { className: "route-point-sheet" }, /* @__PURE__ */ React.createElement("div", { className: "route-point origin" }, /* @__PURE__ */ React.createElement("span", { className: "point-mark", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement(StopLookup, { label: "\uCD9C\uBC1C", value: fromText, onChange: setFromText, selected: fromStop, onSelect: setFromStop })), /* @__PURE__ */ React.createElement("div", { className: "route-point destination" }, /* @__PURE__ */ React.createElement("span", { className: "point-mark", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement(StopLookup, { label: "\uB3C4\uCC29", value: toText, onChange: setToText, selected: toStop, onSelect: setToStop })), /* @__PURE__ */ React.createElement("button", { className: "generator-swap", type: "button", onClick: () => {
+  return /* @__PURE__ */ React.createElement("section", { className: "journey-generator" }, /* @__PURE__ */ React.createElement(GlassCard, { className: "generator-card" }, /* @__PURE__ */ React.createElement("div", { className: "generator-heading" }, /* @__PURE__ */ React.createElement("div", { className: "generator-kicker" }, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uC804\uAD6D \uBC84\uC2A4 \uC5EC\uD589"), /* @__PURE__ */ React.createElement(SourceBadge, { mode: connection.mode, label: connection.label })), /* @__PURE__ */ React.createElement("h1", null, "\uC5B4\uB514\uAE4C\uC9C0 \uAC00\uC138\uC694?"), /* @__PURE__ */ React.createElement("p", null, "\uCD9C\uBC1C\uC9C0\uC640 \uB3C4\uCC29\uC9C0, \uB5A0\uB0A0 \uB54C\uB97C \uACE0\uB974\uBA74 \uC2E4\uC81C \uC9C4\uD589 \uBC29\uD5A5\uACFC \uACF5\uC2DD \uC2DC\uAC04\uD45C\uB97C \uD568\uAED8 \uD655\uC778\uD574\uC694.")), /* @__PURE__ */ React.createElement("form", { onSubmit: generate }, /* @__PURE__ */ React.createElement("div", { className: "route-point-sheet" }, /* @__PURE__ */ React.createElement("div", { className: "route-point origin" }, /* @__PURE__ */ React.createElement("span", { className: "point-mark", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement(StopLookup, { label: "\uCD9C\uBC1C", value: fromText, onChange: setFromText, selected: fromStop, onSelect: setFromStop })), /* @__PURE__ */ React.createElement("div", { className: "route-point destination" }, /* @__PURE__ */ React.createElement("span", { className: "point-mark", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement(StopLookup, { label: "\uB3C4\uCC29", value: toText, onChange: setToText, selected: toStop, onSelect: setToStop })), /* @__PURE__ */ React.createElement("button", { className: "generator-swap", type: "button", onClick: () => {
     setFromStop(toStop);
     setToStop(fromStop);
     setFromText(toText);
     setToText(fromText);
-  }, "aria-label": "\uCD9C\uBC1C\uACFC \uB3C4\uCC29 \uBC14\uAFB8\uAE30" }, /* @__PURE__ */ React.createElement(Icon, { name: "arrows-down-up" }))), /* @__PURE__ */ React.createElement("fieldset", null, /* @__PURE__ */ React.createElement("legend", null, "\uC5B4\uB5A4 \uAE38\uB85C \uAC08\uAE4C\uC694?"), /* @__PURE__ */ React.createElement("div", { className: "preference-grid" }, [["diverse", "\uCD94\uCC9C", "sparkle"], ["low_transfer", "\uCD5C\uC18C \uD658\uC2B9", "arrows-left-right"], ["reliable", "\uADFC\uAC70 \uC6B0\uC120", "shield-check"], ["challenge", "\uAD6D\uD1A0\uC885\uC8FC", "flag-banner"]].map(([value, label, icon]) => /* @__PURE__ */ React.createElement("button", { type: "button", key: value, className: preference === value ? "active" : "", onClick: () => setPreference(value) }, /* @__PURE__ */ React.createElement(Icon, { name: icon }), label)))), /* @__PURE__ */ React.createElement("button", { className: "liquid-button route-search-primary", type: "submit", disabled: !fromStop || !toStop || loading }, loading ? "\uC804\uAD6D \uB178\uC120\uC5D0\uC11C \uCC3E\uB294 \uC911\u2026" : "\uACBD\uB85C \uCC3E\uAE30", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" })), (!fromStop || !toStop) && /* @__PURE__ */ React.createElement("small", { className: "search-help" }, "\uC815\uB958\uC7A5\uBA85\uC744 \uC785\uB825\uD558\uACE0 \uC804\uAD6D \uBAA9\uB85D\uC5D0\uC11C \uCD9C\uBC1C\xB7\uB3C4\uCC29\uC744 \uAC01\uAC01 \uC120\uD0DD\uD558\uC138\uC694."))), /* @__PURE__ */ React.createElement(GraphCoverage, { networkStatus, result }), error && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: "DATA_GAP" }, error, " \uAC80\uC99D\uB41C \uB178\uC120 \uACBD\uC720 \uC815\uB958\uC7A5\uC774 \uC801\uC7AC\uB418\uC5B4\uC57C \uACBD\uB85C\uC5D0 \uD3EC\uD568\uB429\uB2C8\uB2E4."), result && candidates.length === 0 && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: result.status || "DATA_GAP" }, gapReasons[result.reason] || result.reason || "\uC0DD\uC131 \uAC00\uB2A5\uD55C \uBC29\uD5A5\uC131 \uACBD\uB85C\uAC00 \uC801\uC7AC\uB41C \uADF8\uB798\uD504\uC5D0 \uC5C6\uC2B5\uB2C8\uB2E4."), candidates.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "generated-journeys" }, /* @__PURE__ */ React.createElement("div", { className: "catalog-heading" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uC120\uD0DD \uAE30\uC900 \uACBD\uB85C"), /* @__PURE__ */ React.createElement("h2", null, candidates.length, "\uAC00\uC9C0 \uAE38\uC744 \uCC3E\uC558\uC5B4\uC694")), /* @__PURE__ */ React.createElement("span", null, "\uBE60\uB978 1\uCC28 \uAC80\uC0C9")), /* @__PURE__ */ React.createElement("p", { className: "alternative-hint" }, "\uB2E4\uB978 \uC5EC\uD589 \uC885\uB958\uB294 \uC704 \uAE30\uC900\uC744 \uBC14\uAFD4 \uB2E4\uC2DC \uCC3E\uC544\uBCF4\uC138\uC694."), candidates.map((candidate, index) => {
-    const routeIds = Array.isArray(candidate.route_ids) ? candidate.route_ids.filter(Boolean) : [];
-    const legs = summarizeJourneyLegs(candidate);
-    const coverage = candidate.coverage && typeof candidate.coverage === "object" ? candidate.coverage : {};
-    const evidence = candidate.evidence && typeof candidate.evidence === "object" ? candidate.evidence : {};
-    const hasProbability = typeof candidate.success_probability === "number" && Number.isFinite(candidate.success_probability);
-    return /* @__PURE__ */ React.createElement("article", { key: `${candidate.criterion || "candidate"}-${routeIds.join("-")}-${index}` }, /* @__PURE__ */ React.createElement("div", { className: "candidate-rank" }, index + 1), /* @__PURE__ */ React.createElement("div", { className: "candidate-copy" }, /* @__PURE__ */ React.createElement("div", { className: "candidate-title" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", null, criterionLabels[candidate.criterion] || candidate.criterion || "\uACBD\uB85C \uD6C4\uBCF4"), /* @__PURE__ */ React.createElement("h3", null, routeIds.length > 0 ? `${candidate.transfers || 0}\uD68C \uD658\uC2B9 \xB7 ${routeIds.length}\uAC1C \uB178\uC120` : "\uB178\uC120 DATA_GAP")), /* @__PURE__ */ React.createElement("small", null, candidate.status || "DATA_GAP")), /* @__PURE__ */ React.createElement("div", { className: "candidate-leg-list" }, legs.map((leg, legIndex) => /* @__PURE__ */ React.createElement("div", { className: "candidate-leg", key: `${leg.routeId}-${legIndex}` }, /* @__PURE__ */ React.createElement("span", { className: "timeline-rail" }, /* @__PURE__ */ React.createElement("i", null), /* @__PURE__ */ React.createElement("b", null)), /* @__PURE__ */ React.createElement("div", { className: "leg-copy" }, /* @__PURE__ */ React.createElement("span", { className: "route-pill" }, /* @__PURE__ */ React.createElement(Icon, { name: "bus" }), " ", leg.routeId), /* @__PURE__ */ React.createElement("strong", null, leg.from?.node_name || leg.from?.node_id || "\uC2B9\uCC28 \uC815\uB958\uC7A5"), /* @__PURE__ */ React.createElement("small", null, "\uCD1D ", leg.edgeCount + 1, "\uAC1C \uC815\uB958\uC7A5"), /* @__PURE__ */ React.createElement("strong", null, leg.to?.node_name || leg.to?.node_id || "\uD558\uCC28 \uC815\uB958\uC7A5"))))), /* @__PURE__ */ React.createElement("footer", null, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "arrows-left-right" }), " ", typeof candidate.transfers === "number" ? `${candidate.transfers}\uD68C \uD658\uC2B9` : "\uD658\uC2B9 DATA_GAP"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "database" }), " \uC2B9\uCC28 ", evidence.ride_edges ?? "\u2014", " \xB7 \uD658\uC2B9 ", evidence.transfer_edges ?? "\u2014", " \uAC04\uC120"), /* @__PURE__ */ React.createElement("strong", null, hasProbability ? `\uC131\uACF5\uB960 ${Math.round(candidate.success_probability * 100)}%` : "\uC131\uACF5\uB960 DATA_GAP")), typeof coverage.schedule_routes === "number" && typeof coverage.total_routes === "number" && /* @__PURE__ */ React.createElement("small", { className: "evidence-copy" }, "\uC2DC\uAC04\uD45C \uADFC\uAC70 ", coverage.schedule_routes, "/", coverage.total_routes, typeof coverage.passage_routes === "number" ? ` \xB7 \uD1B5\uACFC \uC774\uB825 ${coverage.passage_routes}/${coverage.total_routes}` : ""), /* @__PURE__ */ React.createElement("button", { className: "open-candidate", type: "button", onClick: () => onChooseJourney?.({ ...candidate, from_stop: fromStop, to_stop: toStop, preference }) }, "\uACBD\uB85C \uC790\uC138\uD788 \uBCF4\uAE30 ", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" }))));
-  })));
+  }, "aria-label": "\uCD9C\uBC1C\uACFC \uB3C4\uCC29 \uBC14\uAFB8\uAE30" }, /* @__PURE__ */ React.createElement(Icon, { name: "arrows-down-up" }))), /* @__PURE__ */ React.createElement("fieldset", { className: "schedule-fieldset" }, /* @__PURE__ */ React.createElement("legend", null, "\uC5B8\uC81C \uB5A0\uB0A0\uAE4C\uC694?"), /* @__PURE__ */ React.createElement("div", { className: "schedule-input-grid" }, /* @__PURE__ */ React.createElement("label", null, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "calendar-blank" }), " \uC5EC\uD589 \uB0A0\uC9DC"), /* @__PURE__ */ React.createElement("input", { type: "date", value: serviceDate, onChange: (event) => setServiceDate(event.target.value), required: true })), /* @__PURE__ */ React.createElement("label", null, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), " \uCD9C\uBC1C \uC2DC\uAC01"), /* @__PURE__ */ React.createElement("input", { type: "time", value: departureTime, onChange: (event) => setDepartureTime(event.target.value), step: "60", required: true }))), /* @__PURE__ */ React.createElement("small", null, "\uC120\uD0DD\uD55C \uB0A0\uC9DC\uC758 \uACF5\uC2DD GTFS \uC6B4\uD589 \uAE30\uB85D\uB9CC \uC2DC\uAC04 \uAC00\uB2A5 \uACBD\uB85C\uB85C \uD45C\uC2DC\uD569\uB2C8\uB2E4.")), /* @__PURE__ */ React.createElement("fieldset", null, /* @__PURE__ */ React.createElement("legend", null, "\uC5B4\uB5A4 \uAE38\uB85C \uAC08\uAE4C\uC694?"), /* @__PURE__ */ React.createElement("div", { className: "preference-grid" }, [["diverse", "\uCD94\uCC9C", "sparkle"], ["low_transfer", "\uCD5C\uC18C \uD658\uC2B9", "arrows-left-right"], ["reliable", "\uADFC\uAC70 \uC6B0\uC120", "shield-check"], ["challenge", "\uAD6D\uD1A0\uC885\uC8FC", "flag-banner"]].map(([value, label, icon]) => /* @__PURE__ */ React.createElement("button", { type: "button", key: value, className: preference === value ? "active" : "", onClick: () => setPreference(value) }, /* @__PURE__ */ React.createElement(Icon, { name: icon }), label)))), /* @__PURE__ */ React.createElement("button", { className: "liquid-button route-search-primary", type: "submit", disabled: !fromStop || !toStop || !serviceDate || !departureTime || loading }, loading ? "\uACF5\uC2DD \uC2DC\uAC04\uD45C\uC5D0\uC11C \uCC3E\uB294 \uC911\u2026" : "\uC2DC\uAC04\uD45C \uACBD\uB85C \uCC3E\uAE30", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" })), (!fromStop || !toStop) && /* @__PURE__ */ React.createElement("small", { className: "search-help" }, "\uC815\uB958\uC7A5\uBA85\uC744 \uC785\uB825\uD558\uACE0 \uC804\uAD6D \uBAA9\uB85D\uC5D0\uC11C \uCD9C\uBC1C\xB7\uB3C4\uCC29\uC744 \uAC01\uAC01 \uC120\uD0DD\uD558\uC138\uC694."))), /* @__PURE__ */ React.createElement(GraphCoverage, { networkStatus, result }), error && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: "DATA_GAP" }, error, " \uAC80\uC99D\uB41C \uB178\uC120 \uACBD\uC720 \uC815\uB958\uC7A5\uC774 \uC801\uC7AC\uB418\uC5B4\uC57C \uACBD\uB85C\uC5D0 \uD3EC\uD568\uB429\uB2C8\uB2E4."), result && !schedule.ready && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: "SCHEDULE_DATA_GAP" }, gapReasons[schedule.reason] || gapReasons[result.reason] || schedule.reason || "\uC120\uD0DD\uD55C \uC77C\uC815\uC758 \uACF5\uC2DD \uC2DC\uAC04\uD45C \uADFC\uAC70\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."), result && schedule.ready && scheduled.length === 0 && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: result.status || "SCHEDULE_DATA_GAP" }, gapReasons[result.reason] || result.reason || "\uC120\uD0DD\uD55C \uC77C\uC815\uC5D0 \uCD9C\uBC1C \uAC00\uB2A5\uD55C \uACF5\uC2DD \uC2DC\uAC04\uD45C \uACBD\uB85C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."), scheduled.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "generated-journeys scheduled-results" }, /* @__PURE__ */ React.createElement("div", { className: "catalog-heading" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uD655\uC778\uB41C \uC2DC\uAC04\uD45C \uACBD\uB85C"), /* @__PURE__ */ React.createElement("h2", null, scheduled.length, "\uAC00\uC9C0 \uAE38\uC744 \uD655\uC778\uD588\uC5B4\uC694")), /* @__PURE__ */ React.createElement("span", null, schedule.serviceDate || serviceDate, " \xB7 ", schedule.departureTime || departureTime)), /* @__PURE__ */ React.createElement("p", { className: "alternative-hint" }, "\uCD9C\uBC1C\xB7\uB3C4\uCC29 \uC2DC\uAC01\uC740 \uD45C\uC2DC\uB41C GTFS \uC6D0\uBCF8 \uADFC\uAC70\uB97C \uB530\uB985\uB2C8\uB2E4. \uC131\uACF5\uB960\uC740 \uBCC4\uB3C4 \uD1B5\uACFC \uC774\uB825\uC774 \uC788\uC744 \uB54C\uB9CC \uACC4\uC0B0\uD569\uB2C8\uB2E4."), scheduled.map((candidate, index) => /* @__PURE__ */ React.createElement(JourneyCandidateCard, { key: `scheduled-${candidate.id || candidate.criterion || "candidate"}-${index}`, candidate, index, schedule, context: journeyContext, onChooseJourney }))), structuralCandidates.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "generated-journeys structural-results" }, /* @__PURE__ */ React.createElement("div", { className: "catalog-heading" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uBC29\uD5A5 \uAD6C\uC870 \uD6C4\uBCF4"), /* @__PURE__ */ React.createElement("h2", null, "\uC2DC\uAC04\uD45C \uD655\uC778 \uC804 \uACBD\uB85C")), /* @__PURE__ */ React.createElement("span", null, "\uC6B4\uD589 \uAC00\uB2A5\uC131 \uBBF8\uD655\uC815")), /* @__PURE__ */ React.createElement("p", { className: "alternative-hint warning" }, "\uB2E8\uBC29\uD5A5 \uC815\uB958\uC7A5 \uC21C\uC11C\uB9CC \uC5F0\uACB0\uB41C \uACB0\uACFC\uC785\uB2C8\uB2E4. \uC120\uD0DD\uD55C \uC77C\uC815\uC758 \uC2E4\uC81C \uBC84\uC2A4\uAC00 \uC788\uB2E4\uACE0 \uD574\uC11D\uD558\uBA74 \uC548 \uB429\uB2C8\uB2E4."), structuralCandidates.map((candidate, index) => /* @__PURE__ */ React.createElement(JourneyCandidateCard, { key: `structural-${candidate.id || candidate.criterion || "candidate"}-${index}`, candidate, index, schedule, structural: true, context: journeyContext, onChooseJourney }))));
 }
 function NationwideScreen({ connection, onChooseJourney }) {
   const [seededStop, setSeededStop] = useState(null);

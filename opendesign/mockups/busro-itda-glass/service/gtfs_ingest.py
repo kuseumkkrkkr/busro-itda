@@ -762,6 +762,42 @@ def _validate_references(stage: sqlite3.Connection) -> None:
             raise GtfsImportError(f"{field} references an unknown raw ID")
 
 
+def _validate_stop_time_order(stage: sqlite3.Connection) -> None:
+    """Reject explicit backwards time records before atomic activation."""
+    current_trip: str | None = None
+    previous_time: int | None = None
+    for row in stage.execute(
+        "SELECT raw_trip_id,stop_sequence,arrival_seconds,departure_seconds "
+        "FROM stop_times ORDER BY raw_trip_id,stop_sequence"
+    ):
+        trip_id = str(row["raw_trip_id"])
+        if trip_id != current_trip:
+            current_trip = trip_id
+            previous_time = None
+        arrival = row["arrival_seconds"]
+        departure = row["departure_seconds"]
+        if arrival is not None:
+            arrival = int(arrival)
+        if departure is not None:
+            departure = int(departure)
+        if arrival is not None and departure is not None and arrival > departure:
+            raise GtfsImportError(
+                f"trip {trip_id!r} stop_sequence {row['stop_sequence']} arrives after departure"
+            )
+        first_time = arrival if arrival is not None else departure
+        last_time = departure if departure is not None else arrival
+        if (
+            previous_time is not None
+            and first_time is not None
+            and first_time < previous_time
+        ):
+            raise GtfsImportError(
+                f"trip {trip_id!r} stop_times are not time-monotonic"
+            )
+        if last_time is not None:
+            previous_time = last_time
+
+
 def _derive_patterns(stage: sqlite3.Connection, provider: str) -> int:
     graph_city_code = f"GTFS-{provider}"
     candidate_sql = (
@@ -796,7 +832,6 @@ def _derive_patterns(stage: sqlite3.Connection, provider: str) -> int:
     current_route = ""
     current_direction: int | None = None
     current_is_bus = False
-    current_graph_eligible = True
     current_stops: list[str] = []
     processed_trips = 0
 
@@ -817,7 +852,7 @@ def _derive_patterns(stage: sqlite3.Connection, provider: str) -> int:
         processed_trips += 1
         if len(current_stops) < 2:
             raise GtfsImportError(f"trip {current_trip!r} must contain at least two stop_times")
-        if not current_is_bus or not current_graph_eligible:
+        if not current_is_bus:
             return
         pattern_sha = hashlib.sha256(
             _canonical(
@@ -851,7 +886,6 @@ def _derive_patterns(stage: sqlite3.Connection, provider: str) -> int:
                 current_route = row["raw_route_id"]
                 current_direction = row["direction_id"]
                 current_is_bus = bool(row["is_bus"])
-                current_graph_eligible = True
                 current_stops = []
             if row["stop_sequence"] is not None:
                 if len(current_stops) >= MAX_PATTERN_STOPS:
@@ -859,8 +893,6 @@ def _derive_patterns(stage: sqlite3.Connection, provider: str) -> int:
                         f"trip {current_trip!r} exceeds {MAX_PATTERN_STOPS} stops"
                     )
                 current_stops.append(row["raw_stop_id"])
-                if row["pickup_type"] not in (None, 0) or row["drop_off_type"] not in (None, 0):
-                    current_graph_eligible = False
         finish_trip()
         flush_batches()
         total_trips = int(stage.execute("SELECT COUNT(*) FROM trips").fetchone()[0])
@@ -927,6 +959,7 @@ def _build_stage(
             finally:
                 csv.field_size_limit(previous_field_limit)
         _validate_references(stage)
+        _validate_stop_time_order(stage)
         counts["bus_patterns"] = _derive_patterns(stage, provider)
         stage.executemany(
             "INSERT INTO stage_meta(key,value) VALUES(?,?)",

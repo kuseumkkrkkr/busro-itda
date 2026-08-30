@@ -604,9 +604,18 @@ class BusroService:
             {
                 "from_stop_id", "to_stop_id", "from_city_code", "to_city_code",
                 "preference", "max_alternatives", "transfer_radius_m",
+                "service_date", "departure_time",
             },
             "body",
         )
+        has_service_date = body.get("service_date") not in (None, "")
+        has_departure_time = body.get("departure_time") not in (None, "")
+        if has_service_date != has_departure_time:
+            raise AppError(
+                "INVALID_SCHEDULE_QUERY",
+                "service_date and departure_time must be supplied together",
+                status=422,
+            )
         preference = str(body.get("preference") or "diverse")
         if preference not in {"diverse", "low_transfer", "reliable", "challenge"}:
             raise AppError("INVALID_PREFERENCE", "preference is not supported")
@@ -617,6 +626,53 @@ class BusroService:
             50,
             800,
         )
+        scheduled: dict[str, Any] | None = None
+        if has_service_date:
+            try:
+                snapshot = self.network_catalog.planning_snapshot()
+                scheduled = self.network_catalog.plan_gtfs_schedule(
+                    provider="KTDB",
+                    schedule_source_id="ktdb-gtfs-2024",
+                    origin_node_id=body.get("from_stop_id"),
+                    destination_node_id=body.get("to_stop_id"),
+                    service_date=str(body.get("service_date")),
+                    departure_time=str(body.get("departure_time")),
+                )
+            except CatalogError as exc:
+                raise AppError(
+                    "JOURNEY_PLANNER_INPUT_INVALID", str(exc), status=422
+                ) from exc
+            if scheduled.get("reason") == "SCHEDULE_BUSY":
+                raise AppError(
+                    "SCHEDULE_BUSY",
+                    "Official schedule routing is at capacity; retry shortly",
+                    status=429,
+                    details={"retry_after_seconds": 1},
+                )
+            if scheduled.get("status") == "READY":
+                scheduled_candidates = self._public_scheduled_candidates(
+                    scheduled, snapshot
+                )
+                return {
+                    "ok": True,
+                    "status": "READY",
+                    "reason": None,
+                    "preference": preference,
+                    "preference_requested": preference,
+                    "preference_applied": "earliest_arrival",
+                    "preference_ignored": preference != "earliest_arrival",
+                    "schedule": scheduled.get("schedule", {}),
+                    "graph": scheduled.get("graph", {}),
+                    "count": len(scheduled_candidates),
+                    "candidates": scheduled_candidates,
+                    "alternatives": scheduled_candidates,
+                    "static_alternatives": [],
+                    "static_alternatives_notice": "NOT_COMPUTED_SCHEDULE_READY",
+                    "evidence_policy": (
+                        "Official GTFS proves published schedule feasibility only; "
+                        "actual operation and success probability require persisted passage evidence"
+                    ),
+                }
         try:
             snapshot = self.network_catalog.planning_snapshot()
             # One bounded graph build per catalog revision/radius; path searches
@@ -741,7 +797,7 @@ class BusroService:
             )
         elif preference == "low_transfer":
             candidates.sort(key=lambda item: (item["transfer_count"], item["walking_m"], item["id"]))
-        return {
+        response = {
             "ok": True,
             "status": planned.get("status", "DATA_GAP"),
             "reason": planned.get("reason"),
@@ -755,6 +811,118 @@ class BusroService:
                 "the ratio measures observation reconstruction, not timetable or transfer reliability"
             ),
         }
+        if has_service_date:
+            assert scheduled is not None
+            scheduled_candidates = self._public_scheduled_candidates(
+                scheduled, snapshot
+            )
+            response.update(
+                {
+                    "status": scheduled.get("status", "DATA_GAP"),
+                    "reason": scheduled.get("reason") or (
+                        scheduled.get("schedule") or {}
+                    ).get("reason"),
+                    "schedule": scheduled.get("schedule", {}),
+                    "preference_requested": preference,
+                    "preference_applied": "earliest_arrival",
+                    "preference_ignored": preference != "earliest_arrival",
+                    "graph": scheduled.get("graph", {}),
+                    "count": len(scheduled_candidates),
+                    "candidates": scheduled_candidates,
+                    "alternatives": scheduled_candidates,
+                    "static_alternatives": candidates,
+                    "static_alternatives_notice": (
+                        "STRUCTURAL_ONLY_NOT_TIME_FEASIBILITY"
+                    ),
+                }
+            )
+        return response
+
+    @staticmethod
+    def _public_scheduled_candidates(
+        scheduled: dict[str, Any], snapshot: Any
+    ) -> list[dict[str, Any]]:
+        route_lookup = {(item.city_code, item.route_id): item for item in snapshot.routes}
+        public: list[dict[str, Any]] = []
+        for index, candidate in enumerate(scheduled.get("alternatives") or []):
+            seen: set[tuple[str, str]] = set()
+            routes: list[dict[str, Any]] = []
+            route_labels = candidate.get("route_labels") or {}
+            for step in candidate.get("steps") or []:
+                if step.get("kind") != "ride" or not step.get("route_id"):
+                    continue
+                city = str((step.get("from") or {}).get("city_code") or "")
+                route_id = str(step["route_id"])
+                key = (city, route_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                catalog_route = route_lookup.get(key)
+                routes.append(
+                    {
+                        "city_code": city,
+                        "route_id": route_id,
+                        "route_no": (
+                            step.get("route_no")
+                            or route_labels.get(route_id)
+                            or (catalog_route.route_no if catalog_route else route_id)
+                        ),
+                    }
+                )
+            coverage = candidate.get("coverage") or {}
+            total_routes = max(1, int(coverage.get("total_routes") or len(routes) or 1))
+            schedule_coverage = min(
+                float(coverage.get("structural") or 0),
+                int(coverage.get("schedule_routes") or 0) / total_routes,
+            )
+            public.append(
+                {
+                    "id": "journey_" + canonical_hash(
+                        [
+                            (scheduled.get("schedule") or {}).get("feed_id"),
+                            index,
+                            candidate.get("steps"),
+                        ]
+                    )[:20],
+                    "criterion": "earliest_arrival",
+                    "kind": "earliest_arrival",
+                    "kind_label": "공식 시간표 최단시간",
+                    "title": f"{len(routes)}개 시내버스로 가장 빠르게 잇기",
+                    "status": candidate.get("status", "READY"),
+                    "reasons": candidate.get("reasons", []),
+                    "scheduled": True,
+                    "schedule_status": candidate.get("schedule_status", "READY"),
+                    "success_probability": None,
+                    "probability_basis": None,
+                    "probability_scope": None,
+                    "estimated_minutes": candidate.get("estimated_minutes"),
+                    "in_vehicle_and_wait_minutes": candidate.get("in_vehicle_and_wait_minutes"),
+                    "departure_time": candidate.get("departure_time"),
+                    "arrival_time": candidate.get("arrival_time"),
+                    "departure_datetime": candidate.get("departure_datetime"),
+                    "arrival_datetime": candidate.get("arrival_datetime"),
+                    "transfer_count": candidate.get("transfers", 0),
+                    "transfers": candidate.get("transfers", 0),
+                    "walking_m": candidate.get("walking_m", 0),
+                    "transfer_model": candidate.get(
+                        "transfer_model", "EXACT_STOP_SERVER_5_MIN"
+                    ),
+                    "route_count": len(routes),
+                    "route_ids": [item["route_id"] for item in routes],
+                    "routes": routes,
+                    "steps": candidate.get("steps", []),
+                    "replay_ready": candidate.get("replay_ready", False),
+                    "replay_legs": candidate.get("replay_legs", []),
+                    "replay_data_gaps": candidate.get("replay_data_gaps", []),
+                    "gtfs_service_dates": candidate.get("gtfs_service_dates", []),
+                    "evidence": {
+                        **(candidate.get("evidence") or {}),
+                        "coverage": round(schedule_coverage, 4),
+                    },
+                    "coverage": coverage,
+                }
+            )
+        return public
 
     def route_geometry(self, body: dict[str, Any]) -> dict[str, Any]:
         self._only_fields(body, {"route_ref", "stops", "allow_road_estimate"}, "body")
@@ -1617,7 +1785,10 @@ class BusroService:
         if not NODE_ID_RE.fullmatch(node_id):
             raise AppError("INVALID_NODE_ID", f"legs[{index}].node_id has an invalid format")
         node_order = self._bounded_int(
-            value.get("node_order"), f"legs[{index}].node_order", 1, 9999
+            value.get("node_order"),
+            f"legs[{index}].node_order",
+            1 if self.settings.fixture_mode else 0,
+            9999 if self.settings.fixture_mode else 100_000,
         )
         scheduled: int | float | None = None
         next_departure: int | float | None = None
@@ -1681,10 +1852,18 @@ class BusroService:
             )
         else:
             schedule_trip_id = None
+        schedule_feed_id = value.get("time_evidence_feed_id")
+        if schedule_feed_id not in (None, ""):
+            schedule_feed_id = self._identifier(
+                schedule_feed_id, f"legs[{index}].time_evidence_feed_id"
+            )
+        else:
+            schedule_feed_id = None
         next_route_id: str | None = None
         next_node_id: str | None = None
         next_node_order: int | None = None
         next_schedule_trip_id: str | None = None
+        next_schedule_feed_id: str | None = None
         if not self.settings.fixture_mode:
             if value.get("next_route_id") not in (None, ""):
                 next_route_id = self._transport_identifier(
@@ -1701,13 +1880,18 @@ class BusroService:
                 next_node_order = self._bounded_int(
                     value.get("next_node_order"),
                     f"legs[{index}].next_node_order",
-                    1,
-                    9999,
+                    0,
+                    100_000,
                 )
             if value.get("next_time_evidence_trip_id") not in (None, ""):
                 next_schedule_trip_id = self._transport_identifier(
                     value.get("next_time_evidence_trip_id"),
                     f"legs[{index}].next_time_evidence_trip_id",
+                )
+            if value.get("next_time_evidence_feed_id") not in (None, ""):
+                next_schedule_feed_id = self._identifier(
+                    value.get("next_time_evidence_feed_id"),
+                    f"legs[{index}].next_time_evidence_feed_id",
                 )
         return {
             "id": leg_id,
@@ -1721,10 +1905,12 @@ class BusroService:
             "minimum_transfer_source": minimum_transfer_source,
             "time_evidence_source": time_evidence_source,
             "time_evidence_trip_id": schedule_trip_id,
+            "time_evidence_feed_id": schedule_feed_id,
             "next_route_id": next_route_id,
             "next_node_id": next_node_id,
             "next_node_order": next_node_order,
             "next_time_evidence_trip_id": next_schedule_trip_id,
+            "next_time_evidence_feed_id": next_schedule_feed_id,
         }
 
     def _live_replay_schedule_leg(
@@ -1750,11 +1936,13 @@ class BusroService:
             )
 
         required_metadata = {
+            "time_evidence_feed_id": leg["time_evidence_feed_id"],
             "time_evidence_trip_id": leg["time_evidence_trip_id"],
             "next_route_id": leg["next_route_id"],
             "next_node_id": leg["next_node_id"],
             "next_node_order": leg["next_node_order"],
             "next_time_evidence_trip_id": leg["next_time_evidence_trip_id"],
+            "next_time_evidence_feed_id": leg["next_time_evidence_feed_id"],
         }
         missing_fields = [
             field for field, value in required_metadata.items() if value is None
@@ -1783,6 +1971,7 @@ class BusroService:
             node_id=leg["node_id"],
             node_order=leg["node_order"],
             trip_id=leg["time_evidence_trip_id"],
+            expected_feed_id=leg["time_evidence_feed_id"],
         )
         next_departure_record = self._live_gtfs_stop_time_record(
             leg_id=leg["id"],
@@ -1794,6 +1983,7 @@ class BusroService:
             node_id=leg["next_node_id"],
             node_order=leg["next_node_order"],
             trip_id=leg["next_time_evidence_trip_id"],
+            expected_feed_id=leg["next_time_evidence_feed_id"],
         )
         arrival_seconds = arrival_record["arrival_seconds"]
         departure_seconds = next_departure_record["departure_seconds"]
@@ -1848,13 +2038,17 @@ class BusroService:
         node_id: str,
         node_order: int,
         trip_id: str,
+        expected_feed_id: str,
     ) -> dict[str, Any]:
         try:
-            evidence = self.network_catalog.gtfs_schedule_evidence(
+            record = self.network_catalog.gtfs_exact_stop_time_record(
                 provider=provider,
-                graph_route_id=route_id,
                 service_date=service_date.isoformat(),
-                limit=100,
+                graph_route_id=route_id,
+                node_id=node_id,
+                node_order=node_order,
+                trip_namespace_id=trip_id,
+                expected_feed_id=expected_feed_id,
             )
         except CatalogError as exc:
             raise AppError(
@@ -1871,7 +2065,7 @@ class BusroService:
                     "reason": type(exc).__name__.upper(),
                 },
             ) from exc
-        if evidence.get("data_gap"):
+        if record.get("data_gap"):
             raise AppError(
                 "OFFICIAL_SCHEDULE_RECORD_REQUIRED",
                 "Live replay requires an active official schedule feed",
@@ -1883,50 +2077,15 @@ class BusroService:
                     "route_id": route_id,
                     "node_id": node_id,
                     "service_date": service_date.isoformat(),
-                    "reason": evidence.get("reason") or "SCHEDULE_DATA_GAP",
+                    "matching_records": 0,
+                    "reason": record.get("reason") or "SCHEDULE_DATA_GAP",
                 },
             )
-
-        records: list[
-            tuple[dict[str, Any], dict[str, Any], int | None, int | None]
-        ] = []
-        for trip in evidence.get("trips") or []:
-            if (trip.get("calendar") or {}).get("operates_on_date") is not True:
-                continue
-            if str(trip.get("trip_namespace_id") or "") != trip_id:
-                continue
-            for stop_time in trip.get("stop_times") or []:
-                try:
-                    sequence = int(stop_time.get("stop_sequence"))
-                except (TypeError, ValueError):
-                    continue
-                try:
-                    arrival_seconds = (
-                        int(stop_time["arrival_seconds"])
-                        if stop_time.get("arrival_seconds") is not None
-                        else None
-                    )
-                    departure_seconds = (
-                        int(stop_time["departure_seconds"])
-                        if stop_time.get("departure_seconds") is not None
-                        else None
-                    )
-                except (TypeError, ValueError):
-                    continue
-                if (
-                    stop_time.get("node_id") == node_id
-                    and sequence == node_order
-                    and (phase != "arrival" or arrival_seconds is not None)
-                    and (phase != "next_departure" or departure_seconds is not None)
-                ):
-                    records.append((trip, stop_time, arrival_seconds, departure_seconds))
-
-        if len(records) != 1:
-            reason = (
-                "AMBIGUOUS_GTFS_SCHEDULE_RECORD"
-                if len(records) > 1
-                else "ROUTE_STOP_SERVICE_DATE_RECORD_REQUIRED"
-            )
+        arrival_seconds = record.get("arrival_seconds")
+        departure_seconds = record.get("departure_seconds")
+        if (phase == "arrival" and arrival_seconds is None) or (
+            phase == "next_departure" and departure_seconds is None
+        ):
             raise AppError(
                 "OFFICIAL_SCHEDULE_RECORD_REQUIRED",
                 "Live replay requires exactly one official trip-stop-date schedule record",
@@ -1940,15 +2099,13 @@ class BusroService:
                     "node_order": node_order,
                     "service_date": service_date.isoformat(),
                     "time_evidence_trip_id": trip_id,
-                    "matching_records": len(records),
-                    "reason": reason,
+                    "matching_records": 1,
+                    "reason": "REQUIRED_GTFS_TIME_MISSING",
                 },
             )
-
-        _trip, stop_time, arrival_seconds, departure_seconds = records[0]
-        feed = evidence.get("feed") or {}
+        feed = record.get("feed") or {}
         return {
-            "basis": evidence.get("basis"),
+            "basis": record.get("basis"),
             "source_id": source_id,
             "provider": provider,
             "feed_id": feed.get("feed_id"),
@@ -1957,9 +2114,9 @@ class BusroService:
             "node_id": node_id,
             "node_order": node_order,
             "trip_id": trip_id,
-            "arrival_time": stop_time.get("arrival_time"),
+            "arrival_time": record.get("arrival_time"),
             "arrival_seconds": arrival_seconds,
-            "departure_time": stop_time.get("departure_time"),
+            "departure_time": record.get("departure_time"),
             "departure_seconds": departure_seconds,
         }
 

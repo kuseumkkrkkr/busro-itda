@@ -192,7 +192,7 @@ python -B multi_collector.py `
 - `POST /api/simulate` — 현재 fixture 모드 전용. LIVE는 `PASSAGE_HISTORY_REQUIRED`.
 - `POST /api/mappings/validate` — `{city_code,route_id,node_id}`가 실제 노선 경유 정류장인지 최대 1,000개 범위에서 검증합니다.
 - `POST /api/network/hydrate` — `{city_code,route_id}`의 전체 경유 순서를 서버가 TAGO에서 조회해 그래프에 적재합니다.
-- `POST /api/journeys/generate` — `{from_stop_id,to_stop_id,preference,max_alternatives}`로 방향성 대안을 생성합니다.
+- `POST /api/journeys/generate` — `{from_stop_id,to_stop_id,service_date,departure_time,preference,max_alternatives}`로 활성 공식 GTFS의 해당 운행일·출발 시각 이후 가장 이른 도착 경로를 검색합니다. 날짜와 시각은 함께 보내야 하며 KST 민간시를 사용합니다. 공식 시간표가 없으면 `SCHEDULE_DATA_GAP`과 별도의 `static_alternatives`만 반환하고 실제 운행 가능 경로로 확정하지 않습니다.
 - `POST /api/osm/geometry` — `{route_ref,stops}`로 OSM 버스 관계 또는 명시적으로 라벨된 도로 추정 형상을 반환합니다.
 
 카탈로그 응답은 `provenance.snapshot_id`, `upstream_hash`, `captured_at`을 포함합니다. fixture는 `source=TAGO_SCHEMA_FIXTURE`와 `fixture_notice=SCHEMA_ONLY_NOT_LIVE`로 표시되며 실데이터로 해석하면 안 됩니다.

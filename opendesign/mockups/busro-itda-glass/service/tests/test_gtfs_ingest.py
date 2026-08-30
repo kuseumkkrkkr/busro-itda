@@ -252,6 +252,33 @@ class GtfsIngestTests(unittest.TestCase):
             revision = int(connection.execute("SELECT value FROM catalog_meta WHERE key='revision'").fetchone()[0])
         self.assertEqual(revision, good["revision"])
 
+    def test_explicit_non_monotonic_stop_times_are_rejected_before_activation(self):
+        arrives_after_departure = base_tables()
+        arrives_after_departure["stop_times.txt"] = (
+            arrives_after_departure["stop_times.txt"]
+            .decode("utf-8")
+            .replace("24:20:00,24:20:00", "24:21:00,24:20:00", 1)
+            .encode("utf-8")
+        )
+        first_path = self.root / "arrival-after-departure.zip"
+        first_digest = write_zip(first_path, arrives_after_departure)
+        with self.assertRaisesRegex(GtfsImportError, "arrives after departure"):
+            self.ingest(first_path, first_digest)
+
+        backwards = base_tables()
+        backwards["stop_times.txt"] = (
+            backwards["stop_times.txt"]
+            .decode("utf-8")
+            .replace("24:05:00,24:06:00", "23:40:00,23:41:00", 1)
+            .encode("utf-8")
+        )
+        second_path = self.root / "backwards.zip"
+        second_digest = write_zip(second_path, backwards)
+        with self.assertRaisesRegex(GtfsImportError, "not time-monotonic"):
+            self.ingest(second_path, second_digest)
+
+        self.assertTrue(self.catalog.gtfs_feed_evidence(provider="KTDB")["data_gap"])
+
     def test_new_valid_feed_replaces_only_active_provider_patterns_atomically(self):
         first_path = self.root / "first.zip"
         first_digest = write_zip(first_path, base_tables())
@@ -375,7 +402,7 @@ class GtfsIngestTests(unittest.TestCase):
         self.assertFalse(self.catalog.gtfs_feed_evidence(provider="KTDB").get("feed"))
         self.assertFalse(list(self.root.glob("gtfs-stage-*")))
 
-    def test_restricted_boarding_pattern_is_evidence_only_not_active_graph(self):
+    def test_stop_level_boarding_restrictions_do_not_remove_bus_topology(self):
         tables = base_tables()
         reader = csv.DictReader(io.StringIO(tables["stop_times.txt"].decode("utf-8")))
         rows = list(reader)
@@ -388,13 +415,9 @@ class GtfsIngestTests(unittest.TestCase):
 
         result = self.ingest(path, digest)
 
-        self.assertEqual(result["counts"]["bus_patterns"], 1)
+        self.assertEqual(result["counts"]["bus_patterns"], 2)
         sequences = self.catalog.planning_snapshot().route_sequences
-        self.assertEqual(len(sequences), 1)
-        self.assertEqual(
-            [stop.node_name for stop in sequences[0].stops],
-            ["도착", "중간", "출발"],
-        )
+        self.assertEqual(len(sequences), 2)
         with self.catalog.connect() as connection:
             trip = connection.execute(
                 "SELECT pattern_id FROM gtfs_trips WHERE raw_trip_id='왕복/상행'"
@@ -403,7 +426,7 @@ class GtfsIngestTests(unittest.TestCase):
                 "SELECT pickup_type FROM gtfs_stop_times "
                 "WHERE raw_trip_id='왕복/상행' AND stop_sequence=1"
             ).fetchone()
-        self.assertIsNone(trip["pattern_id"])
+        self.assertIsNotNone(trip["pattern_id"])
         self.assertEqual(restriction["pickup_type"], 1)
 
         rows[3]["drop_off_type"] = "2"
@@ -415,8 +438,8 @@ class GtfsIngestTests(unittest.TestCase):
         all_restricted = self.ingest(
             all_restricted_path, all_restricted_digest, source_date="2026-09-01"
         )
-        self.assertEqual(all_restricted["counts"]["bus_patterns"], 0)
-        self.assertEqual(len(self.catalog.planning_snapshot().route_sequences), 0)
+        self.assertEqual(all_restricted["counts"]["bus_patterns"], 2)
+        self.assertEqual(len(self.catalog.planning_snapshot().route_sequences), 2)
 
     def test_single_trip_stop_limit_aborts_before_unbounded_list_growth(self):
         tables = base_tables()

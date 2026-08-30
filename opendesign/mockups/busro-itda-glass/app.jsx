@@ -36,7 +36,7 @@ function replayValue(step, key) {
   return step?.replay?.[key] ?? step?.timetable?.[key] ?? step?.time_evidence?.[key] ?? step?.[key];
 }
 
-function deriveJourneyLegs(journey) {
+function deriveJourneyLegs(journey, { replayOnly = false } = {}) {
   const steps = Array.isArray(journey?.steps) ? journey.steps : [];
   const groups = [];
   let current = null;
@@ -60,10 +60,28 @@ function deriveJourneyLegs(journey) {
     }
   });
 
+  const hasReplayContract = Object.prototype.hasOwnProperty.call(journey || {}, "replay_legs");
   const replayRows = Array.isArray(journey?.replay_legs) ? journey.replay_legs : [];
-  return groups.map((group, index) => {
+  const selections = replayOnly && hasReplayContract ? replayRows.map((replayRow) => {
+    const groupIndex = groups.findIndex((group) => {
+      const lastRide = group.rides[group.rides.length - 1];
+      return group.routeId === String(replayRow?.route_id || "")
+        && String(group.to?.node_id || "") === String(replayRow?.node_id || "")
+        && Number(group.to?.node_order) === Number(replayRow?.node_order)
+        && String(lastRide?.trip_id || "") === String(replayRow?.time_evidence_trip_id || "");
+    });
+    if (groupIndex < 0) return null;
+    const nextGroup = groups[groupIndex + 1];
+    if (!nextGroup
+      || nextGroup.routeId !== String(replayRow?.next_route_id || "")
+      || String(nextGroup.from?.node_id || "") !== String(replayRow?.next_node_id || "")
+      || Number(nextGroup.from?.node_order) !== Number(replayRow?.next_node_order)
+      || String(nextGroup.rides[0]?.trip_id || "") !== String(replayRow?.next_time_evidence_trip_id || "")) return null;
+    return { group: groups[groupIndex], replayRow };
+  }).filter(Boolean) : replayOnly ? [] : groups.map((group) => ({ group, replayRow: {} }));
+
+  return selections.map(({ group, replayRow }, index) => {
     const lastRide = group.rides[group.rides.length - 1];
-    const replayRow = replayRows[index] || replayRows.find((item) => String(item?.route_id || "") === group.routeId) || {};
     const scheduledArrival = replayRow.scheduled_arrival ?? replayValue(lastRide, "scheduled_arrival");
     const nextDeparture = replayRow.next_departure ?? replayValue(lastRide, "next_departure");
     const minimumTransfer = replayRow.minimum_transfer_minutes ?? replayValue(lastRide, "minimum_transfer_minutes");
@@ -71,11 +89,13 @@ function deriveJourneyLegs(journey) {
     const timeEvidenceSource = cleanIdentifier(replayRow.time_evidence_source || evidenceBlock.source || "");
     const timeEvidenceVerified = replayRow.time_evidence_verified === true || evidenceBlock.verified === true;
     const timeEvidenceTripId = cleanIdentifier(replayRow.time_evidence_trip_id || evidenceBlock.trip_id || "");
+    const timeEvidenceFeedId = cleanIdentifier(replayRow.time_evidence_feed_id || evidenceBlock.feed_id || "");
     const nextRouteId = cleanIdentifier(replayRow.next_route_id || evidenceBlock.next_route_id || "");
     const nextNodeId = cleanIdentifier(replayRow.next_node_id || evidenceBlock.next_node_id || "");
     const nextNodeOrderValue = replayRow.next_node_order ?? evidenceBlock.next_node_order;
     const nextNodeOrder = Number.isInteger(Number(nextNodeOrderValue)) ? Number(nextNodeOrderValue) : null;
     const nextTimeEvidenceTripId = cleanIdentifier(replayRow.next_time_evidence_trip_id || evidenceBlock.next_trip_id || "");
+    const nextTimeEvidenceFeedId = cleanIdentifier(replayRow.next_time_evidence_feed_id || evidenceBlock.next_feed_id || "");
     const parsedMinimumTransfer = minimumTransfer !== null && minimumTransfer !== undefined && String(minimumTransfer).trim() !== "" && Number.isInteger(Number(minimumTransfer)) ? Number(minimumTransfer) : null;
     let buffer = null;
     if (timeEvidenceVerified && timeEvidenceSource && isClockTime(scheduledArrival) && isClockTime(nextDeparture) && parsedMinimumTransfer !== null) {
@@ -87,18 +107,21 @@ function deriveJourneyLegs(journey) {
       buffer = departureTotal - arrivalTotal - parsedMinimumTransfer;
     }
     const safeRoute = group.routeId.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 42) || "route";
+    const checkpointId = replayOnly ? `replay-${cleanIdentifier(replayRow.id) || `transfer-${index + 1}-${safeRoute}`}` : `ride-${index + 1}-${safeRoute}`;
+    const checkpointNodeId = replayOnly ? String(replayRow.node_id || "") : String(group.from.node_id);
+    const checkpointNodeOrder = replayOnly ? Number(replayRow.node_order) : Number(group.from.node_order);
     return {
-      id: `leg-${index + 1}-${safeRoute}`.slice(0, 64),
+      id: checkpointId.slice(0, 64),
       city: group.from.city_name || group.to.city_name || (group.cityCode ? `도시코드 ${group.cityCode}` : "도시 DATA_GAP"),
       cityCode: group.cityCode,
       routeId: group.routeId,
       routeNo: String(lastRide.route_no || group.rides[0].route_no || group.routeId),
-      board: group.from.node_name || group.from.node_id,
-      nodeId: String(group.from.node_id),
-      nodeOrder: Number(group.from.node_order),
+      board: replayOnly ? (group.to.node_name || group.to.node_id) : (group.from.node_name || group.from.node_id),
+      nodeId: checkpointNodeId,
+      nodeOrder: checkpointNodeOrder,
       alight: group.to.node_name || group.to.node_id,
-      alightNodeId: String(group.to.node_id),
-      alightNodeOrder: Number(group.to.node_order),
+      alightNodeId: replayOnly ? String(replayRow.node_id || "") : String(group.to.node_id),
+      alightNodeOrder: replayOnly ? Number(replayRow.node_order) : Number(group.to.node_order),
       scheduledArrival: isClockTime(scheduledArrival) ? String(scheduledArrival) : null,
       nextDeparture: isClockTime(nextDeparture) ? String(nextDeparture) : null,
       minimumTransfer: parsedMinimumTransfer,
@@ -106,10 +129,13 @@ function deriveJourneyLegs(journey) {
       timeEvidenceSource,
       timeEvidenceVerified,
       timeEvidenceTripId,
+      timeEvidenceFeedId,
       nextRouteId,
       nextNodeId,
       nextNodeOrder,
       nextTimeEvidenceTripId,
+      nextTimeEvidenceFeedId,
+      transferCheckpoint: replayOnly,
     };
   });
 }
@@ -185,8 +211,10 @@ function App() {
   const [mappings, setMappings] = useState({});
   const [passageCoverage, setPassageCoverage] = useState(EMPTY_PASSAGE_COVERAGE);
   const [legCoverage, setLegCoverage] = useState(EMPTY_PASSAGE_COVERAGE);
-  const activeLegs = useMemo(() => deriveJourneyLegs(activeJourney), [activeJourney]);
-  const effectiveLegs = useMemo(() => activeLegs.map((item) => {
+  const liveLegs = useMemo(() => deriveJourneyLegs(activeJourney), [activeJourney]);
+  const replayCheckpoints = useMemo(() => deriveJourneyLegs(activeJourney, { replayOnly: true }), [activeJourney]);
+  const operationalLegs = useMemo(() => [...liveLegs, ...replayCheckpoints], [liveLegs, replayCheckpoints]);
+  const applyMappingState = (legs) => legs.map((item) => {
     const mapping = mappings[item.id] || {};
     return {
       ...item,
@@ -197,31 +225,44 @@ function App() {
       mappingState: mapping.state || "unmapped",
       mappingNote: mapping.note || "서버 검증 전",
     };
-  }), [activeLegs, mappings]);
-  const leg = useMemo(() => effectiveLegs.find((item) => item.id === selectedLeg) || effectiveLegs[0], [effectiveLegs, selectedLeg]);
-  const mappingSummary = useMemo(() => ({
-    verified: effectiveLegs.filter((item) => item.apiMapped).length,
-    checking: effectiveLegs.filter((item) => item.mappingState === "checking").length,
-    total: effectiveLegs.length,
-  }), [effectiveLegs]);
-  const replayReady = useMemo(() => effectiveLegs.length > 0 && effectiveLegs.every((item) => (
+  });
+  const effectiveLiveLegs = useMemo(() => applyMappingState(liveLegs), [liveLegs, mappings]);
+  const effectiveReplayCheckpoints = useMemo(() => applyMappingState(replayCheckpoints), [replayCheckpoints, mappings]);
+  const effectiveOperationalLegs = useMemo(() => [...effectiveLiveLegs, ...effectiveReplayCheckpoints], [effectiveLiveLegs, effectiveReplayCheckpoints]);
+  const leg = useMemo(() => effectiveLiveLegs.find((item) => item.id === selectedLeg) || effectiveLiveLegs[0], [effectiveLiveLegs, selectedLeg]);
+  const summarizeMappings = (legs) => ({
+    verified: legs.filter((item) => item.apiMapped).length,
+    checking: legs.filter((item) => item.mappingState === "checking").length,
+    total: legs.length,
+  });
+  const liveMappingSummary = useMemo(() => summarizeMappings(effectiveLiveLegs), [effectiveLiveLegs]);
+  const replayMappingSummary = useMemo(() => summarizeMappings(effectiveReplayCheckpoints), [effectiveReplayCheckpoints]);
+  const operationalMappingSummary = useMemo(() => summarizeMappings(effectiveOperationalLegs), [effectiveOperationalLegs]);
+  const replayReady = useMemo(() => effectiveReplayCheckpoints.length > 0 && effectiveReplayCheckpoints.every((item) => (
     item.timeEvidenceVerified
     && item.timeEvidenceSource
     && item.timeEvidenceTripId
+    && item.timeEvidenceFeedId
     && item.nextRouteId
     && item.nextNodeId
     && Number.isInteger(item.nextNodeOrder)
     && item.nextTimeEvidenceTripId
+    && item.nextTimeEvidenceFeedId
     && isClockTime(item.scheduledArrival)
     && isClockTime(item.nextDeparture)
     && Number.isInteger(item.minimumTransfer)
     && item.alightNodeId
     && Number.isInteger(item.alightNodeOrder)
-  )), [effectiveLegs]);
+  )), [effectiveReplayCheckpoints]);
+  const replayApplicability = useMemo(() => {
+    if (!activeJourney) return "journey_required";
+    if (activeJourney.scheduled === true && Number(activeJourney.transfers) === 0) return "not_applicable";
+    return replayReady ? "ready" : "data_gap";
+  }, [activeJourney, replayReady]);
 
   useEffect(() => { localStorage.setItem(APP_STORAGE_KEY, JSON.stringify({ tab, selectedLeg })); }, [tab, selectedLeg]);
 
-  async function checkConnection(mappingSnapshot = mappings, legsSnapshot = effectiveLegs) {
+  async function checkConnection(mappingSnapshot = mappings, legsSnapshot = effectiveOperationalLegs) {
     setConnection({ mode: "offline", label: "연결 확인 중", message: "로컬 데이터 서비스 상태를 확인하고 있습니다." });
     try {
       const status = await BusroApi.status();
@@ -321,7 +362,7 @@ function App() {
     } catch (error) { setLiveError(error.message || "현재 응답을 저장하지 못했습니다."); setLiveLoading(false); }
   }
 
-  async function loadPassageCoverage(targetLegs = effectiveLegs) {
+  async function loadPassageCoverage(targetLegs = effectiveReplayCheckpoints) {
     if (!targetLegs.length) {
       setPassageCoverage(EMPTY_PASSAGE_COVERAGE);
       return EMPTY_PASSAGE_COVERAGE;
@@ -339,8 +380,16 @@ function App() {
 
   async function runSimulation() {
     setSimLoading(true);
-    if (!activeJourney || effectiveLegs.length === 0) {
+    if (!activeJourney) {
       setSimulation(buildDataGapSimulation(days));
+      setSimLoading(false); return;
+    }
+    if (replayApplicability === "not_applicable") {
+      setSimulation(buildDataGapSimulation(days, "NO_TRANSFER_CONNECTIONS", "직통 경로는 환승 연결 성공·실패 시뮬레이션 대상이 아닙니다."));
+      setSimLoading(false); return;
+    }
+    if (effectiveReplayCheckpoints.length === 0) {
+      setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "검증된 환승 체크포인트가 필요합니다."));
       setSimLoading(false); return;
     }
     if (!replayReady) {
@@ -351,12 +400,12 @@ function App() {
       setSimulation(buildDataGapSimulation(days, "TAGO_LIVE_REQUIRED", "TAGO LIVE 연결과 실제 통과 이력이 필요합니다."));
       setSimLoading(false); return;
     }
-    if (effectiveLegs.some((item) => !item.apiMapped)) {
+    if (effectiveReplayCheckpoints.some((item) => !item.apiMapped)) {
       setSimulation(buildDataGapSimulation(days, "UNMAPPED_OFFICIAL_STOP", "선택 여행의 공식 구간 매핑이 필요합니다."));
       setSimLoading(false); return;
     }
     try {
-      const payload = await BusroApi.replay(days, effectiveLegs, activeJourney);
+      const payload = await BusroApi.replay(days, effectiveReplayCheckpoints, activeJourney);
       const rawDays = payload.daily || payload.perDay || payload.per_day || [];
       const perDay = rawDays.map((day) => {
         const status = String(day.status || "data_gap").toLowerCase();
@@ -393,25 +442,30 @@ function App() {
 
   useEffect(() => { checkConnection({}, []); }, []);
   useEffect(() => { if (tab === "live" && leg) loadLive(leg); }, [tab, selectedLeg, leg?.apiMapped, statusPayload]);
-  useEffect(() => { if (tab === "simulation") loadPassageCoverage(); }, [tab, statusPayload, mappingSummary.verified, days]);
+  useEffect(() => { if (tab === "simulation") loadPassageCoverage(); }, [tab, statusPayload, replayMappingSummary.verified, days]);
   useEffect(() => {
     if (!activeJourney) setSimulation(buildDataGapSimulation(days));
+    else if (replayApplicability === "not_applicable") setSimulation(buildDataGapSimulation(days, "NO_TRANSFER_CONNECTIONS", "직통 경로는 환승 연결 성공·실패 시뮬레이션 대상이 아닙니다."));
     else if (!replayReady) setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "실제 시간표의 환승 시각 근거가 필요합니다."));
     else setSimulation(buildDataGapSimulation(days, "REPLAY_NOT_RUN", "선택 기간의 실제 통과 이력을 재생하세요."));
-  }, [days]);
+  }, [days, activeJourney, replayApplicability, replayReady]);
 
   function changeTab(next) { setTab(next); document.querySelector(".screen-scroll")?.scrollTo({ top: 0, behavior: "smooth" }); }
   function openJourney(candidate) {
-    const nextLegs = deriveJourneyLegs(candidate);
-    const nextMappings = loadMappingState(nextLegs);
+    const nextLiveLegs = deriveJourneyLegs(candidate);
+    const nextReplayCheckpoints = deriveJourneyLegs(candidate, { replayOnly: true });
+    const nextOperationalLegs = [...nextLiveLegs, ...nextReplayCheckpoints];
+    const nextMappings = loadMappingState(nextOperationalLegs);
     setActiveJourney(candidate);
     setMappings(nextMappings);
-    setSelectedLeg(nextLegs[0]?.id || "");
+    setSelectedLeg(nextLiveLegs[0]?.id || "");
     setArrivals([]); setHistory([]); setLiveError(""); setLiveNotice("");
-    setLegCoverage({ ...EMPTY_PASSAGE_COVERAGE, code: nextLegs.length ? "PASSAGE_HISTORY_UNAVAILABLE" : "JOURNEY_RIDE_LEGS_REQUIRED" });
-    setPassageCoverage({ ...EMPTY_PASSAGE_COVERAGE, code: nextLegs.length ? "PASSAGE_HISTORY_UNAVAILABLE" : "JOURNEY_RIDE_LEGS_REQUIRED" });
-    setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "실제 시간표의 환승 시각 근거가 필요합니다."));
-    checkConnection(nextMappings, nextLegs);
+    setLegCoverage({ ...EMPTY_PASSAGE_COVERAGE, code: nextLiveLegs.length ? "PASSAGE_HISTORY_UNAVAILABLE" : "JOURNEY_RIDE_LEGS_REQUIRED" });
+    setPassageCoverage({ ...EMPTY_PASSAGE_COVERAGE, code: nextReplayCheckpoints.length ? "PASSAGE_HISTORY_UNAVAILABLE" : "VERIFIED_TRANSFER_CHECKPOINTS_REQUIRED" });
+    setSimulation(candidate.scheduled === true && Number(candidate.transfers) === 0
+      ? buildDataGapSimulation(days, "NO_TRANSFER_CONNECTIONS", "직통 경로는 환승 연결 성공·실패 시뮬레이션 대상이 아닙니다.")
+      : buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "실제 시간표의 환승 시각 근거가 필요합니다."));
+    checkConnection(nextMappings, nextOperationalLegs);
     changeTab("journey");
   }
   function updateMapping(id, field, value) {
@@ -422,7 +476,7 @@ function App() {
   async function verifyMapping(id) {
     const candidate = mappings[id];
     if (!candidate?.cityCode || !candidate?.nodeId || !candidate?.routeId) return;
-    persistMappingIdentifiers(mappings, activeLegs);
+    persistMappingIdentifiers(mappings, operationalLegs);
     setMappings((current) => ({ ...current, [id]: { ...current[id], state: "checking", note: "공식 식별자 검증 중…" } }));
     try {
       const latestStatus = statusPayload || await BusroApi.status();
@@ -430,7 +484,7 @@ function App() {
       const result = await BusroApi.validateMapping(latestStatus, candidate);
       const next = mergeMappingResult({ ...mappings, [id]: { ...candidate, state: "checking" } }, result, [id]);
       setMappings(next);
-      await checkConnection(next, effectiveLegs);
+      await checkConnection(next, effectiveOperationalLegs);
     } catch (error) {
       setMappings((current) => ({ ...current, [id]: { ...current[id], state: "unmapped", code: error.payload?.code || "MAPPING_VALIDATION_FAILED", note: "DATA_GAP · 서버 검증에 실패했습니다." } }));
     }
@@ -440,8 +494,8 @@ function App() {
     setSettingsError("");
     try {
       BusroApi.setBase(apiBase);
-      persistMappingIdentifiers(mappings, activeLegs);
-      await checkConnection(mappings, effectiveLegs);
+      persistMappingIdentifiers(mappings, operationalLegs);
+      await checkConnection(mappings, effectiveOperationalLegs);
     } catch (error) { setSettingsError(error.message || "연결 설정을 저장하지 못했습니다."); }
   }
 
@@ -451,12 +505,12 @@ function App() {
         <AppHeader connection={connection} onSettings={() => setSettingsOpen(true)} />
         <div className="screen-scroll">
           {tab === "explore" && <NationwideScreen connection={connection} onChooseJourney={openJourney} />}
-          {tab === "live" && <LiveScreen journey={activeJourney} connection={connection} legs={effectiveLegs} selectedLeg={selectedLeg} setSelectedLeg={setSelectedLeg} arrivals={arrivals} history={history} passageCoverage={legCoverage} mappingSummary={mappingSummary} loading={liveLoading} error={liveError} notice={liveNotice} onRefresh={() => loadLive(leg)} onCollect={collectSnapshot} onExplore={() => changeTab("explore")} />}
-          {tab === "simulation" && <SimulationScreen journey={activeJourney} replayReady={replayReady} connection={connection} simulation={simulation} days={days} setDays={setDays} passageCoverage={passageCoverage} mappingSummary={mappingSummary} loading={simLoading} onRun={runSimulation} onExplore={() => changeTab("explore")} />}
+          {tab === "live" && <LiveScreen journey={activeJourney} connection={connection} legs={effectiveLiveLegs} selectedLeg={selectedLeg} setSelectedLeg={setSelectedLeg} arrivals={arrivals} history={history} passageCoverage={legCoverage} mappingSummary={liveMappingSummary} loading={liveLoading} error={liveError} notice={liveNotice} onRefresh={() => loadLive(leg)} onCollect={collectSnapshot} onExplore={() => changeTab("explore")} />}
+          {tab === "simulation" && <SimulationScreen journey={activeJourney} replayReady={replayReady} replayApplicability={replayApplicability} connection={connection} simulation={simulation} days={days} setDays={setDays} passageCoverage={passageCoverage} mappingSummary={replayMappingSummary} loading={simLoading} onRun={runSimulation} onExplore={() => changeTab("explore")} />}
           {tab === "journey" && <JourneyScreen journey={activeJourney} onExplore={() => changeTab("explore")} />}
         </div>
         <BottomDock tab={tab} onChange={changeTab} />
-        <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} apiBase={apiBase} setApiBase={setApiBase} connection={connection} journey={activeJourney} mappings={mappings} legs={effectiveLegs} mappingSummary={mappingSummary} settingsError={settingsError} onMappingChange={updateMapping} onVerifyMapping={verifyMapping} onReconnect={saveConnection} />
+        <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} apiBase={apiBase} setApiBase={setApiBase} connection={connection} journey={activeJourney} mappings={mappings} legs={effectiveOperationalLegs} mappingSummary={operationalMappingSummary} settingsError={settingsError} onMappingChange={updateMapping} onVerifyMapping={verifyMapping} onReconnect={saveConnection} />
       </main>
     </div>
   );

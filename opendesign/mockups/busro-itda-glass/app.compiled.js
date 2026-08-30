@@ -30,7 +30,7 @@ function buildDataGapSimulation(days, code = "JOURNEY_REQUIRED", reason = "\uC80
 function replayValue(step, key) {
   return step?.replay?.[key] ?? step?.timetable?.[key] ?? step?.time_evidence?.[key] ?? step?.[key];
 }
-function deriveJourneyLegs(journey) {
+function deriveJourneyLegs(journey, { replayOnly = false } = {}) {
   const steps = Array.isArray(journey?.steps) ? journey.steps : [];
   const groups = [];
   let current = null;
@@ -49,10 +49,20 @@ function deriveJourneyLegs(journey) {
       current.rides.push(step);
     }
   });
+  const hasReplayContract = Object.prototype.hasOwnProperty.call(journey || {}, "replay_legs");
   const replayRows = Array.isArray(journey?.replay_legs) ? journey.replay_legs : [];
-  return groups.map((group, index) => {
+  const selections = replayOnly && hasReplayContract ? replayRows.map((replayRow) => {
+    const groupIndex = groups.findIndex((group) => {
+      const lastRide = group.rides[group.rides.length - 1];
+      return group.routeId === String(replayRow?.route_id || "") && String(group.to?.node_id || "") === String(replayRow?.node_id || "") && Number(group.to?.node_order) === Number(replayRow?.node_order) && String(lastRide?.trip_id || "") === String(replayRow?.time_evidence_trip_id || "");
+    });
+    if (groupIndex < 0) return null;
+    const nextGroup = groups[groupIndex + 1];
+    if (!nextGroup || nextGroup.routeId !== String(replayRow?.next_route_id || "") || String(nextGroup.from?.node_id || "") !== String(replayRow?.next_node_id || "") || Number(nextGroup.from?.node_order) !== Number(replayRow?.next_node_order) || String(nextGroup.rides[0]?.trip_id || "") !== String(replayRow?.next_time_evidence_trip_id || "")) return null;
+    return { group: groups[groupIndex], replayRow };
+  }).filter(Boolean) : replayOnly ? [] : groups.map((group) => ({ group, replayRow: {} }));
+  return selections.map(({ group, replayRow }, index) => {
     const lastRide = group.rides[group.rides.length - 1];
-    const replayRow = replayRows[index] || replayRows.find((item) => String(item?.route_id || "") === group.routeId) || {};
     const scheduledArrival = replayRow.scheduled_arrival ?? replayValue(lastRide, "scheduled_arrival");
     const nextDeparture = replayRow.next_departure ?? replayValue(lastRide, "next_departure");
     const minimumTransfer = replayRow.minimum_transfer_minutes ?? replayValue(lastRide, "minimum_transfer_minutes");
@@ -60,11 +70,13 @@ function deriveJourneyLegs(journey) {
     const timeEvidenceSource = cleanIdentifier(replayRow.time_evidence_source || evidenceBlock.source || "");
     const timeEvidenceVerified = replayRow.time_evidence_verified === true || evidenceBlock.verified === true;
     const timeEvidenceTripId = cleanIdentifier(replayRow.time_evidence_trip_id || evidenceBlock.trip_id || "");
+    const timeEvidenceFeedId = cleanIdentifier(replayRow.time_evidence_feed_id || evidenceBlock.feed_id || "");
     const nextRouteId = cleanIdentifier(replayRow.next_route_id || evidenceBlock.next_route_id || "");
     const nextNodeId = cleanIdentifier(replayRow.next_node_id || evidenceBlock.next_node_id || "");
     const nextNodeOrderValue = replayRow.next_node_order ?? evidenceBlock.next_node_order;
     const nextNodeOrder = Number.isInteger(Number(nextNodeOrderValue)) ? Number(nextNodeOrderValue) : null;
     const nextTimeEvidenceTripId = cleanIdentifier(replayRow.next_time_evidence_trip_id || evidenceBlock.next_trip_id || "");
+    const nextTimeEvidenceFeedId = cleanIdentifier(replayRow.next_time_evidence_feed_id || evidenceBlock.next_feed_id || "");
     const parsedMinimumTransfer = minimumTransfer !== null && minimumTransfer !== void 0 && String(minimumTransfer).trim() !== "" && Number.isInteger(Number(minimumTransfer)) ? Number(minimumTransfer) : null;
     let buffer = null;
     if (timeEvidenceVerified && timeEvidenceSource && isClockTime(scheduledArrival) && isClockTime(nextDeparture) && parsedMinimumTransfer !== null) {
@@ -76,18 +88,21 @@ function deriveJourneyLegs(journey) {
       buffer = departureTotal - arrivalTotal - parsedMinimumTransfer;
     }
     const safeRoute = group.routeId.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 42) || "route";
+    const checkpointId = replayOnly ? `replay-${cleanIdentifier(replayRow.id) || `transfer-${index + 1}-${safeRoute}`}` : `ride-${index + 1}-${safeRoute}`;
+    const checkpointNodeId = replayOnly ? String(replayRow.node_id || "") : String(group.from.node_id);
+    const checkpointNodeOrder = replayOnly ? Number(replayRow.node_order) : Number(group.from.node_order);
     return {
-      id: `leg-${index + 1}-${safeRoute}`.slice(0, 64),
+      id: checkpointId.slice(0, 64),
       city: group.from.city_name || group.to.city_name || (group.cityCode ? `\uB3C4\uC2DC\uCF54\uB4DC ${group.cityCode}` : "\uB3C4\uC2DC DATA_GAP"),
       cityCode: group.cityCode,
       routeId: group.routeId,
       routeNo: String(lastRide.route_no || group.rides[0].route_no || group.routeId),
-      board: group.from.node_name || group.from.node_id,
-      nodeId: String(group.from.node_id),
-      nodeOrder: Number(group.from.node_order),
+      board: replayOnly ? group.to.node_name || group.to.node_id : group.from.node_name || group.from.node_id,
+      nodeId: checkpointNodeId,
+      nodeOrder: checkpointNodeOrder,
       alight: group.to.node_name || group.to.node_id,
-      alightNodeId: String(group.to.node_id),
-      alightNodeOrder: Number(group.to.node_order),
+      alightNodeId: replayOnly ? String(replayRow.node_id || "") : String(group.to.node_id),
+      alightNodeOrder: replayOnly ? Number(replayRow.node_order) : Number(group.to.node_order),
       scheduledArrival: isClockTime(scheduledArrival) ? String(scheduledArrival) : null,
       nextDeparture: isClockTime(nextDeparture) ? String(nextDeparture) : null,
       minimumTransfer: parsedMinimumTransfer,
@@ -95,10 +110,13 @@ function deriveJourneyLegs(journey) {
       timeEvidenceSource,
       timeEvidenceVerified,
       timeEvidenceTripId,
+      timeEvidenceFeedId,
       nextRouteId,
       nextNodeId,
       nextNodeOrder,
-      nextTimeEvidenceTripId
+      nextTimeEvidenceTripId,
+      nextTimeEvidenceFeedId,
+      transferCheckpoint: replayOnly
     };
   });
 }
@@ -175,8 +193,10 @@ function App() {
   const [mappings, setMappings] = useState({});
   const [passageCoverage, setPassageCoverage] = useState(EMPTY_PASSAGE_COVERAGE);
   const [legCoverage, setLegCoverage] = useState(EMPTY_PASSAGE_COVERAGE);
-  const activeLegs = useMemo(() => deriveJourneyLegs(activeJourney), [activeJourney]);
-  const effectiveLegs = useMemo(() => activeLegs.map((item) => {
+  const liveLegs = useMemo(() => deriveJourneyLegs(activeJourney), [activeJourney]);
+  const replayCheckpoints = useMemo(() => deriveJourneyLegs(activeJourney, { replayOnly: true }), [activeJourney]);
+  const operationalLegs = useMemo(() => [...liveLegs, ...replayCheckpoints], [liveLegs, replayCheckpoints]);
+  const applyMappingState = (legs) => legs.map((item) => {
     const mapping = mappings[item.id] || {};
     return {
       ...item,
@@ -187,18 +207,29 @@ function App() {
       mappingState: mapping.state || "unmapped",
       mappingNote: mapping.note || "\uC11C\uBC84 \uAC80\uC99D \uC804"
     };
-  }), [activeLegs, mappings]);
-  const leg = useMemo(() => effectiveLegs.find((item) => item.id === selectedLeg) || effectiveLegs[0], [effectiveLegs, selectedLeg]);
-  const mappingSummary = useMemo(() => ({
-    verified: effectiveLegs.filter((item) => item.apiMapped).length,
-    checking: effectiveLegs.filter((item) => item.mappingState === "checking").length,
-    total: effectiveLegs.length
-  }), [effectiveLegs]);
-  const replayReady = useMemo(() => effectiveLegs.length > 0 && effectiveLegs.every((item) => item.timeEvidenceVerified && item.timeEvidenceSource && item.timeEvidenceTripId && item.nextRouteId && item.nextNodeId && Number.isInteger(item.nextNodeOrder) && item.nextTimeEvidenceTripId && isClockTime(item.scheduledArrival) && isClockTime(item.nextDeparture) && Number.isInteger(item.minimumTransfer) && item.alightNodeId && Number.isInteger(item.alightNodeOrder)), [effectiveLegs]);
+  });
+  const effectiveLiveLegs = useMemo(() => applyMappingState(liveLegs), [liveLegs, mappings]);
+  const effectiveReplayCheckpoints = useMemo(() => applyMappingState(replayCheckpoints), [replayCheckpoints, mappings]);
+  const effectiveOperationalLegs = useMemo(() => [...effectiveLiveLegs, ...effectiveReplayCheckpoints], [effectiveLiveLegs, effectiveReplayCheckpoints]);
+  const leg = useMemo(() => effectiveLiveLegs.find((item) => item.id === selectedLeg) || effectiveLiveLegs[0], [effectiveLiveLegs, selectedLeg]);
+  const summarizeMappings = (legs) => ({
+    verified: legs.filter((item) => item.apiMapped).length,
+    checking: legs.filter((item) => item.mappingState === "checking").length,
+    total: legs.length
+  });
+  const liveMappingSummary = useMemo(() => summarizeMappings(effectiveLiveLegs), [effectiveLiveLegs]);
+  const replayMappingSummary = useMemo(() => summarizeMappings(effectiveReplayCheckpoints), [effectiveReplayCheckpoints]);
+  const operationalMappingSummary = useMemo(() => summarizeMappings(effectiveOperationalLegs), [effectiveOperationalLegs]);
+  const replayReady = useMemo(() => effectiveReplayCheckpoints.length > 0 && effectiveReplayCheckpoints.every((item) => item.timeEvidenceVerified && item.timeEvidenceSource && item.timeEvidenceTripId && item.timeEvidenceFeedId && item.nextRouteId && item.nextNodeId && Number.isInteger(item.nextNodeOrder) && item.nextTimeEvidenceTripId && item.nextTimeEvidenceFeedId && isClockTime(item.scheduledArrival) && isClockTime(item.nextDeparture) && Number.isInteger(item.minimumTransfer) && item.alightNodeId && Number.isInteger(item.alightNodeOrder)), [effectiveReplayCheckpoints]);
+  const replayApplicability = useMemo(() => {
+    if (!activeJourney) return "journey_required";
+    if (activeJourney.scheduled === true && Number(activeJourney.transfers) === 0) return "not_applicable";
+    return replayReady ? "ready" : "data_gap";
+  }, [activeJourney, replayReady]);
   useEffect(() => {
     localStorage.setItem(APP_STORAGE_KEY, JSON.stringify({ tab, selectedLeg }));
   }, [tab, selectedLeg]);
-  async function checkConnection(mappingSnapshot = mappings, legsSnapshot = effectiveLegs) {
+  async function checkConnection(mappingSnapshot = mappings, legsSnapshot = effectiveOperationalLegs) {
     setConnection({ mode: "offline", label: "\uC5F0\uACB0 \uD655\uC778 \uC911", message: "\uB85C\uCEEC \uB370\uC774\uD130 \uC11C\uBE44\uC2A4 \uC0C1\uD0DC\uB97C \uD655\uC778\uD558\uACE0 \uC788\uC2B5\uB2C8\uB2E4." });
     try {
       const status = await BusroApi.status();
@@ -302,7 +333,7 @@ function App() {
       setLiveLoading(false);
     }
   }
-  async function loadPassageCoverage(targetLegs = effectiveLegs) {
+  async function loadPassageCoverage(targetLegs = effectiveReplayCheckpoints) {
     if (!targetLegs.length) {
       setPassageCoverage(EMPTY_PASSAGE_COVERAGE);
       return EMPTY_PASSAGE_COVERAGE;
@@ -319,8 +350,18 @@ function App() {
   }
   async function runSimulation() {
     setSimLoading(true);
-    if (!activeJourney || effectiveLegs.length === 0) {
+    if (!activeJourney) {
       setSimulation(buildDataGapSimulation(days));
+      setSimLoading(false);
+      return;
+    }
+    if (replayApplicability === "not_applicable") {
+      setSimulation(buildDataGapSimulation(days, "NO_TRANSFER_CONNECTIONS", "\uC9C1\uD1B5 \uACBD\uB85C\uB294 \uD658\uC2B9 \uC5F0\uACB0 \uC131\uACF5\xB7\uC2E4\uD328 \uC2DC\uBBAC\uB808\uC774\uC158 \uB300\uC0C1\uC774 \uC544\uB2D9\uB2C8\uB2E4."));
+      setSimLoading(false);
+      return;
+    }
+    if (effectiveReplayCheckpoints.length === 0) {
+      setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "\uAC80\uC99D\uB41C \uD658\uC2B9 \uCCB4\uD06C\uD3EC\uC778\uD2B8\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4."));
       setSimLoading(false);
       return;
     }
@@ -334,13 +375,13 @@ function App() {
       setSimLoading(false);
       return;
     }
-    if (effectiveLegs.some((item) => !item.apiMapped)) {
+    if (effectiveReplayCheckpoints.some((item) => !item.apiMapped)) {
       setSimulation(buildDataGapSimulation(days, "UNMAPPED_OFFICIAL_STOP", "\uC120\uD0DD \uC5EC\uD589\uC758 \uACF5\uC2DD \uAD6C\uAC04 \uB9E4\uD551\uC774 \uD544\uC694\uD569\uB2C8\uB2E4."));
       setSimLoading(false);
       return;
     }
     try {
-      const payload = await BusroApi.replay(days, effectiveLegs, activeJourney);
+      const payload = await BusroApi.replay(days, effectiveReplayCheckpoints, activeJourney);
       const rawDays = payload.daily || payload.perDay || payload.per_day || [];
       const perDay = rawDays.map((day) => {
         const status = String(day.status || "data_gap").toLowerCase();
@@ -383,30 +424,33 @@ function App() {
   }, [tab, selectedLeg, leg?.apiMapped, statusPayload]);
   useEffect(() => {
     if (tab === "simulation") loadPassageCoverage();
-  }, [tab, statusPayload, mappingSummary.verified, days]);
+  }, [tab, statusPayload, replayMappingSummary.verified, days]);
   useEffect(() => {
     if (!activeJourney) setSimulation(buildDataGapSimulation(days));
+    else if (replayApplicability === "not_applicable") setSimulation(buildDataGapSimulation(days, "NO_TRANSFER_CONNECTIONS", "\uC9C1\uD1B5 \uACBD\uB85C\uB294 \uD658\uC2B9 \uC5F0\uACB0 \uC131\uACF5\xB7\uC2E4\uD328 \uC2DC\uBBAC\uB808\uC774\uC158 \uB300\uC0C1\uC774 \uC544\uB2D9\uB2C8\uB2E4."));
     else if (!replayReady) setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "\uC2E4\uC81C \uC2DC\uAC04\uD45C\uC758 \uD658\uC2B9 \uC2DC\uAC01 \uADFC\uAC70\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4."));
     else setSimulation(buildDataGapSimulation(days, "REPLAY_NOT_RUN", "\uC120\uD0DD \uAE30\uAC04\uC758 \uC2E4\uC81C \uD1B5\uACFC \uC774\uB825\uC744 \uC7AC\uC0DD\uD558\uC138\uC694."));
-  }, [days]);
+  }, [days, activeJourney, replayApplicability, replayReady]);
   function changeTab(next) {
     setTab(next);
     document.querySelector(".screen-scroll")?.scrollTo({ top: 0, behavior: "smooth" });
   }
   function openJourney(candidate) {
-    const nextLegs = deriveJourneyLegs(candidate);
-    const nextMappings = loadMappingState(nextLegs);
+    const nextLiveLegs = deriveJourneyLegs(candidate);
+    const nextReplayCheckpoints = deriveJourneyLegs(candidate, { replayOnly: true });
+    const nextOperationalLegs = [...nextLiveLegs, ...nextReplayCheckpoints];
+    const nextMappings = loadMappingState(nextOperationalLegs);
     setActiveJourney(candidate);
     setMappings(nextMappings);
-    setSelectedLeg(nextLegs[0]?.id || "");
+    setSelectedLeg(nextLiveLegs[0]?.id || "");
     setArrivals([]);
     setHistory([]);
     setLiveError("");
     setLiveNotice("");
-    setLegCoverage({ ...EMPTY_PASSAGE_COVERAGE, code: nextLegs.length ? "PASSAGE_HISTORY_UNAVAILABLE" : "JOURNEY_RIDE_LEGS_REQUIRED" });
-    setPassageCoverage({ ...EMPTY_PASSAGE_COVERAGE, code: nextLegs.length ? "PASSAGE_HISTORY_UNAVAILABLE" : "JOURNEY_RIDE_LEGS_REQUIRED" });
-    setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "\uC2E4\uC81C \uC2DC\uAC04\uD45C\uC758 \uD658\uC2B9 \uC2DC\uAC01 \uADFC\uAC70\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4."));
-    checkConnection(nextMappings, nextLegs);
+    setLegCoverage({ ...EMPTY_PASSAGE_COVERAGE, code: nextLiveLegs.length ? "PASSAGE_HISTORY_UNAVAILABLE" : "JOURNEY_RIDE_LEGS_REQUIRED" });
+    setPassageCoverage({ ...EMPTY_PASSAGE_COVERAGE, code: nextReplayCheckpoints.length ? "PASSAGE_HISTORY_UNAVAILABLE" : "VERIFIED_TRANSFER_CHECKPOINTS_REQUIRED" });
+    setSimulation(candidate.scheduled === true && Number(candidate.transfers) === 0 ? buildDataGapSimulation(days, "NO_TRANSFER_CONNECTIONS", "\uC9C1\uD1B5 \uACBD\uB85C\uB294 \uD658\uC2B9 \uC5F0\uACB0 \uC131\uACF5\xB7\uC2E4\uD328 \uC2DC\uBBAC\uB808\uC774\uC158 \uB300\uC0C1\uC774 \uC544\uB2D9\uB2C8\uB2E4.") : buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "\uC2E4\uC81C \uC2DC\uAC04\uD45C\uC758 \uD658\uC2B9 \uC2DC\uAC01 \uADFC\uAC70\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4."));
+    checkConnection(nextMappings, nextOperationalLegs);
     changeTab("journey");
   }
   function updateMapping(id, field, value) {
@@ -416,7 +460,7 @@ function App() {
   async function verifyMapping(id) {
     const candidate = mappings[id];
     if (!candidate?.cityCode || !candidate?.nodeId || !candidate?.routeId) return;
-    persistMappingIdentifiers(mappings, activeLegs);
+    persistMappingIdentifiers(mappings, operationalLegs);
     setMappings((current) => ({ ...current, [id]: { ...current[id], state: "checking", note: "\uACF5\uC2DD \uC2DD\uBCC4\uC790 \uAC80\uC99D \uC911\u2026" } }));
     try {
       const latestStatus = statusPayload || await BusroApi.status();
@@ -424,7 +468,7 @@ function App() {
       const result = await BusroApi.validateMapping(latestStatus, candidate);
       const next = mergeMappingResult({ ...mappings, [id]: { ...candidate, state: "checking" } }, result, [id]);
       setMappings(next);
-      await checkConnection(next, effectiveLegs);
+      await checkConnection(next, effectiveOperationalLegs);
     } catch (error) {
       setMappings((current) => ({ ...current, [id]: { ...current[id], state: "unmapped", code: error.payload?.code || "MAPPING_VALIDATION_FAILED", note: "DATA_GAP \xB7 \uC11C\uBC84 \uAC80\uC99D\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4." } }));
     }
@@ -433,12 +477,12 @@ function App() {
     setSettingsError("");
     try {
       BusroApi.setBase(apiBase);
-      persistMappingIdentifiers(mappings, activeLegs);
-      await checkConnection(mappings, effectiveLegs);
+      persistMappingIdentifiers(mappings, operationalLegs);
+      await checkConnection(mappings, effectiveOperationalLegs);
     } catch (error) {
       setSettingsError(error.message || "\uC5F0\uACB0 \uC124\uC815\uC744 \uC800\uC7A5\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
     }
   }
-  return /* @__PURE__ */ React.createElement("div", { className: "stage" }, /* @__PURE__ */ React.createElement("main", { className: `app-shell tab-${tab}`, "aria-label": "\uBC84\uC2A4\uB85C \uC787\uB2E4" }, /* @__PURE__ */ React.createElement(AppHeader, { connection, onSettings: () => setSettingsOpen(true) }), /* @__PURE__ */ React.createElement("div", { className: "screen-scroll" }, tab === "explore" && /* @__PURE__ */ React.createElement(NationwideScreen, { connection, onChooseJourney: openJourney }), tab === "live" && /* @__PURE__ */ React.createElement(LiveScreen, { journey: activeJourney, connection, legs: effectiveLegs, selectedLeg, setSelectedLeg, arrivals, history, passageCoverage: legCoverage, mappingSummary, loading: liveLoading, error: liveError, notice: liveNotice, onRefresh: () => loadLive(leg), onCollect: collectSnapshot, onExplore: () => changeTab("explore") }), tab === "simulation" && /* @__PURE__ */ React.createElement(SimulationScreen, { journey: activeJourney, replayReady, connection, simulation, days, setDays, passageCoverage, mappingSummary, loading: simLoading, onRun: runSimulation, onExplore: () => changeTab("explore") }), tab === "journey" && /* @__PURE__ */ React.createElement(JourneyScreen, { journey: activeJourney, onExplore: () => changeTab("explore") })), /* @__PURE__ */ React.createElement(BottomDock, { tab, onChange: changeTab }), /* @__PURE__ */ React.createElement(SettingsSheet, { open: settingsOpen, onClose: () => setSettingsOpen(false), apiBase, setApiBase, connection, journey: activeJourney, mappings, legs: effectiveLegs, mappingSummary, settingsError, onMappingChange: updateMapping, onVerifyMapping: verifyMapping, onReconnect: saveConnection })));
+  return /* @__PURE__ */ React.createElement("div", { className: "stage" }, /* @__PURE__ */ React.createElement("main", { className: `app-shell tab-${tab}`, "aria-label": "\uBC84\uC2A4\uB85C \uC787\uB2E4" }, /* @__PURE__ */ React.createElement(AppHeader, { connection, onSettings: () => setSettingsOpen(true) }), /* @__PURE__ */ React.createElement("div", { className: "screen-scroll" }, tab === "explore" && /* @__PURE__ */ React.createElement(NationwideScreen, { connection, onChooseJourney: openJourney }), tab === "live" && /* @__PURE__ */ React.createElement(LiveScreen, { journey: activeJourney, connection, legs: effectiveLiveLegs, selectedLeg, setSelectedLeg, arrivals, history, passageCoverage: legCoverage, mappingSummary: liveMappingSummary, loading: liveLoading, error: liveError, notice: liveNotice, onRefresh: () => loadLive(leg), onCollect: collectSnapshot, onExplore: () => changeTab("explore") }), tab === "simulation" && /* @__PURE__ */ React.createElement(SimulationScreen, { journey: activeJourney, replayReady, replayApplicability, connection, simulation, days, setDays, passageCoverage, mappingSummary: replayMappingSummary, loading: simLoading, onRun: runSimulation, onExplore: () => changeTab("explore") }), tab === "journey" && /* @__PURE__ */ React.createElement(JourneyScreen, { journey: activeJourney, onExplore: () => changeTab("explore") })), /* @__PURE__ */ React.createElement(BottomDock, { tab, onChange: changeTab }), /* @__PURE__ */ React.createElement(SettingsSheet, { open: settingsOpen, onClose: () => setSettingsOpen(false), apiBase, setApiBase, connection, journey: activeJourney, mappings, legs: effectiveOperationalLegs, mappingSummary: operationalMappingSummary, settingsError, onMappingChange: updateMapping, onVerifyMapping: verifyMapping, onReconnect: saveConnection })));
 }
 ReactDOM.createRoot(document.getElementById("root")).render(/* @__PURE__ */ React.createElement(App, null));

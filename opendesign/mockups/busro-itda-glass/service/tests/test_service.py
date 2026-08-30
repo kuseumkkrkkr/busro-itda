@@ -840,11 +840,13 @@ class ServiceCase(unittest.TestCase):
         complete_leg = {
             **leg,
             "time_evidence_source": "ktdb-gtfs-2024",
+            "time_evidence_feed_id": "gtfs_missing_feed_version",
             "time_evidence_trip_id": "GTFS:KTDB:TARRIVAL000000000001",
             "next_route_id": "GTFS:KTDB:RNEXT0000000000001:PNEXT000000000000000000000000000000000001",
             "next_node_id": "GTFS:KTDB:SNEXT0000000000001",
             "next_node_order": 1,
             "next_time_evidence_trip_id": "GTFS:KTDB:TNEXT000000000000001",
+            "next_time_evidence_feed_id": "gtfs_missing_feed_version",
         }
         with self.assertRaises(AppError) as missing_feed:
             live.replay(
@@ -883,43 +885,25 @@ class ServiceCase(unittest.TestCase):
             "data_gap": False,
             "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE",
             "feed": {"feed_id": "official-feed-bound"},
-            "trips": [
-                {
-                    "trip_namespace_id": trip_id,
-                    "calendar": {"operates_on_date": True},
-                    "stop_times": [
-                        {
-                            "stop_sequence": 2,
-                            "node_id": node_id,
-                            "arrival_time": "12:01:00",
-                            "arrival_seconds": 12 * 3600 + 60,
-                            "departure_time": "12:02:00",
-                            "departure_seconds": 12 * 3600 + 2 * 60,
-                        }
-                    ],
-                }
-            ],
+            "trip_id": trip_id,
+            "node_id": node_id,
+            "node_order": 2,
+            "arrival_time": "12:01:00",
+            "arrival_seconds": 12 * 3600 + 60,
+            "departure_time": "12:02:00",
+            "departure_seconds": 12 * 3600 + 2 * 60,
         }
         next_departure_evidence = {
             "data_gap": False,
             "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE",
             "feed": {"feed_id": "official-feed-bound"},
-            "trips": [
-                {
-                    "trip_namespace_id": next_trip_id,
-                    "calendar": {"operates_on_date": True},
-                    "stop_times": [
-                        {
-                            "stop_sequence": 1,
-                            "node_id": next_node_id,
-                            "arrival_time": "12:09:00",
-                            "arrival_seconds": 12 * 3600 + 9 * 60,
-                            "departure_time": "12:10:00",
-                            "departure_seconds": 12 * 3600 + 10 * 60,
-                        }
-                    ],
-                }
-            ],
+            "trip_id": next_trip_id,
+            "node_id": next_node_id,
+            "node_order": 1,
+            "arrival_time": "12:09:00",
+            "arrival_seconds": 12 * 3600 + 9 * 60,
+            "departure_time": "12:10:00",
+            "departure_seconds": 12 * 3600 + 10 * 60,
         }
         passage = {
             "passage_id": "passage-official-record",
@@ -949,11 +933,13 @@ class ServiceCase(unittest.TestCase):
                     "next_departure": "00:02",
                     "minimum_transfer_minutes": 5,
                     "time_evidence_source": "ktdb-gtfs-2024",
+                    "time_evidence_feed_id": "official-feed-bound",
                     "time_evidence_trip_id": trip_id,
                     "next_route_id": next_route_id,
                     "next_node_id": next_node_id,
                     "next_node_order": 1,
                     "next_time_evidence_trip_id": next_trip_id,
+                    "next_time_evidence_feed_id": "official-feed-bound",
                 }
             ],
             "dates": ["2026-08-31"],
@@ -969,7 +955,7 @@ class ServiceCase(unittest.TestCase):
         with (
             patch.object(
                 live.network_catalog,
-                "gtfs_schedule_evidence",
+                "gtfs_exact_stop_time_record",
                 side_effect=schedule_evidence_lookup,
             ) as schedule_lookup,
             patch.object(live.store, "replay_events", return_value=[passage]),
@@ -998,18 +984,24 @@ class ServiceCase(unittest.TestCase):
             schedule_lookup.call_args_list[0].kwargs,
             {
                 "provider": "KTDB",
-                "graph_route_id": route_id,
                 "service_date": "2026-08-31",
-                "limit": 100,
+                "graph_route_id": route_id,
+                "node_id": node_id,
+                "node_order": 2,
+                "trip_namespace_id": trip_id,
+                "expected_feed_id": "official-feed-bound",
             },
         )
         self.assertEqual(
             schedule_lookup.call_args_list[1].kwargs,
             {
                 "provider": "KTDB",
-                "graph_route_id": next_route_id,
                 "service_date": "2026-08-31",
-                "limit": 100,
+                "graph_route_id": next_route_id,
+                "node_id": next_node_id,
+                "node_order": 1,
+                "trip_namespace_id": next_trip_id,
+                "expected_feed_id": "official-feed-bound",
             },
         )
         replay = replays[0]
@@ -1049,8 +1041,14 @@ class ServiceCase(unittest.TestCase):
 
         with patch.object(
             live.network_catalog,
-            "gtfs_schedule_evidence",
-            side_effect=[arrival_evidence, {**next_departure_evidence, "trips": []}],
+            "gtfs_exact_stop_time_record",
+            side_effect=[
+                arrival_evidence,
+                {
+                    "data_gap": True,
+                    "reason": "EXACT_ACTIVE_GTFS_STOP_TIME_REQUIRED",
+                },
+            ],
         ):
             with self.assertRaises(AppError) as missing_next_record:
                 live.replay(request_body)
@@ -1062,6 +1060,33 @@ class ServiceCase(unittest.TestCase):
             missing_next_record.exception.details["phase"], "next_departure"
         )
         self.assertEqual(missing_next_record.exception.details["matching_records"], 0)
+
+    def test_live_replay_accepts_full_gtfs_stop_sequence_range(self) -> None:
+        live = BusroService(
+            replace(
+                self.service.settings,
+                fixture_mode=False,
+                tago_service_key="not-used-by-replay",
+                db_path=Path(self.temp.name) / "live-stop-sequence.sqlite3",
+            ),
+            clock=lambda: FIXED_NOW,
+        )
+        base = {
+            "id": "gtfs-sequence",
+            "route_id": "GTFS:KTDB:R0123456789abcdef0123:P0123456789abcdef0123456789abcdef01234567",
+            "node_id": "GTFS:KTDB:S0123456789abcdef0123",
+            "time_evidence_source": "ktdb-gtfs-2024",
+            "time_evidence_trip_id": "GTFS:KTDB:T0123456789abcdef0123",
+            "next_route_id": "GTFS:KTDB:Rfedcba98765432100123:Pfedcba9876543210fedcba9876543210fedcba98",
+            "next_node_id": "GTFS:KTDB:Sfedcba98765432100123",
+            "next_time_evidence_trip_id": "GTFS:KTDB:Tfedcba98765432100123",
+        }
+        for sequence in (0, 100_000):
+            parsed = live._replay_leg(
+                {**base, "node_order": sequence, "next_node_order": sequence}, 0
+            )
+            self.assertEqual(parsed["node_order"], sequence)
+            self.assertEqual(parsed["next_node_order"], sequence)
 
     def test_position_service_date_and_filters_use_kst(self) -> None:
         now = [datetime(2026, 8, 31, 14, 59, tzinfo=timezone.utc)]
