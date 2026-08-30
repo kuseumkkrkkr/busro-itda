@@ -1,0 +1,37 @@
+{
+  "response": {
+    "header": {
+      "resultCode": "00",
+      "resultMsg": "NORMAL SERVICE. FIXTURE"
+    },
+    "body": {
+      "items": {
+        "item": [
+          {
+            "nodeid": "DJB8001793",
+            "nodenm": "북대전농협",
+            "routeid": "DJB30300002",
+            "routeno": "5",
+            "routetp": "마을버스",
+            "arrprevstationcnt": 3,
+            "vehicletp": "저상버스",
+            "arrtime": 420
+          },
+          {
+            "nodeid": "DJB8001793",
+            "nodenm": "북대전농협",
+            "routeid": "DJB30300011",
+            "routeno": "11",
+            "routetp": "간선버스",
+            "arrprevstationcnt": 7,
+            "vehicletp": "일반버스",
+            "arrtime": 780
+          }
+        ]
+      },
+      "numOfRows": 100,
+      "pageNo": 1,
+      "totalCount": 2
+    }
+  }
+}

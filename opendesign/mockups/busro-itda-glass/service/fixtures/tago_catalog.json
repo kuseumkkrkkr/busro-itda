@@ -1,0 +1,102 @@
+{
+  "fixture_notice": "SCHEMA_ONLY_NOT_LIVE",
+  "operations": {
+    "cities": {
+      "response": {
+        "header": {"resultCode": "00", "resultMsg": "NORMAL SERVICE."},
+        "body": {
+          "items": {"item": [
+            {"citycode": "11", "cityname": "서울특별시"},
+            {"citycode": "25", "cityname": "대전광역시"},
+            {"citycode": "29", "cityname": "세종특별자치시"},
+            {"citycode": "31", "cityname": "경기도"},
+            {"citycode": "39", "cityname": "제주특별자치도"}
+          ]},
+          "numOfRows": 100,
+          "pageNo": 1,
+          "totalCount": 5
+        }
+      }
+    },
+    "routes": {
+      "response": {
+        "header": {"resultCode": "00", "resultMsg": "NORMAL SERVICE."},
+        "body": {
+          "items": {"item": [
+            {"citycode": "25", "routeid": "DJB_FIXTURE_001", "routeno": "샘플1", "routetp": "간선버스", "startnodenm": "샘플기점", "endnodenm": "샘플종점"},
+            {"citycode": "25", "routeid": "DJB_FIXTURE_002", "routeno": "샘플2", "routetp": "지선버스", "startnodenm": "샘플서편", "endnodenm": "샘플동편"}
+          ]},
+          "numOfRows": 100,
+          "pageNo": 1,
+          "totalCount": 2
+        }
+      }
+    },
+    "route_info": {
+      "response": {
+        "header": {"resultCode": "00", "resultMsg": "NORMAL SERVICE."},
+        "body": {
+          "items": {"item": {
+            "citycode": "25", "routeid": "DJB_FIXTURE_001", "routeno": "샘플1", "routetp": "간선버스",
+            "startnodenm": "샘플기점", "endnodenm": "샘플종점", "startvehicletime": "0600", "endvehicletime": "2300",
+            "intervaltime": "15", "intervalsattime": "20", "intervalsuntime": "25"
+          }},
+          "numOfRows": 1,
+          "pageNo": 1,
+          "totalCount": 1
+        }
+      }
+    },
+    "route_stops": {
+      "response": {
+        "header": {"resultCode": "00", "resultMsg": "NORMAL SERVICE."},
+        "body": {
+          "items": {"item": [
+            {"citycode": "25", "routeid": "DJB_FIXTURE_001", "nodeid": "DJB_FIXTURE_STOP_001", "nodeno": "90001", "nodenm": "샘플기점", "nodeord": 1, "gpslati": 36.3504, "gpslong": 127.3845, "updowncd": "0"},
+            {"citycode": "25", "routeid": "DJB_FIXTURE_001", "nodeid": "DJB_FIXTURE_STOP_002", "nodeno": "90002", "nodenm": "샘플환승점", "nodeord": 2, "gpslati": 36.3541, "gpslong": 127.3901, "updowncd": "0"},
+            {"citycode": "25", "routeid": "DJB_FIXTURE_001", "nodeid": "DJB_FIXTURE_STOP_003", "nodeno": "90003", "nodenm": "샘플종점", "nodeord": 3, "gpslati": 36.3582, "gpslong": 127.3972, "updowncd": "0"}
+          ]},
+          "numOfRows": 100,
+          "pageNo": 1,
+          "totalCount": 3
+        }
+      }
+    },
+    "stops": {
+      "response": {
+        "header": {"resultCode": "00", "resultMsg": "NORMAL SERVICE."},
+        "body": {
+          "items": {"item": [
+            {"citycode": "25", "nodeid": "DJB_FIXTURE_STOP_001", "nodeno": "90001", "nodenm": "샘플기점", "gpslati": 36.3504, "gpslong": 127.3845},
+            {"citycode": "25", "nodeid": "DJB_FIXTURE_STOP_002", "nodeno": "90002", "nodenm": "샘플환승점", "gpslati": 36.3541, "gpslong": 127.3901}
+          ]},
+          "numOfRows": 100,
+          "pageNo": 1,
+          "totalCount": 2
+        }
+      }
+    },
+    "nearby_stops": {
+      "response": {
+        "header": {"resultCode": "00", "resultMsg": "NORMAL SERVICE."},
+        "body": {
+          "items": {"item": {"citycode": "25", "nodeid": "DJB_FIXTURE_STOP_002", "nodeno": "90002", "nodenm": "샘플환승점", "gpslati": 36.3541, "gpslong": 127.3901}},
+          "numOfRows": 100,
+          "pageNo": 1,
+          "totalCount": 1
+        }
+      }
+    },
+    "stop_routes": {
+      "response": {
+        "header": {"resultCode": "00", "resultMsg": "NORMAL SERVICE."},
+        "body": {
+          "items": {"item": {"citycode": "25", "routeid": "DJB_FIXTURE_001", "routeno": "샘플1", "routetp": "간선버스", "startnodenm": "샘플기점", "endnodenm": "샘플종점"}},
+          "numOfRows": 100,
+          "pageNo": 1,
+          "totalCount": 1
+        }
+      }
+    }
+  }
+}

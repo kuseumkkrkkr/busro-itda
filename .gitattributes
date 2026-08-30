@@ -1,0 +1,4 @@
+* text=auto
+*.sqlite3 binary
+*.png binary
+*.zip binary

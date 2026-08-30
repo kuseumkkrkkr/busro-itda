@@ -1,0 +1,27 @@
+{
+  "response": {
+    "header": {
+      "resultCode": "00",
+      "resultMsg": "NORMAL SERVICE."
+    },
+    "body": {
+      "items": {
+        "item": [
+          {
+            "routenm": "202",
+            "gpslati": 36.333445,
+            "gpslong": 127.438859,
+            "nodeord": 1,
+            "nodenm": "대전역동광장종점",
+            "nodeid": "DJB8005621",
+            "routetp": "간선버스",
+            "vehicleno": "대전99가9999"
+          }
+        ]
+      },
+      "numOfRows": 100,
+      "pageNo": 1,
+      "totalCount": 1
+    }
+  }
+}

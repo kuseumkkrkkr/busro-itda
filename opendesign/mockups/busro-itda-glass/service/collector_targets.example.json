@@ -1,0 +1,8 @@
+{
+  "arrivals": [
+    {"city_code": "25", "node_id": "DJB8001793"}
+  ],
+  "positions": [
+    {"city_code": "25", "route_id": "DJB30300052"}
+  ]
+}
