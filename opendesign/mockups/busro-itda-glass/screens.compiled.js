@@ -23,6 +23,272 @@ function SimulationScreen({ journey, replayReady, connection, simulation, days, 
   const canReplay = replayReady && connection.mode === "live" && allMapped;
   return /* @__PURE__ */ React.createElement("main", { className: "screen content-screen simulation-screen" }, /* @__PURE__ */ React.createElement(ScreenHeading, { eyebrow: "\uC774\uB825 \uC7AC\uC0DD", title: "\uB0A0\uC9DC\uBCC4 \uC5F0\uACB0 \uACB0\uACFC", detail: "\uAC80\uC99D\uB41C \uC2DC\uAC04\uD45C\uC640 \uC800\uC7A5\uB41C \uCC28\uB7C9 \uD1B5\uACFC \uC774\uB825\uC73C\uB85C\uB9CC \uD310\uC815\uD569\uB2C8\uB2E4." }), /* @__PURE__ */ React.createElement(CoverageStrip, { mappingSummary, coverage: passageCoverage }), mappingSummary.verified < mappingSummary.total && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "map-pin-line", title: "DATA_GAP \xB7 \uACF5\uC2DD \uB9E4\uD551 \uBBF8\uC644\uB8CC" }, "\uC120\uD0DD \uC5EC\uD589 ", mappingSummary.total, "\uAC1C \uAD6C\uAC04\uC774 \uBAA8\uB450 \uAC80\uC99D\uB418\uAE30 \uC804\uC5D0\uB294 \uB0A0\uC9DC\uBCC4 \uACB0\uACFC\uB97C \uD310\uC815\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."), !replayReady && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "clock", title: "DATA_GAP \xB7 \uC2E4\uC81C \uD658\uC2B9 \uC2DC\uAC01 \uD544\uC694" }, "\uD6C4\uBCF4\uC5D0 \uAC80\uC99D\uB41C \uC2DC\uAC04\uD45C \uCD9C\uCC98, \uB3C4\uCC29 \uC608\uC815\uC2DC\uAC01, \uB2E4\uC74C \uCD9C\uBC1C\uC2DC\uAC01, \uCD5C\uC18C \uD658\uC2B9\uC2DC\uAC04\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uC784\uC758 \uC2DC\uAC01\uC774\uB098 fixture \uC131\uACF5\uB960\uC744 \uC0AC\uC6A9\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."), replayReady && connection.mode !== "live" && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "database", title: "DATA_GAP \xB7 TAGO LIVE \uD544\uC694" }, "\uC2E4\uC81C \uCC28\uB7C9 \uD1B5\uACFC \uC774\uB825\uC774 \uC801\uC7AC\uB41C TAGO LIVE \uC5F0\uACB0 \uB4A4\uC5D0\uB9CC \uC7AC\uC0DD\uD569\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement(GlassCard, { className: "sim-control" }, /* @__PURE__ */ React.createElement("label", null, "\uBD84\uC11D \uAE30\uAC04", /* @__PURE__ */ React.createElement(Segmented, { value: days, onChange: setDays, label: "\uBD84\uC11D \uAE30\uAC04", options: [{ value: 7, label: "7\uC77C" }, { value: 14, label: "14\uC77C" }, { value: 30, label: "30\uC77C" }] })), /* @__PURE__ */ React.createElement("button", { className: "liquid-button", type: "button", onClick: onRun, disabled: loading || !canReplay }, loading ? "\uD1B5\uACFC \uC774\uB825 \uC7AC\uC0DD \uC911\u2026" : "\uB0A0\uC9DC\uBCC4 \uC2E4\uC81C \uC774\uB825 \uC7AC\uC0DD", /* @__PURE__ */ React.createElement(Icon, { name: "sparkle" }))), /* @__PURE__ */ React.createElement(GlassCard, { className: "sim-summary" }, /* @__PURE__ */ React.createElement(ProbabilityRing, { value: summary.probability || 0 }), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uAD00\uCE21 \uACB0\uACFC"), /* @__PURE__ */ React.createElement("h2", null, summary.dataGap ? "\uC790\uB8CC \uBD80\uC871" : summary.successfulDays, /* @__PURE__ */ React.createElement("span", null, summary.dataGap ? " \xB7 DATA_GAP" : ` / ${summary.totalDays}\uC77C \uC131\uACF5`)), /* @__PURE__ */ React.createElement("p", null, summary.dataGap ? "\uAC80\uC99D\uB41C \uC2DC\uAC01\uACFC \uD574\uB2F9 \uB0A0\uC9DC \uD1B5\uACFC \uC774\uB825\uC774 \uBAA8\uB450 \uD544\uC694\uD569\uB2C8\uB2E4." : /* @__PURE__ */ React.createElement(React.Fragment, null, "\uACB0\uACFC \uC694\uC57D\uC740 ", /* @__PURE__ */ React.createElement("strong", null, summary.weakestLeg), "\uC785\uB2C8\uB2E4.")), /* @__PURE__ */ React.createElement("div", { className: "coverage-row" }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "database" }), " \uC801\uC7AC \uD1B5\uACFC \uC774\uBCA4\uD2B8"), /* @__PURE__ */ React.createElement("strong", null, summary.coverage || 0, "\uAC74")))), /* @__PURE__ */ React.createElement("section", { className: "daily-results" }, /* @__PURE__ */ React.createElement("div", { className: "card-title" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uB0A0\uC9DC\uBCC4"), /* @__PURE__ */ React.createElement("h3", null, "\uC5F0\uACB0 \uC131\uACF5 \uC5EC\uBD80")), /* @__PURE__ */ React.createElement(SourceBadge, { mode: simulation.mode || "offline", label: simulation.mode === "live" ? "\uC2E4\uC81C \uD1B5\uACFC \uC774\uB825" : "DATA_GAP" })), simulation.perDay?.map((day) => /* @__PURE__ */ React.createElement("article", { className: "day-row", key: day.date }, /* @__PURE__ */ React.createElement("div", { className: `day-state ${day.status === "gap" ? "gap" : day.success ? "success" : "fail"}` }, /* @__PURE__ */ React.createElement(Icon, { name: day.status === "gap" ? "question" : day.success ? "check" : "x" })), /* @__PURE__ */ React.createElement("div", { className: "day-copy" }, /* @__PURE__ */ React.createElement("strong", null, day.date), /* @__PURE__ */ React.createElement("small", null, day.status === "gap" ? "DATA_GAP \xB7 \uAD00\uCE21 \uBD80\uC871" : day.success ? "\uBAA8\uB4E0 \uD658\uC2B9 \uC131\uACF5" : day.reasons?.[0] || "\uD658\uC2B9 \uC2E4\uD328")), /* @__PURE__ */ React.createElement("div", { className: "day-score" }, /* @__PURE__ */ React.createElement("strong", null, Number.isFinite(day.probability) ? `${day.probability}%` : "\u2014"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("i", { style: { width: `${Number.isFinite(day.probability) ? day.probability : 0}%` } })))))), /* @__PURE__ */ React.createElement(InlineNotice, { tone: "neutral", icon: "flask", title: "\uACB0\uACFC \uD574\uC11D" }, "TAGO\uB294 \uACFC\uAC70 \uC6B4\uD589 \uC774\uB825\uC744 \uC18C\uAE09 \uC81C\uACF5\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC5F0\uACB0 \uC774\uD6C4 \uC801\uC7AC\uD55C \uC2E4\uC81C \uCC28\uB7C9 \uD1B5\uACFC\uC640 \uAC80\uC99D\uB41C \uC2DC\uAC04\uD45C \uC2DC\uAC01\uC774 \uD568\uAED8 \uC788\uB294 \uB0A0\uC9DC\uB9CC \uC131\uACF5\xB7\uC2E4\uD328\uB85C \uD310\uC815\uD558\uBA70, \uB098\uBA38\uC9C0\uB294 DATA_GAP\uC785\uB2C8\uB2E4."));
 }
+function validJourneyCoordinate(stop) {
+  const latitude = Number(stop?.latitude ?? stop?.lat);
+  const longitude = Number(stop?.longitude ?? stop?.lon);
+  return Number.isFinite(latitude) && Number.isFinite(longitude) && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180;
+}
+function normalizeJourneyMapStop(stop) {
+  return {
+    ...stop,
+    node_id: String(stop?.node_id || ""),
+    node_name: String(stop?.node_name || stop?.node_id || "\uC815\uB958\uC7A5"),
+    node_order: Number(stop?.node_order || 0),
+    latitude: Number(stop?.latitude ?? stop?.lat),
+    longitude: Number(stop?.longitude ?? stop?.lon)
+  };
+}
+function journeyStopsMatch(left, right) {
+  return String(left?.city_code || "") === String(right?.city_code || "") && String(left?.node_id || "") === String(right?.node_id || "") && Number(left?.node_order) === Number(right?.node_order);
+}
+function summarizeJourneySections(journey) {
+  const sections = [];
+  let currentRide = null;
+  for (const step of Array.isArray(journey?.steps) ? journey.steps : []) {
+    const from = step?.from || {};
+    const to = step?.to || {};
+    const distance = Number(step?.distance_m);
+    if (step?.kind === "ride" && step.route_id) {
+      const routeId = String(step.route_id);
+      const continues = currentRide && currentRide.routeId === routeId && journeyStopsMatch(currentRide.to, from);
+      if (continues) {
+        currentRide.to = to;
+        currentRide.edgeCount += 1;
+        currentRide.distanceM += Number.isFinite(distance) ? distance : 0;
+        currentRide.stops.push(to);
+      } else {
+        currentRide = {
+          kind: "ride",
+          routeId,
+          from,
+          to,
+          edgeCount: 1,
+          distanceM: Number.isFinite(distance) ? distance : 0,
+          stops: [from, to]
+        };
+        sections.push(currentRide);
+      }
+      continue;
+    }
+    currentRide = null;
+    sections.push({
+      kind: "transfer",
+      routeId: "",
+      from,
+      to,
+      edgeCount: 1,
+      distanceM: Number.isFinite(distance) ? distance : 0,
+      stops: [from, to]
+    });
+  }
+  return sections;
+}
+function buildJourneyMapPayload(sections) {
+  const lines = [];
+  const stops = [];
+  for (const section of sections) {
+    if (section.kind !== "ride") continue;
+    const routeStops = section.stops.filter(validJourneyCoordinate).map(normalizeJourneyMapStop);
+    if (routeStops.length < 2) continue;
+    lines.push(routeStops.map((stop) => [stop.longitude, stop.latitude]));
+    routeStops.forEach((stop) => {
+      const previous = stops[stops.length - 1];
+      if (!previous || previous.node_id !== stop.node_id || previous.node_order !== stop.node_order) stops.push(stop);
+    });
+  }
+  const geometry = lines.length === 1 ? { type: "LineString", coordinates: lines[0] } : lines.length > 1 ? { type: "MultiLineString", coordinates: lines } : null;
+  return { geometry, stops };
+}
+const JOURNEY_GEOMETRY_REQUEST_CACHE = /* @__PURE__ */ new Map();
+const MAX_JOURNEY_GEOMETRY_CACHE = 12;
+const MAX_JOURNEY_GEOMETRY_POINTS = 2e4;
+function normalizeJourneyGeometry(value) {
+  const type = value?.type;
+  const sourceLines = type === "LineString" ? [value.coordinates] : type === "MultiLineString" ? value.coordinates : null;
+  if (!Array.isArray(sourceLines) || sourceLines.length === 0) return null;
+  const lines = [];
+  let pointCount = 0;
+  for (const sourceLine of sourceLines) {
+    if (!Array.isArray(sourceLine) || sourceLine.length < 2) return null;
+    const line = [];
+    for (const sourcePoint of sourceLine) {
+      if (!Array.isArray(sourcePoint) || sourcePoint.length < 2) return null;
+      const longitude = Number(sourcePoint[0]);
+      const latitude = Number(sourcePoint[1]);
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return null;
+      pointCount += 1;
+      if (pointCount > MAX_JOURNEY_GEOMETRY_POINTS) return null;
+      line.push([longitude, latitude]);
+    }
+    lines.push(line);
+  }
+  return lines.length === 1 ? { type: "LineString", coordinates: lines[0] } : { type: "MultiLineString", coordinates: lines };
+}
+function journeyGeometryLines(geometry) {
+  if (geometry?.type === "LineString") return [geometry.coordinates];
+  return geometry?.type === "MultiLineString" ? geometry.coordinates : [];
+}
+function buildJourneyGeometryRequests(sections) {
+  return sections.filter((section) => section.kind === "ride" && section.routeId).map((section) => ({
+    routeId: section.routeId,
+    stops: section.stops.filter(validJourneyCoordinate).map(normalizeJourneyMapStop)
+  })).filter((request) => request.stops.length >= 2);
+}
+function journeyGeometryRequestKey(requests) {
+  if (requests.length === 0) return "journey-geometry:none";
+  return JSON.stringify(requests.map((request) => [
+    request.routeId,
+    request.stops.map((stop) => [stop.node_id, stop.node_order, stop.latitude, stop.longitude])
+  ]));
+}
+function requestJourneyGeometry(requestKey, requests) {
+  if (JOURNEY_GEOMETRY_REQUEST_CACHE.has(requestKey)) return JOURNEY_GEOMETRY_REQUEST_CACHE.get(requestKey);
+  if (JOURNEY_GEOMETRY_REQUEST_CACHE.size >= MAX_JOURNEY_GEOMETRY_CACHE) {
+    JOURNEY_GEOMETRY_REQUEST_CACHE.delete(JOURNEY_GEOMETRY_REQUEST_CACHE.keys().next().value);
+  }
+  const request = Promise.allSettled(requests.map((item) => BusroApi.routeGeometry(item.routeId, item.stops))).then((outcomes) => {
+    if (outcomes.some((outcome) => outcome.status !== "fulfilled")) return { status: "gap" };
+    const payloads = outcomes.map((outcome) => outcome.value);
+    const sources = payloads.map((payload) => String(payload?.geometry_source || ""));
+    if (sources.some((source2) => !["osm_bus_relation", "osm_road_route_estimate"].includes(source2))) return { status: "gap" };
+    const geometries = payloads.map((payload) => normalizeJourneyGeometry(payload?.geometry));
+    if (geometries.some((geometry2) => !geometry2)) return { status: "gap" };
+    const lines = geometries.flatMap(journeyGeometryLines);
+    if (lines.length === 0) return { status: "gap" };
+    const geometry = lines.length === 1 ? { type: "LineString", coordinates: lines[0] } : { type: "MultiLineString", coordinates: lines };
+    const source = sources.every((item) => item === "osm_bus_relation") ? "osm_bus_relation" : sources.every((item) => item === "osm_road_route_estimate") ? "osm_road_route_estimate" : "mixed_osm_geometry";
+    return {
+      status: "ready",
+      geometry,
+      source,
+      precision: [...new Set(payloads.map((payload) => String(payload?.precision || "")).filter(Boolean))].join(",")
+    };
+  }).catch(() => ({ status: "gap" }));
+  JOURNEY_GEOMETRY_REQUEST_CACHE.set(requestKey, request);
+  return request;
+}
+function formatJourneyDistance(value) {
+  const distance = Number(value);
+  if (!Number.isFinite(distance)) return "\uAC70\uB9AC DATA_GAP";
+  return distance >= 1e3 ? `${(distance / 1e3).toFixed(1)}km` : `${Math.round(distance)}m`;
+}
+function safeJourneySourceUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+function parseJourneySource(value) {
+  const raw = String(value || "").trim();
+  let source = null;
+  if (raw.startsWith("{")) {
+    try {
+      source = JSON.parse(raw);
+    } catch {
+      source = null;
+    }
+  }
+  if (!source || Array.isArray(source) || typeof source !== "object") {
+    return { key: raw || "unknown", label: raw || "\uCD9C\uCC98 DATA_GAP", type: "\uACBD\uC720 \uC21C\uC11C \uADFC\uAC70", date: "", hash: "", url: "" };
+  }
+  const kind = String(source.kind || "");
+  const dataset = String(source.dataset || source.name || "\uACF5\uC2DD \uAD50\uD1B5 \uB370\uC774\uD130").replace(/_\d{8}$/, "");
+  return {
+    key: raw,
+    label: dataset,
+    type: kind === "OFFICIAL_MUNICIPAL_ROUTE_STOP_CSV" ? "\uC9C0\uC790\uCCB4 \uACF5\uC2DD \uACBD\uC720 \uC21C\uC11C" : kind || "\uACF5\uC2DD \uACBD\uB85C \uADFC\uAC70",
+    date: String(source.route_date || source.source_date || ""),
+    capturedAt: String(source.captured_at || ""),
+    hash: String(source.file_sha256 || source.sha256 || ""),
+    url: safeJourneySourceUrl(source.page || source.download)
+  };
+}
+function collectJourneySources(journey) {
+  const evidence = journey?.evidence && typeof journey.evidence === "object" ? journey.evidence : {};
+  const rawSources = Array.isArray(evidence.sources) ? [...evidence.sources] : [];
+  for (const step of Array.isArray(journey?.steps) ? journey.steps : []) {
+    if (step?.evidence?.source) rawSources.push(step.evidence.source);
+  }
+  return [...new Set(rawSources.map((item) => String(item || "")).filter(Boolean))].map(parseJourneySource);
+}
+function journeyReasonLabel(reason) {
+  return {
+    VERIFIED_TIMETABLE_REQUIRED: "\uAC80\uC99D\uB41C \uC2DC\uAC04\uD45C \uC5C6\uC74C",
+    PASSAGE_HISTORY_REQUIRED: "\uC2E4\uC81C \uD1B5\uACFC \uC774\uB825 \uBD80\uC871"
+  }[reason] || reason;
+}
+function journeyMapPresentation(state, stopCount) {
+  if (state.source === "osm_bus_relation") return {
+    title: "OSM \uBC84\uC2A4 \uAD00\uACC4 \uD615\uC0C1",
+    badge: "OSM route=bus",
+    icon: "path",
+    tone: "relation",
+    detail: `OSM \uBC84\uC2A4 \uAD00\uACC4\uC640 \uACF5\uC2DD \uC815\uB958\uC7A5 ${stopCount}\uAC1C\uB97C \uD568\uAED8 \uD45C\uC2DC\uD569\uB2C8\uB2E4. \uC2E4\uC81C \uCC28\uB7C9 GPS \uADA4\uC801\uC740 \uC544\uB2D9\uB2C8\uB2E4.`
+  };
+  if (state.source === "osm_road_route_estimate") return {
+    title: "OSM/OSRM \uB3C4\uB85C \uCD94\uC815\uC120",
+    badge: "\uC815\uB958\uC7A5 \uC21C\uC11C \uAE30\uBC18",
+    icon: "road-horizon",
+    tone: "estimate",
+    detail: `\uACF5\uC2DD \uC815\uB958\uC7A5 ${stopCount}\uAC1C\uC758 \uC6B4\uD589 \uC21C\uC11C\uB97C \uB530\uB77C \uB3C4\uB85C\uB9DD\uC73C\uB85C \uCD94\uC815\uD588\uC2B5\uB2C8\uB2E4. \uC2E4\uC81C \uCC28\uB7C9 GPS \uADA4\uC801\uC740 \uC544\uB2D9\uB2C8\uB2E4.`
+  };
+  if (state.source === "mixed_osm_geometry") return {
+    title: "OSM \uAD00\uACC4\xB7\uB3C4\uB85C \uCD94\uC815 \uD63C\uD569",
+    badge: "\uAD6C\uAC04\uBCC4 \uD615\uC0C1",
+    icon: "map-trifold",
+    tone: "mixed",
+    detail: `\uB178\uC120\uBCC4 OSM \uAD00\uACC4 \uB610\uB294 \uB3C4\uB85C \uCD94\uC815 \uD615\uC0C1\uC744 \uC774\uC5B4 \uD45C\uC2DC\uD569\uB2C8\uB2E4. \uC2E4\uC81C \uCC28\uB7C9 GPS \uADA4\uC801\uC740 \uC544\uB2D9\uB2C8\uB2E4.`
+  };
+  return {
+    title: "\uACF5\uC2DD \uC815\uB958\uC7A5 \uC5F0\uACB0\uC120",
+    badge: state.status === "loading" ? "\uB3C4\uB85C \uD615\uC0C1 \uD655\uC778 \uC911" : "\uB3C4\uB85C \uD615\uC0C1 DATA_GAP",
+    icon: state.status === "loading" ? "spinner-gap" : "path",
+    tone: state.status === "loading" ? "loading" : "gap",
+    detail: `${state.status === "loading" ? "\uD604\uC7AC\uB294" : "\uACF5\uAC1C \uB3C4\uB85C \uD615\uC0C1\uC744 \uAC00\uC838\uC624\uC9C0 \uBABB\uD574"} \uACF5\uC2DD \uACBD\uC720 \uC815\uB958\uC7A5 \uC88C\uD45C ${stopCount}\uAC1C\uB97C \uC6B4\uD589 \uC21C\uC11C\uB300\uB85C \uC5F0\uACB0\uD588\uC2B5\uB2C8\uB2E4. \uB3C4\uB85C \uC8FC\uD589\uADA4\uC801\uC740 \uC544\uB2D9\uB2C8\uB2E4.`
+  };
+}
+function JourneyRouteMap({ sections, fromName, toName }) {
+  const mapPayload = buildJourneyMapPayload(sections);
+  const geometryRequests = buildJourneyGeometryRequests(sections);
+  const requestKey = journeyGeometryRequestKey(geometryRequests);
+  const [resolvedGeometry, setResolvedGeometry] = useState({ key: "", status: "idle", geometry: null, source: "" });
+  useEffect(() => {
+    let active = true;
+    if (!mapPayload.geometry || geometryRequests.length === 0) {
+      setResolvedGeometry({ key: requestKey, status: "gap", geometry: null, source: "" });
+      return () => {
+        active = false;
+      };
+    }
+    setResolvedGeometry({ key: requestKey, status: "loading", geometry: null, source: "" });
+    requestJourneyGeometry(requestKey, geometryRequests).then((result) => {
+      if (!active) return;
+      setResolvedGeometry({ key: requestKey, ...result, geometry: result.geometry || null, source: result.source || "" });
+    });
+    return () => {
+      active = false;
+    };
+  }, [requestKey]);
+  const geometryState = resolvedGeometry.key === requestKey ? resolvedGeometry : { key: requestKey, status: geometryRequests.length ? "loading" : "gap", geometry: null, source: "" };
+  const displayedGeometry = geometryState.status === "ready" && geometryState.geometry ? geometryState.geometry : mapPayload.geometry;
+  const presentation = journeyMapPresentation(geometryState, mapPayload.stops.length);
+  if (!mapPayload.geometry) {
+    return /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "map-trifold", title: "\uC9C0\uB3C4 DATA_GAP" }, "\uC120\uD0DD \uACBD\uB85C\uC758 \uACF5\uC2DD \uC815\uB958\uC7A5 \uC88C\uD45C\uAC00 \uC5C6\uC5B4 \uC774\uB3D9\uC120\uC744 \uD45C\uC2DC\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  return /* @__PURE__ */ React.createElement("section", { className: `journey-route-map ${presentation.tone}`, "aria-labelledby": "journey-map-title" }, /* @__PURE__ */ React.createElement(
+    OSMRouteMap,
+    {
+      geometry: displayedGeometry,
+      stops: mapPayload.stops,
+      positions: [],
+      loading: false,
+      ariaLabel: `${fromName}\uC5D0\uC11C ${toName}\uAE4C\uC9C0 ${presentation.title} \uC9C0\uB3C4`,
+      badgeLabel: "OpenStreetMap"
+    }
+  ), /* @__PURE__ */ React.createElement("div", { className: "journey-map-caption" }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: presentation.icon })), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "journey-map-title-row" }, /* @__PURE__ */ React.createElement("strong", { id: "journey-map-title" }, presentation.title), /* @__PURE__ */ React.createElement("em", null, presentation.badge)), /* @__PURE__ */ React.createElement("small", null, presentation.detail))));
+}
 function JourneyScreen({ journey, onExplore }) {
   if (!journey) {
     return /* @__PURE__ */ React.createElement("main", { className: "screen content-screen journey-screen" }, /* @__PURE__ */ React.createElement(ScreenHeading, { eyebrow: "\uC120\uD0DD\uD55C \uC5EC\uC815", title: "\uC120\uD0DD\uB41C \uBC84\uC2A4 \uC5EC\uD589\uC774 \uC5C6\uC2B5\uB2C8\uB2E4", detail: "\uC804\uAD6D \uD0D0\uC0C9\uC5D0\uC11C \uCD9C\uBC1C\xB7\uB3C4\uCC29 \uC815\uB958\uC7A5\uC744 \uACE0\uB974\uACE0 \uC0DD\uC131\uB41C \uD6C4\uBCF4\uB97C \uC120\uD0DD\uD558\uC138\uC694." }), /* @__PURE__ */ React.createElement(GlassCard, { className: "ticket-card" }, /* @__PURE__ */ React.createElement(InlineNotice, { tone: "neutral", icon: "map-trifold", title: "\uC804\uAD6D \uACBD\uB85C \uD0D0\uC0C9" }, "\uACF5\uC2DD \uC815\uB958\uC7A5 \uC21C\uC11C\uAC00 \uC801\uC7AC\uB41C \uB178\uC120\uB9CC \uC5EC\uD589 \uD6C4\uBCF4\uB85C \uC0AC\uC6A9\uD569\uB2C8\uB2E4.")), /* @__PURE__ */ React.createElement("button", { className: "liquid-button sticky-action", type: "button", onClick: onExplore }, "\uC804\uAD6D \uD0D0\uC0C9\uC73C\uB85C \uAC00\uAE30 ", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" })));
@@ -33,19 +299,22 @@ function JourneyScreen({ journey, onExplore }) {
   const toName = toStop.node_name || toStop.stop_name || toStop.node_id || "DATA_GAP";
   const routeIds = Array.isArray(journey.route_ids) ? journey.route_ids.filter(Boolean) : [];
   const steps = Array.isArray(journey.steps) ? journey.steps : [];
+  const sections = summarizeJourneySections(journey);
   const reasons = Array.isArray(journey.reasons) ? journey.reasons.filter(Boolean) : [];
   const status = journey.status || "DATA_GAP";
   const hasProbability = typeof journey.success_probability === "number" && Number.isFinite(journey.success_probability);
   const coverage = journey.coverage && typeof journey.coverage === "object" ? journey.coverage : {};
   const evidence = journey.evidence && typeof journey.evidence === "object" ? journey.evidence : {};
-  const sources = Array.isArray(evidence.sources) ? evidence.sources.filter(Boolean) : [];
-  return /* @__PURE__ */ React.createElement("main", { className: "screen content-screen journey-screen" }, /* @__PURE__ */ React.createElement(ScreenHeading, { eyebrow: "\uC120\uD0DD\uD55C \uC5EC\uC815", title: `${fromName} \u2192 ${toName}`, detail: "\uACF5\uC2DD \uACBD\uC720 \uC815\uB958\uC7A5\uC73C\uB85C \uC0DD\uC131\uB41C \uACBD\uB85C\uC785\uB2C8\uB2E4. \uAD00\uCE21 \uADFC\uAC70\uAC00 \uC788\uB294 \uC815\uBCF4\uB9CC \uD45C\uC2DC\uD569\uB2C8\uB2E4." }), /* @__PURE__ */ React.createElement(GlassCard, { className: "ticket-card" }, /* @__PURE__ */ React.createElement("div", { className: "ticket-route" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("small", null, "\uCD9C\uBC1C \uC815\uB958\uC7A5"), /* @__PURE__ */ React.createElement("strong", null, fromName), /* @__PURE__ */ React.createElement("span", null, fromStop.node_id || "ID DATA_GAP")), /* @__PURE__ */ React.createElement("div", { className: "ticket-line" }, /* @__PURE__ */ React.createElement("span", null), /* @__PURE__ */ React.createElement(Icon, { name: "bus" }), /* @__PURE__ */ React.createElement("span", null)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("small", null, "\uB3C4\uCC29 \uC815\uB958\uC7A5"), /* @__PURE__ */ React.createElement("strong", null, toName), /* @__PURE__ */ React.createElement("span", null, toStop.node_id || "ID DATA_GAP"))), /* @__PURE__ */ React.createElement("div", { className: "ticket-meta" }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "bus" }), " \uB178\uC120 ", routeIds.length || "DATA_GAP"), typeof journey.transfers === "number" && /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "arrows-left-right" }), " ", journey.transfers, "\uD68C \uD658\uC2B9"), typeof journey.walking_m === "number" && /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "person-simple-walk" }), " ", Math.round(journey.walking_m), "m")), routeIds.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "ticket-meta" }, routeIds.map((routeId) => /* @__PURE__ */ React.createElement("span", { key: routeId }, /* @__PURE__ */ React.createElement(Icon, { name: "path" }), " ", routeId)))), /* @__PURE__ */ React.createElement("section", { className: "leg-timeline" }, steps.map((step, index) => {
-    const stepFrom = step.from || {};
-    const stepTo = step.to || {};
-    const stepEvidence = step.evidence || {};
-    const stepLabel = step.kind === "transfer" ? "\uD658\uC2B9" : step.route_id || "\uB178\uC120 DATA_GAP";
-    return /* @__PURE__ */ React.createElement("article", { key: `${step.kind || "step"}-${step.route_id || "none"}-${index}`, className: index === 0 ? "current" : "" }, /* @__PURE__ */ React.createElement("div", { className: "leg-rail" }, /* @__PURE__ */ React.createElement("span", null, index + 1), /* @__PURE__ */ React.createElement("i", null)), /* @__PURE__ */ React.createElement("div", { className: "leg-card" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", null, /* @__PURE__ */ React.createElement("span", { className: "line-chip blue" }, stepLabel), step.kind === "transfer" ? "\uC815\uB958\uC7A5 \uAC04 \uC774\uB3D9" : "\uBC84\uC2A4 \uC774\uB3D9"), /* @__PURE__ */ React.createElement("h3", null, stepFrom.node_name || stepFrom.node_id || "DATA_GAP", " \u2192 ", stepTo.node_name || stepTo.node_id || "DATA_GAP"), /* @__PURE__ */ React.createElement("small", null, typeof step.distance_m === "number" ? `${Math.round(step.distance_m)}m \xB7 ` : "", stepEvidence.type || "\uADFC\uAC70 DATA_GAP", stepEvidence.source ? ` \xB7 ${stepEvidence.source}` : ""))));
-  })), steps.length === 0 && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: "DATA_GAP" }, "\uC774 \uD6C4\uBCF4\uC5D0 \uD45C\uC2DC\uD560 \uACBD\uB85C \uB2E8\uACC4\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement(InlineNotice, { tone: status === "READY" ? "success" : "warning", icon: status === "READY" ? "shield-check" : "warning-circle", title: status }, reasons.length > 0 ? reasons.join(" \xB7 ") : "\uCD94\uAC00 \uACB0\uCE21 \uC0AC\uC720 \uC5C6\uC74C", ` \xB7 \uC131\uACF5\uB960 ${hasProbability ? `${Math.round(journey.success_probability * 100)}%` : "DATA_GAP"}`, typeof coverage.schedule_routes === "number" && typeof coverage.total_routes === "number" ? ` \xB7 \uC2DC\uAC04\uD45C \uADFC\uAC70 ${coverage.schedule_routes}/${coverage.total_routes}` : "", typeof coverage.passage_routes === "number" && typeof coverage.total_routes === "number" ? ` \xB7 \uD1B5\uACFC \uC774\uB825 ${coverage.passage_routes}/${coverage.total_routes}` : "", evidence.topology ? ` \xB7 ${evidence.topology}` : "", sources.length > 0 ? ` \xB7 \uCD9C\uCC98 ${sources.join(", ")}` : ""), /* @__PURE__ */ React.createElement("button", { className: "liquid-button sticky-action", type: "button", onClick: onExplore }, "\uB2E4\uB978 \uC804\uAD6D \uC5EC\uD589 \uCC3E\uAE30 ", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" })));
+  const sources = collectJourneySources(journey);
+  return /* @__PURE__ */ React.createElement("main", { className: "screen content-screen journey-screen" }, /* @__PURE__ */ React.createElement(ScreenHeading, { eyebrow: "\uC120\uD0DD\uD55C \uC5EC\uC815", title: `${fromName} \u2192 ${toName}`, detail: "\uACF5\uC2DD \uACBD\uC720 \uC815\uB958\uC7A5\uC73C\uB85C \uC0DD\uC131\uB41C \uACBD\uB85C\uC785\uB2C8\uB2E4. \uAD00\uCE21 \uADFC\uAC70\uAC00 \uC788\uB294 \uC815\uBCF4\uB9CC \uD45C\uC2DC\uD569\uB2C8\uB2E4." }), /* @__PURE__ */ React.createElement(JourneyRouteMap, { sections, fromName, toName }), /* @__PURE__ */ React.createElement(GlassCard, { className: "ticket-card" }, /* @__PURE__ */ React.createElement("div", { className: "ticket-route" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("small", null, "\uCD9C\uBC1C \uC815\uB958\uC7A5"), /* @__PURE__ */ React.createElement("strong", null, fromName), /* @__PURE__ */ React.createElement("span", null, fromStop.node_id || "ID DATA_GAP")), /* @__PURE__ */ React.createElement("div", { className: "ticket-line" }, /* @__PURE__ */ React.createElement("span", null), /* @__PURE__ */ React.createElement(Icon, { name: "bus" }), /* @__PURE__ */ React.createElement("span", null)), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("small", null, "\uB3C4\uCC29 \uC815\uB958\uC7A5"), /* @__PURE__ */ React.createElement("strong", null, toName), /* @__PURE__ */ React.createElement("span", null, toStop.node_id || "ID DATA_GAP"))), /* @__PURE__ */ React.createElement("div", { className: "ticket-meta" }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "bus" }), " \uB178\uC120 ", routeIds.length || "DATA_GAP"), typeof journey.transfers === "number" && /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "arrows-left-right" }), " ", journey.transfers, "\uD68C \uD658\uC2B9"), typeof journey.walking_m === "number" && /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "person-simple-walk" }), " ", Math.round(journey.walking_m), "m")), routeIds.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "ticket-meta" }, routeIds.map((routeId) => /* @__PURE__ */ React.createElement("span", { key: routeId }, /* @__PURE__ */ React.createElement(Icon, { name: "path" }), " ", routeId)))), /* @__PURE__ */ React.createElement("section", { className: "leg-timeline" }, sections.map((section, index) => {
+    const stepFrom = section.from || {};
+    const stepTo = section.to || {};
+    const isTransfer = section.kind === "transfer";
+    const stopCount = section.edgeCount + 1;
+    const intermediateCount = Math.max(0, stopCount - 2);
+    const stepLabel = isTransfer ? "\uD658\uC2B9" : section.routeId || "\uB178\uC120 DATA_GAP";
+    return /* @__PURE__ */ React.createElement("article", { key: `${section.kind || "step"}-${section.routeId || "none"}-${index}`, className: index === 0 ? "current" : "" }, /* @__PURE__ */ React.createElement("div", { className: "leg-rail" }, /* @__PURE__ */ React.createElement("span", null, index + 1), /* @__PURE__ */ React.createElement("i", null)), /* @__PURE__ */ React.createElement("div", { className: "leg-card" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", null, /* @__PURE__ */ React.createElement("span", { className: "line-chip blue" }, stepLabel), isTransfer ? "\uC815\uB958\uC7A5 \uAC04 \uC774\uB3D9" : "\uBC84\uC2A4 \uC2B9\uCC28 \uAD6C\uAC04"), /* @__PURE__ */ React.createElement("h3", null, stepFrom.node_name || stepFrom.node_id || "DATA_GAP", " \u2192 ", stepTo.node_name || stepTo.node_id || "DATA_GAP"), /* @__PURE__ */ React.createElement("small", null, isTransfer ? `\uB3C4\uBCF4 \uC5F0\uACB0 \xB7 ${formatJourneyDistance(section.distanceM)}` : `\uCD1D ${stopCount}\uAC1C \uC815\uB958\uC7A5 \xB7 \uC911\uAC04 \uACBD\uC720 ${intermediateCount}\uAC1C \xB7 \uC88C\uD45C \uAC04 ${formatJourneyDistance(section.distanceM)}`))));
+  })), steps.length === 0 && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: "DATA_GAP" }, "\uC774 \uD6C4\uBCF4\uC5D0 \uD45C\uC2DC\uD560 \uACBD\uB85C \uB2E8\uACC4\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."), sources.length > 0 && /* @__PURE__ */ React.createElement("details", { className: "journey-evidence" }, /* @__PURE__ */ React.createElement("summary", null, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "seal-check" }), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("strong", null, "\uACF5\uC2DD \uACBD\uB85C \uADFC\uAC70"), /* @__PURE__ */ React.createElement("small", null, sources.length, "\uAC1C \uCD9C\uCC98 \xB7 \uC6D0\uBB38 \uC815\uBCF4\uB294 \uC5EC\uAE30\uC11C \uD55C \uBC88\uB9CC \uD45C\uC2DC\uD569\uB2C8\uB2E4."))), /* @__PURE__ */ React.createElement(Icon, { name: "caret-down" })), /* @__PURE__ */ React.createElement("div", { className: "journey-evidence-list" }, sources.map((source) => /* @__PURE__ */ React.createElement("article", { key: source.key }, /* @__PURE__ */ React.createElement("span", null, source.type), /* @__PURE__ */ React.createElement("strong", null, source.label), /* @__PURE__ */ React.createElement("small", null, source.date ? `\uAE30\uC900\uC77C ${source.date}` : "\uAE30\uC900\uC77C DATA_GAP", source.hash ? ` \xB7 SHA-256 ${source.hash.slice(0, 12)}\u2026` : ""), source.url && /* @__PURE__ */ React.createElement("a", { href: source.url, target: "_blank", rel: "noreferrer" }, "\uACF5\uC2DD \uC6D0\uBB38 \uBCF4\uAE30 ", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-square-out" })))))), /* @__PURE__ */ React.createElement(InlineNotice, { tone: status === "READY" ? "success" : "warning", icon: status === "READY" ? "shield-check" : "warning-circle", title: status }, reasons.length > 0 ? reasons.map(journeyReasonLabel).join(" \xB7 ") : "\uCD94\uAC00 \uACB0\uCE21 \uC0AC\uC720 \uC5C6\uC74C", ` \xB7 \uC131\uACF5\uB960 ${hasProbability ? `${Math.round(journey.success_probability * 100)}%` : "DATA_GAP"}`, typeof coverage.schedule_routes === "number" && typeof coverage.total_routes === "number" ? ` \xB7 \uC2DC\uAC04\uD45C \uADFC\uAC70 ${coverage.schedule_routes}/${coverage.total_routes}` : "", typeof coverage.passage_routes === "number" && typeof coverage.total_routes === "number" ? ` \xB7 \uD1B5\uACFC \uC774\uB825 ${coverage.passage_routes}/${coverage.total_routes}` : "", evidence.topology ? " \xB7 \uAC80\uC99D\uB41C \uB2E8\uBC29\uD5A5 \uACBD\uC720 \uC21C\uC11C" : ""), /* @__PURE__ */ React.createElement("button", { className: "liquid-button sticky-action", type: "button", onClick: onExplore }, "\uB2E4\uB978 \uC804\uAD6D \uC5EC\uD589 \uCC3E\uAE30 ", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" })));
 }
 function SettingsSheet({ open, onClose, apiBase, setApiBase, connection, journey, mappings, legs, mappingSummary, settingsError, onMappingChange, onVerifyMapping, onReconnect }) {
   if (!open) return null;

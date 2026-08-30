@@ -110,6 +110,7 @@ class TopologyIngestor:
         self.sleeper = sleeper
         self.run_id = "ing_" + uuid.uuid4().hex[:24]
         self.requests_used = 0
+        self.discovery_failures = 0
         self._last_request_started: float | None = None
 
     def _request(
@@ -192,7 +193,17 @@ class TopologyIngestor:
                 continue
             page = int(progress.get("next_page") or 1)
             if page > self.config.max_discovery_pages:
-                raise CatalogLimitError("route discovery exceeded configured page bound")
+                self.catalog.update_topology_discovery(
+                    provider=PROVIDER,
+                    scope_key=scope,
+                    status="FAILED",
+                    next_page=page,
+                    total_count=progress.get("total_count"),
+                    error_code="ROUTE_DISCOVERY_DATA_GAP",
+                    error_message="TAGO route discovery exceeded configured page bound",
+                )
+                self.discovery_failures += 1
+                continue
             while page <= self.config.max_discovery_pages:
                 try:
                     raw = self._request(
@@ -255,9 +266,38 @@ class TopologyIngestor:
                         error_code=exc.code,
                         error_message=_public_tago_message(exc.code),
                     )
-                    raise
+                    if exc.code in FATAL_ACCESS_CODES:
+                        raise
+                    self.discovery_failures += 1
+                    break
+                except CatalogError:
+                    # A provider data defect belongs to this city scope. Keep
+                    # already validated targets and continue discovering other
+                    # cities; access/key failures are handled above and remain
+                    # fatal for the run.
+                    self.catalog.update_topology_discovery(
+                        provider=PROVIDER,
+                        scope_key=scope,
+                        status="FAILED",
+                        next_page=page,
+                        total_count=progress.get("total_count"),
+                        request_increment=1,
+                        error_code="ROUTE_DISCOVERY_DATA_GAP",
+                        error_message="TAGO route discovery data failed validation",
+                    )
+                    self.discovery_failures += 1
+                    break
             else:
-                raise CatalogLimitError("route discovery exceeded configured page bound")
+                self.catalog.update_topology_discovery(
+                    provider=PROVIDER,
+                    scope_key=scope,
+                    status="FAILED",
+                    next_page=page,
+                    total_count=progress.get("total_count"),
+                    error_code="ROUTE_DISCOVERY_DATA_GAP",
+                    error_message="TAGO route discovery exceeded configured page bound",
+                )
+                self.discovery_failures += 1
 
     def _ingest_target(self, target: Mapping[str, Any]) -> str:
         city_code = str(target["city_code"])
@@ -380,6 +420,8 @@ class TopologyIngestor:
         try:
             if self.config.target_source == "tago":
                 self._discover_tago_targets()
+                if self.discovery_failures:
+                    final_status = "PARTIAL"
             else:
                 self.catalog.seed_topology_targets_from_catalog(
                     provider=PROVIDER,
@@ -476,6 +518,7 @@ class TopologyIngestor:
             "ok": final_status in {"COMPLETE", "PARTIAL", "BUDGET_EXHAUSTED"},
             "run": run,
             "coverage": coverage,
+            "discovery_failures": self.discovery_failures,
             "notice": (
                 "TAGO route/station API authorization is required"
                 if final_status == "DATA_GAP"

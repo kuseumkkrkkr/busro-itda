@@ -157,6 +157,125 @@ class NetworkCatalogCase(unittest.TestCase):
         self.assertEqual(sequence.source, "TAGO getRouteAcctoThrghSttnList")
         self.assertEqual(sequence.captured_at, "2026-08-31T00:00:00Z")
 
+    def test_transport_route_id_preserves_hangul_and_rejects_unsafe_characters(self):
+        route_id = "GMB수점10"
+        result = self.catalog.hydrate_route_sequence(
+            city_code="37050",
+            route_id=route_id,
+            ordered_stops=[
+                {"node_id": "A", "node_name": "A", "node_order": 1},
+                {"node_id": "B", "node_name": "B", "node_order": 2},
+            ],
+            source="TAGO_ROUTE_STOPS_LIVE_BATCH",
+            captured_at="2026-08-31T00:00:00Z",
+        )
+        self.assertEqual(result["route_id"], route_id)
+        self.assertIsNotNone(
+            self.catalog.active_route_sequence_info(
+                city_code="37050", route_id=route_id
+            )
+        )
+
+        for unsafe in ("BAD ROUTE", " BAD", "BAD/ROUTE", "BAD'ROUTE", 'BAD"ROUTE'):
+            with self.subTest(route_id=unsafe), self.assertRaises(
+                CatalogValidationError
+            ):
+                self.catalog.hydrate_route_sequence(
+                    city_code="37050",
+                    route_id=unsafe,
+                    ordered_stops=[
+                        {"node_id": "A", "node_name": "A", "node_order": 1},
+                        {"node_id": "B", "node_name": "B", "node_order": 2},
+                    ],
+                    source="TEST",
+                    captured_at="2026-08-31T00:00:00Z",
+                )
+
+        with self.assertRaises(CatalogValidationError):
+            self.catalog.upsert_topology_targets(
+                provider="한글",
+                routes=[],
+                discovery_source="TEST",
+            )
+
+    def test_small_topology_batch_spans_cities_deterministically(self):
+        self.catalog.upsert_topology_targets(
+            provider="TAGO",
+            routes=[
+                {"city_code": city, "route_id": route, "route_no": route}
+                for city in ("12", "13", "14")
+                for route in (f"R{city}A", f"R{city}B")
+            ],
+            discovery_source="TEST",
+        )
+
+        claimed: list[tuple[str, str]] = []
+        for _ in range(4):
+            target = self.catalog.claim_topology_target(
+                provider="TAGO", run_id="coverage-run"
+            )
+            self.assertIsNotNone(target)
+            claimed.append((target["city_code"], target["route_id"]))
+            with self.catalog.connect() as connection:
+                connection.execute(
+                    "UPDATE topology_progress SET status='COMPLETE' "
+                    "WHERE provider='TAGO' AND city_code=? AND route_id=?",
+                    claimed[-1],
+                )
+                connection.commit()
+
+        self.assertEqual(
+            claimed,
+            [
+                ("12", "R12A"),
+                ("13", "R13A"),
+                ("14", "R14A"),
+                ("12", "R12B"),
+            ],
+        )
+
+    def test_topology_claim_preserves_resume_status_priority(self):
+        routes = [
+            {"city_code": city, "route_id": route, "route_no": route}
+            for city, route in (
+                ("10", "PENDING_ROUTE"),
+                ("20", "FAILED_ROUTE"),
+                ("30", "DEFERRED_ROUTE"),
+                ("40", "RESUME_ROUTE"),
+                ("40", "COMPLETE_ROUTE"),
+            )
+        ]
+        self.catalog.upsert_topology_targets(
+            provider="TAGO", routes=routes, discovery_source="TEST"
+        )
+        with self.catalog.connect() as connection:
+            connection.execute(
+                "UPDATE topology_progress SET status='FAILED' WHERE route_id='FAILED_ROUTE'"
+            )
+            connection.execute(
+                "UPDATE topology_progress SET status='DEFERRED' WHERE route_id='DEFERRED_ROUTE'"
+            )
+            connection.execute(
+                "UPDATE topology_progress SET status='IN_PROGRESS',last_run_id='old-run' "
+                "WHERE route_id='RESUME_ROUTE'"
+            )
+            connection.execute(
+                "UPDATE topology_progress SET status='COMPLETE' WHERE route_id='COMPLETE_ROUTE'"
+            )
+            connection.commit()
+
+        claimed = [
+            self.catalog.claim_topology_target(provider="TAGO", run_id="resume-run")
+            for _ in range(4)
+        ]
+        self.assertEqual(
+            [target["route_id"] for target in claimed],
+            ["RESUME_ROUTE", "DEFERRED_ROUTE", "FAILED_ROUTE", "PENDING_ROUTE"],
+        )
+        self.assertIsNone(
+            self.catalog.claim_topology_target(provider="TAGO", run_id="resume-run")
+        )
+
     def test_snapshot_and_cache_are_immutable(self):
         self.catalog.hydrate_route_sequence(
             city_code="25",

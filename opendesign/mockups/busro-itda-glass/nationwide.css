@@ -67,6 +67,7 @@
 .source-note { display: flex; align-items: flex-start; gap: 6px; margin-top: 10px; color: var(--route-muted); font-size: 11px; }
 
 .route-catalog,.generated-journeys { margin-top: 20px; }
+.alternative-hint { margin: -6px 0 12px; color: var(--route-muted); font-size: 11px; }
 .catalog-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin: 0 2px 10px; }
 .catalog-heading h2 { margin-top: 4px; font-size: 20px; }
 .catalog-heading > span { min-height: 30px; display: inline-flex; align-items: center; padding: 5px 10px; border: 1px solid var(--route-line); border-radius: 99px; color: var(--route-muted); font-size: 11px; background: white; }
@@ -141,7 +142,12 @@
 .destination .stop-suggestions { top: auto; bottom: calc(100% + 8px); }
 .stop-suggestions button { min-height: 52px; display: grid; align-content: center; gap: 2px; padding: 7px 10px; border-radius: 11px; color: var(--route-ink); text-align: left; background: white; }
 .stop-suggestions button:hover { background: var(--route-blue-soft); }
-.stop-suggestions strong { font-size: 12px; }.stop-suggestions small { color: var(--route-muted); font-size: 10px; }
+.stop-suggestions strong { font-size: 12px; }
+.stop-suggestions small { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--route-muted); font-size: 10px; }
+.stop-suggestions small span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stop-suggestions small em { flex: 0 0 auto; padding: 2px 6px; border-radius: 999px; font-size: 9px; font-style: normal; font-weight: 760; }
+.stop-suggestions .graph-ready { color: #11653f; background: #e9f8ef; }
+.stop-suggestions .graph-gap { color: #7b6651; background: #f4f1ed; }
 .generator-swap { position: absolute; z-index: 5; right: 11px; top: 50%; width: 44px; height: 44px; display: grid; place-items: center; margin-top: -22px; border: 1px solid #dce2ea; border-radius: 14px; color: var(--route-blue); background: white; box-shadow: 0 5px 14px rgba(22,32,51,.09); }
 .generator-swap:hover { background: var(--route-blue-soft); transform: rotate(180deg); }
 .generator-card fieldset { min-width: 0; margin: 13px 0 11px; padding: 0; border: 0; }

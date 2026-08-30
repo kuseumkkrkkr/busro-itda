@@ -28,7 +28,7 @@ function normalizeStop(item, index = 0) {
   };
 }
 
-function OSMRouteMap({ geometry, stops, positions, loading }) {
+function OSMRouteMap({ geometry, stops, positions, loading, ariaLabel = "OpenStreetMap 기반 전국 버스 지도", badgeLabel = "OSM" }) {
   const elementRef = useRef(null);
   const mapRef = useRef(null);
   useEffect(() => {
@@ -39,8 +39,8 @@ function OSMRouteMap({ geometry, stops, positions, loading }) {
   useEffect(() => { mapRef.current?.render({ geometry, stops, positions }); }, [geometry, stops, positions]);
   return (
     <div className="osm-map-wrap">
-      <div ref={elementRef} className="osm-map" aria-label="OpenStreetMap 기반 전국 버스 지도" />
-      <span className="osm-attribution-pill"><Icon name="globe-hemisphere-east" /> OSM</span>
+      <div ref={elementRef} className="osm-map" aria-label={ariaLabel} />
+      <span className="osm-attribution-pill"><Icon name="globe-hemisphere-east" /> {badgeLabel}</span>
       {loading && <div className="map-loading"><span /><p>공식 정류장과 노선 형상 불러오는 중</p></div>}
     </div>
   );
@@ -155,7 +155,7 @@ function StopLookup({ label, value, onChange, selected, onSelect, cityCode }) {
     }, 260);
     return () => { active = false; window.clearTimeout(timer); };
   }, [value, selected, cityCode]);
-  return <div className="stop-lookup"><label><span>{label}</span><div className="stop-input-shell"><Icon name="map-pin" /><input value={selected ? selected.node_name : value} onChange={(event) => { onSelect(null); onChange(event.target.value); }} placeholder="전국 정류장명 2자 이상" autoComplete="off" /><span className={loading ? "lookup-state loading" : "lookup-state"}><Icon name={loading ? "spinner-gap" : selected ? "check-circle" : "magnifying-glass"} /></span></div></label>{results.length > 0 && !selected && <div className="stop-suggestions">{results.map((stop, index) => <button type="button" key={`${stop.city_code}-${stop.node_id}-${index}`} onClick={() => { onSelect(stop); onChange(stop.node_name); setResults([]); }}><strong>{stop.node_name}</strong><small>{stop.city_name || stop.city_code || "지역 미상"} · {stop.node_id}</small></button>)}</div>}</div>;
+  return <div className="stop-lookup"><label><span>{label}</span><div className="stop-input-shell"><Icon name="map-pin" /><input value={selected ? selected.node_name : value} onChange={(event) => { onSelect(null); onChange(event.target.value); }} placeholder="전국 정류장명 2자 이상" autoComplete="off" /><span className={loading ? "lookup-state loading" : "lookup-state"}><Icon name={loading ? "spinner-gap" : selected ? "check-circle" : "magnifying-glass"} /></span></div></label>{results.length > 0 && !selected && <div className="stop-suggestions">{results.map((stop, index) => <button type="button" key={`${stop.city_code}-${stop.node_id}-${index}`} onClick={() => { onSelect(stop); onChange(stop.node_name); setResults([]); }}><strong>{stop.node_name}</strong><small><span>{stop.city_name || stop.city_code || "지역 미상"} · {stop.node_id}</span><em className={stop.graph_ready ? "graph-ready" : "graph-gap"}>{stop.graph_ready ? "여행 경로 연결" : "정류장 정보만"}</em></small></button>)}</div>}</div>;
 }
 
 function formatCount(value) {
@@ -185,20 +185,28 @@ function GraphCoverage({ networkStatus, result }) {
   const topology = networkStatus?.topology_coverage && typeof networkStatus.topology_coverage === "object" ? networkStatus.topology_coverage : {};
   const topologyTargets = Number(topology.targets || 0);
   const topologyComplete = Number(topology.complete || 0);
+  const activeTopology = networkStatus?.active_topology && typeof networkStatus.active_topology === "object" ? networkStatus.active_topology : {};
+  const activeRoutes = Number(activeTopology.active_route_sequences || 0);
+  const activeStops = Number(activeTopology.unique_graph_stops || 0);
+  const activeCities = Number(activeTopology.city_count || 0);
   const graphReady = networkStatus?.graph_ready === true;
+  const nationwideComplete = networkStatus?.nationwide_graph_complete === true;
   const graph = result?.graph && typeof result.graph === "object" ? result.graph : null;
   const topologyReady = graph && Number(graph.nodes) > 0 && Number(graph.edges) > 0;
-  const primaryStatus = graphReady ? "전국 경로망 연결됨" : "전국 경로망 준비 중";
+  const primaryStatus = nationwideComplete ? "전국 경로망 연결됨" : graphReady ? "공식 검증 구간 연결됨" : "전국 경로망 준비 중";
   const catalogSummary = stopRows && routeRows
     ? `정류장 ${formatCount(stopRows)} · 노선 ${formatCount(routeRows)}`
     : "전국 목록 DATA_GAP";
-  const topologySummary = topologyTargets
+  const topologySummary = activeRoutes
+    ? `방향 노선 ${formatCount(activeRoutes)} · 그래프 정류장 ${formatCount(activeStops)}`
+    : topologyTargets
     ? `방향 순서 ${formatCount(topologyComplete)}/${formatCount(topologyTargets)}`
     : "방향 순서 DATA_GAP";
   return <div className={`graph-coverage ${graphReady ? "catalog-ready" : "catalog-gap"}`}>
     <span className="graph-pulse" aria-hidden="true" />
     <p><strong>{primaryStatus}</strong><small>{catalogSummary} · {topologySummary}</small></p>
     <span className="graph-method">단방향 Dijkstra</span>
+    {graphReady && !nationwideComplete && <small className="coverage-query">공식 지자체 자료 {formatCount(activeCities)}개 지역부터 실제 방향으로 검색합니다. 전국 확대 중입니다.</small>}
     {!graphReady && <small className="coverage-gap">TAGO 노선별 경유 순서의 전국 적재가 끝나지 않아, 확인된 구간만 검색합니다.</small>}
     {graph && <small className={topologyReady ? "coverage-query" : "coverage-gap"}>이번 검색: {formatCount(graph.nodes)}개 상태 · {formatCount(graph.edges)}개 승차 간선 · {graph.algorithm || "directed_dijkstra"}</small>}
     {graph && !topologyReady && <small className="coverage-gap">DATA_GAP · 검색 가능한 검증 노선 순서가 없습니다.</small>}
@@ -220,7 +228,7 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
   async function generate(event) {
     event.preventDefault(); if (!fromStop || !toStop) return;
     setLoading(true); setError(""); setResult(null);
-    try { setResult(await BusroApi.generateJourneys({ from_stop_id: fromStop.node_id, to_stop_id: toStop.node_id, from_city_code: fromStop.city_code || undefined, to_city_code: toStop.city_code || undefined, preference, max_alternatives: 5 })); }
+    try { setResult(await BusroApi.generateJourneys({ from_stop_id: fromStop.node_id, to_stop_id: toStop.node_id, from_city_code: fromStop.city_code || undefined, to_city_code: toStop.city_code || undefined, preference, max_alternatives: 1 })); }
     catch (reason) { setError(reason.message || "현재 적재된 노선 그래프로 여행을 만들지 못했습니다."); }
     finally { setLoading(false); }
   }
@@ -262,7 +270,8 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
       {error && <InlineNotice tone="warning" icon="warning-circle" title="DATA_GAP">{error} 검증된 노선 경유 정류장이 적재되어야 경로에 포함됩니다.</InlineNotice>}
       {result && candidates.length === 0 && <InlineNotice tone="warning" icon="warning-circle" title={result.status || "DATA_GAP"}>{gapReasons[result.reason] || result.reason || "생성 가능한 방향성 경로가 적재된 그래프에 없습니다."}</InlineNotice>}
       {candidates.length > 0 && <div className="generated-journeys">
-        <div className="catalog-heading"><div><p className="eyebrow">추천 경로</p><h2>{candidates.length}가지 길을 찾았어요</h2></div><span>최대 5개</span></div>
+        <div className="catalog-heading"><div><p className="eyebrow">선택 기준 경로</p><h2>{candidates.length}가지 길을 찾았어요</h2></div><span>빠른 1차 검색</span></div>
+        <p className="alternative-hint">다른 여행 종류는 위 기준을 바꿔 다시 찾아보세요.</p>
         {candidates.map((candidate, index) => {
           const routeIds = Array.isArray(candidate.route_ids) ? candidate.route_ids.filter(Boolean) : [];
           const legs = summarizeJourneyLegs(candidate);
@@ -275,7 +284,7 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
               <div className="candidate-title"><div><p>{criterionLabels[candidate.criterion] || candidate.criterion || "경로 후보"}</p><h3>{routeIds.length > 0 ? `${candidate.transfers || 0}회 환승 · ${routeIds.length}개 노선` : "노선 DATA_GAP"}</h3></div><small>{candidate.status || "DATA_GAP"}</small></div>
               <div className="candidate-leg-list">{legs.map((leg, legIndex) => <div className="candidate-leg" key={`${leg.routeId}-${legIndex}`}>
                 <span className="timeline-rail"><i /><b /></span>
-                <div className="leg-copy"><span className="route-pill"><Icon name="bus" /> {leg.routeId}</span><strong>{leg.from?.node_name || leg.from?.node_id || "승차 정류장"}</strong><small>{leg.edgeCount}개 정류장 방향으로 이동</small><strong>{leg.to?.node_name || leg.to?.node_id || "하차 정류장"}</strong></div>
+                <div className="leg-copy"><span className="route-pill"><Icon name="bus" /> {leg.routeId}</span><strong>{leg.from?.node_name || leg.from?.node_id || "승차 정류장"}</strong><small>총 {leg.edgeCount + 1}개 정류장</small><strong>{leg.to?.node_name || leg.to?.node_id || "하차 정류장"}</strong></div>
               </div>)}</div>
               <footer>
                 <span><Icon name="arrows-left-right" /> {typeof candidate.transfers === "number" ? `${candidate.transfers}회 환승` : "환승 DATA_GAP"}</span>

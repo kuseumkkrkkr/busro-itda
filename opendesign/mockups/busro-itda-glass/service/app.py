@@ -134,6 +134,7 @@ class BusroService:
     def status(self) -> dict[str, Any]:
         tago_state = "fixture" if self.settings.fixture_mode else ("ready" if self.settings.tago_service_key else "missing_key")
         network_sources = self.network_catalog.provenance(limit=10)
+        topology = self.network_catalog.active_topology_summary()
         return {
             "ok": True,
             "service": "busro-itda-data-service",
@@ -148,6 +149,7 @@ class BusroService:
             "network_catalog": {
                 "ready": bool(network_sources),
                 "sources": network_sources,
+                "topology": topology,
                 "path_exposed": False,
             },
             "capabilities": {
@@ -362,12 +364,13 @@ class BusroService:
         try:
             sources = self.network_catalog.provenance(limit=100)
             topology_coverage = self.network_catalog.topology_coverage(provider="TAGO")
+            active_topology = self.network_catalog.active_topology_summary()
         except CatalogError as exc:
             raise AppError("NETWORK_CATALOG_INVALID", str(exc), status=500) from exc
         topology_targets = int(topology_coverage.get("targets") or 0)
         topology_complete = int(topology_coverage.get("complete") or 0)
         hydrated_sequences = int(topology_coverage.get("hydrated_active_sequences") or 0)
-        graph_ready = (
+        nationwide_graph_complete = (
             topology_targets > 0
             and topology_complete == topology_targets
             and hydrated_sequences >= topology_complete
@@ -376,8 +379,11 @@ class BusroService:
             "ok": True,
             "ready": bool(sources),
             "static_catalog_ready": bool(sources),
-            "graph_ready": graph_ready,
+            "graph_ready": bool(active_topology["graph_ready"]),
+            "graph_scope": "COMPLETE" if nationwide_graph_complete else ("PARTIAL" if active_topology["graph_ready"] else "DATA_GAP"),
+            "nationwide_graph_complete": nationwide_graph_complete,
             "sources": sources,
+            "active_topology": active_topology,
             "topology_coverage": topology_coverage,
             "path_algorithm": "directed_dijkstra",
             "topology_policy": "all_active_verified_route_sequences",
@@ -429,7 +435,15 @@ class BusroService:
             )
         except CatalogError as exc:
             raise AppError("INVALID_NETWORK_QUERY", str(exc)) from exc
-        return {"ok": True, "source": "OFFICIAL_STATIC_CATALOG", "count": len(stops), "stops": stops}
+        kinds = sorted({str(stop.get("catalog_kind") or "") for stop in stops if stop.get("catalog_kind")})
+        return {
+            "ok": True,
+            "source": "OFFICIAL_STATIC_AND_HYDRATED_TOPOLOGY",
+            "sources": kinds,
+            "count": len(stops),
+            "graph_ready_count": sum(1 for stop in stops if stop.get("graph_ready")),
+            "stops": stops,
+        }
 
     def network_routes(self, query: dict[str, str]) -> dict[str, Any]:
         self._only_fields(query, {"q", "city_code", "limit"}, "query")

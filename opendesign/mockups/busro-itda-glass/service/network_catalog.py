@@ -49,11 +49,13 @@ DEFAULT_MAX_CSV_BYTES = 20 * 1024 * 1024
 DEFAULT_MAX_ROWS = 500_000
 MAX_CELL_CHARS = 512
 MAX_SEQUENCE_STOPS = 10_000
+MAX_SEQUENCE_BATCH = 20_000
 MAX_SEARCH_LIMIT = 100
 MAX_QUERY_CHARS = 100
 MAX_TOPOLOGY_PAGE_ITEMS = 100
 MAX_TOPOLOGY_PAGE_BYTES = 512 * 1024
 _CODE = re.compile(r"^[0-9A-Za-z_.:-]{1,96}$")
+_TRANSPORT_IDENTIFIER = re.compile(r"^[0-9A-Za-z가-힣_.:-]{1,96}$")
 
 
 class CatalogError(ValueError):
@@ -151,6 +153,28 @@ def _safe_code(value: Any, field: str) -> str:
     text = _safe_text(value, field, required=True, maximum=96)
     if not _CODE.fullmatch(text):
         raise CatalogValidationError(f"{field} has an invalid identifier")
+    return text
+
+
+def _safe_transport_identifier(value: Any, field: str) -> str:
+    """Validate an exact provider-owned route identifier.
+
+    TAGO route IDs can contain Hangul (for example ``GMB수점10``). Keep
+    that raw identifier unchanged while allowing only ASCII alphanumerics,
+    modern Hangul syllables, underscore, dot, colon, and hyphen. Whitespace,
+    path separators, quotes, controls, and every other character stay invalid.
+    """
+    text = "" if value is None else str(value)
+    if not text:
+        raise CatalogValidationError(f"{field} is required")
+    if len(text) > 96:
+        raise CatalogLimitError(f"{field} exceeds 96 characters")
+    if any(char.isspace() for char in text):
+        raise CatalogValidationError(f"{field} contains whitespace")
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise CatalogValidationError(f"{field} contains control characters")
+    if not _TRANSPORT_IDENTIFIER.fullmatch(text):
+        raise CatalogValidationError(f"{field} has an invalid transport identifier")
     return text
 
 
@@ -531,7 +555,7 @@ class NetworkCatalog:
                 records.append(
                     RouteRecord(
                         city_code=_safe_code(row["지자체코드"], "지자체코드"),
-                        route_id=_safe_code(row["노선 아이디"], "노선 아이디"),
+                        route_id=_safe_transport_identifier(row["노선 아이디"], "노선 아이디"),
                         route_no=_safe_text(row["노선명"], "노선명", required=True, maximum=160),
                         start_node_id=_safe_code(row["기점노드 아이디"], "기점노드 아이디"),
                         end_node_id=_safe_code(row["종점노드 아이디"], "종점노드 아이디"),
@@ -657,42 +681,126 @@ class NetworkCatalog:
         source: str,
         captured_at: str,
     ) -> dict[str, Any]:
-        city = _safe_code(city_code, "city_code")
-        route = _safe_code(route_id, "route_id")
-        provenance = _safe_text(source, "source", required=True, maximum=512)
-        captured = _timestamp(captured_at)
-        stops = self._route_stop_records(city, route, ordered_stops)
-        canonical_stops = [asdict(item) for item in stops]
-        sha256 = hashlib.sha256(_canonical(canonical_stops).encode("utf-8")).hexdigest()
-        identity = hashlib.sha256(_canonical([city, route, provenance, captured, sha256]).encode("utf-8")).hexdigest()
-        sequence_id = "seq_" + identity[:24]
-        imported_at = self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        result = self.hydrate_route_sequences_batch(
+            [
+                {
+                    "city_code": city_code,
+                    "route_id": route_id,
+                    "ordered_stops": ordered_stops,
+                    "source": source,
+                    "captured_at": captured_at,
+                }
+            ]
+        )
+        return result["sequences"][0]
+
+    def hydrate_route_sequences_batch(
+        self,
+        sequences: Iterable[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Validate and activate multiple authoritative routes atomically.
+
+        Municipal file imports use this path so a bad or conflicting route can
+        never leave only the first part of a file active.  All input is fully
+        normalized before SQLite is opened for writes, and the catalog revision
+        changes at most once for the whole batch.
+        """
+        raw_sequences = list(sequences)
+        if not 1 <= len(raw_sequences) <= MAX_SEQUENCE_BATCH:
+            raise CatalogLimitError(
+                f"sequences must contain 1..{MAX_SEQUENCE_BATCH} routes"
+            )
+        normalized: list[dict[str, Any]] = []
+        seen_routes: set[tuple[str, str]] = set()
+        for index, item in enumerate(raw_sequences):
+            if not isinstance(item, Mapping):
+                raise CatalogValidationError(f"sequences[{index}] must be an object")
+            city = _safe_code(item.get("city_code"), "city_code")
+            route = _safe_transport_identifier(item.get("route_id"), "route_id")
+            route_key = (city, route)
+            if route_key in seen_routes:
+                raise CatalogValidationError("batch contains a duplicate city_code/route_id")
+            seen_routes.add(route_key)
+            provenance = _safe_text(
+                item.get("source"), "source", required=True, maximum=512
+            )
+            captured = _timestamp(item.get("captured_at"))
+            stops = self._route_stop_records(city, route, item.get("ordered_stops") or ())
+            canonical_stops = [asdict(stop) for stop in stops]
+            digest = hashlib.sha256(
+                _canonical(canonical_stops).encode("utf-8")
+            ).hexdigest()
+            identity = hashlib.sha256(
+                _canonical([city, route, provenance, captured, digest]).encode("utf-8")
+            ).hexdigest()
+            normalized.append(
+                {
+                    "sequence_id": "seq_" + identity[:24],
+                    "city_code": city,
+                    "route_id": route,
+                    "source": provenance,
+                    "captured_at": captured,
+                    "sha256": digest,
+                    "stops": stops,
+                }
+            )
+
+        imported_at = self.clock().astimezone(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        any_activated = False
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            exists = connection.execute("SELECT 1 FROM route_sequence_versions WHERE sequence_id=?", (sequence_id,)).fetchone()
-            created = exists is None
-            if exists is None:
-                connection.execute(
-                    "INSERT INTO route_sequence_versions VALUES(?,?,?,?,?,?,?,?)",
-                    (sequence_id, city, route, provenance, captured, sha256, len(stops), imported_at),
-                )
-                connection.executemany(
-                    "INSERT INTO route_sequence_stops VALUES(?,?,?,?,?,?,?)",
-                    [
-                        (sequence_id, item.node_order, item.node_id, item.node_name, item.latitude, item.longitude, item.direction)
-                        for item in stops
-                    ],
-                )
-            active = connection.execute(
-                "SELECT sequence_id FROM active_route_sequences WHERE city_code=? AND route_id=?",
-                (city, route),
-            ).fetchone()
-            activated = active is None or active["sequence_id"] != sequence_id
-            if activated:
-                connection.execute(
-                    "INSERT INTO active_route_sequences(city_code,route_id,sequence_id) VALUES(?,?,?) ON CONFLICT(city_code,route_id) DO UPDATE SET sequence_id=excluded.sequence_id",
-                    (city, route, sequence_id),
-                )
+            for sequence in normalized:
+                sequence_id = sequence["sequence_id"]
+                exists = connection.execute(
+                    "SELECT 1 FROM route_sequence_versions WHERE sequence_id=?",
+                    (sequence_id,),
+                ).fetchone()
+                sequence["created"] = exists is None
+                if exists is None:
+                    stops = sequence["stops"]
+                    connection.execute(
+                        "INSERT INTO route_sequence_versions VALUES(?,?,?,?,?,?,?,?)",
+                        (
+                            sequence_id,
+                            sequence["city_code"],
+                            sequence["route_id"],
+                            sequence["source"],
+                            sequence["captured_at"],
+                            sequence["sha256"],
+                            len(stops),
+                            imported_at,
+                        ),
+                    )
+                    connection.executemany(
+                        "INSERT INTO route_sequence_stops VALUES(?,?,?,?,?,?,?)",
+                        [
+                            (
+                                sequence_id,
+                                stop.node_order,
+                                stop.node_id,
+                                stop.node_name,
+                                stop.latitude,
+                                stop.longitude,
+                                stop.direction,
+                            )
+                            for stop in stops
+                        ],
+                    )
+                active = connection.execute(
+                    "SELECT sequence_id FROM active_route_sequences WHERE city_code=? AND route_id=?",
+                    (sequence["city_code"], sequence["route_id"]),
+                ).fetchone()
+                activated = active is None or active["sequence_id"] != sequence_id
+                sequence["activated"] = activated
+                if activated:
+                    connection.execute(
+                        "INSERT INTO active_route_sequences(city_code,route_id,sequence_id) VALUES(?,?,?) ON CONFLICT(city_code,route_id) DO UPDATE SET sequence_id=excluded.sequence_id",
+                        (sequence["city_code"], sequence["route_id"], sequence_id),
+                    )
+                    any_activated = True
+            if any_activated:
                 revision = self._bump_revision(connection)
             else:
                 revision_row = connection.execute(
@@ -700,19 +808,29 @@ class NetworkCatalog:
                 ).fetchone()
                 revision = int(revision_row[0] if revision_row else 0)
             connection.commit()
-        if activated:
+        if any_activated:
             self._invalidate_cache()
+        results = [
+            {
+                "sequence_id": sequence["sequence_id"],
+                "city_code": sequence["city_code"],
+                "route_id": sequence["route_id"],
+                "source": sequence["source"],
+                "captured_at": sequence["captured_at"],
+                "sha256": sequence["sha256"],
+                "stop_count": len(sequence["stops"]),
+                "revision": revision,
+                "created": sequence["created"],
+                "activated": sequence["activated"],
+            }
+            for sequence in normalized
+        ]
         return {
-            "sequence_id": sequence_id,
-            "city_code": city,
-            "route_id": route,
-            "source": provenance,
-            "captured_at": captured,
-            "sha256": sha256,
-            "stop_count": len(stops),
+            "route_count": len(results),
+            "created": sum(1 for result in results if result["created"]),
+            "activated": sum(1 for result in results if result["activated"]),
             "revision": revision,
-            "created": created,
-            "activated": activated,
+            "sequences": results,
         }
 
     @staticmethod
@@ -760,7 +878,7 @@ class NetworkCatalog:
         ordered_stops: Iterable[Mapping[str, Any]],
     ) -> str:
         city = _safe_code(city_code, "city_code")
-        route = _safe_code(route_id, "route_id")
+        route = _safe_transport_identifier(route_id, "route_id")
         stops = self._route_stop_records(city, route, ordered_stops)
         return hashlib.sha256(
             _canonical([asdict(item) for item in stops]).encode("utf-8")
@@ -768,7 +886,7 @@ class NetworkCatalog:
 
     def active_route_sequence_info(self, *, city_code: str, route_id: str) -> dict[str, Any] | None:
         city = _safe_code(city_code, "city_code")
-        route = _safe_code(route_id, "route_id")
+        route = _safe_transport_identifier(route_id, "route_id")
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT v.sequence_id,v.sha256,v.stop_count,v.captured_at,v.source "
@@ -937,7 +1055,7 @@ class NetworkCatalog:
                 (
                     provider_id,
                     _safe_code(item.get("city_code"), "city_code"),
-                    _safe_code(item.get("route_id"), "route_id"),
+                    _safe_transport_identifier(item.get("route_id"), "route_id"),
                     _safe_text(item.get("route_no"), "route_no", maximum=160),
                     source,
                     now,
@@ -997,12 +1115,18 @@ class NetworkCatalog:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
+                "WITH completed_by_city AS ("
+                "SELECT city_code,COUNT(*) completed_count FROM topology_progress "
+                "WHERE provider=? AND status IN ('COMPLETE','UNCHANGED') GROUP BY city_code"
+                ") "
                 "SELECT p.*,t.route_no,t.discovery_source FROM topology_progress p "
                 "JOIN topology_targets t USING(provider,city_code,route_id) "
+                "LEFT JOIN completed_by_city c ON c.city_code=p.city_code "
                 "WHERE p.provider=? AND p.status IN ('PENDING','FAILED','DEFERRED','IN_PROGRESS') "
                 "AND (p.last_run_id IS NULL OR p.last_run_id<>?) "
-                "ORDER BY CASE p.status WHEN 'IN_PROGRESS' THEN 0 WHEN 'DEFERRED' THEN 1 WHEN 'FAILED' THEN 2 ELSE 3 END,p.city_code,p.route_id LIMIT 1",
-                (provider_id, run),
+                "ORDER BY CASE p.status WHEN 'IN_PROGRESS' THEN 0 WHEN 'DEFERRED' THEN 1 WHEN 'FAILED' THEN 2 ELSE 3 END,"
+                "COALESCE(c.completed_count,0),p.city_code,p.route_id LIMIT 1",
+                (provider_id, provider_id, run),
             ).fetchone()
             if row is not None:
                 connection.execute(
@@ -1045,7 +1169,7 @@ class NetworkCatalog:
     ) -> dict[str, Any]:
         provider_id = _safe_code(provider, "provider")
         city = _safe_code(city_code, "city_code")
-        route = _safe_code(route_id, "route_id")
+        route = _safe_transport_identifier(route_id, "route_id")
         page = int(page_no)
         total = int(total_count)
         if page < 1 or total < 0 or len(items) > MAX_TOPOLOGY_PAGE_ITEMS:
@@ -1076,7 +1200,7 @@ class NetworkCatalog:
     def record_topology_target_request(self, *, provider: str, city_code: str, route_id: str) -> None:
         provider_id = _safe_code(provider, "provider")
         city = _safe_code(city_code, "city_code")
-        route = _safe_code(route_id, "route_id")
+        route = _safe_transport_identifier(route_id, "route_id")
         now = self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         with self.connect() as connection:
             connection.execute(
@@ -1088,7 +1212,7 @@ class NetworkCatalog:
     def staged_topology_route(self, *, provider: str, city_code: str, route_id: str) -> list[dict[str, Any]]:
         provider_id = _safe_code(provider, "provider")
         city = _safe_code(city_code, "city_code")
-        route = _safe_code(route_id, "route_id")
+        route = _safe_transport_identifier(route_id, "route_id")
         with self.connect() as connection:
             rows = connection.execute(
                 "SELECT page_no,items_json FROM topology_pages WHERE provider=? AND city_code=? AND route_id=? ORDER BY page_no",
@@ -1118,7 +1242,7 @@ class NetworkCatalog:
     ) -> None:
         provider_id = _safe_code(provider, "provider")
         city = _safe_code(city_code, "city_code")
-        route = _safe_code(route_id, "route_id")
+        route = _safe_transport_identifier(route_id, "route_id")
         digest = _safe_text(content_sha256, "content_sha256", required=True, maximum=64)
         sequence = _safe_code(sequence_id, "sequence_id")
         now = self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1147,7 +1271,7 @@ class NetworkCatalog:
     ) -> None:
         provider_id = _safe_code(provider, "provider")
         city = _safe_code(city_code, "city_code")
-        route = _safe_code(route_id, "route_id")
+        route = _safe_transport_identifier(route_id, "route_id")
         code = _safe_text(error_code, "error_code", required=True, maximum=64)
         message = _safe_text(error_message, "error_message", required=True, maximum=240)
         now = self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1179,6 +1303,40 @@ class NetworkCatalog:
             "hydrated_active_sequences": int(hydrated),
             "coverage_ratio": (complete / total) if total else 0.0,
             "statuses": statuses,
+        }
+
+    def active_topology_summary(self) -> dict[str, Any]:
+        """Return bounded aggregate evidence for the currently active graph."""
+        with self.connect() as connection:
+            aggregate = connection.execute(
+                """
+                SELECT COUNT(*) route_sequences,
+                       COALESCE(SUM(v.stop_count),0) directed_stop_rows,
+                       COUNT(DISTINCT v.city_code) city_count,
+                       COUNT(DISTINCT v.source) source_count
+                FROM active_route_sequences a
+                JOIN route_sequence_versions v ON v.sequence_id=a.sequence_id
+                """
+            ).fetchone()
+            unique_stops = connection.execute(
+                """
+                SELECT COUNT(*) FROM (
+                  SELECT v.city_code,s.node_id
+                  FROM active_route_sequences a
+                  JOIN route_sequence_versions v ON v.sequence_id=a.sequence_id
+                  JOIN route_sequence_stops s ON s.sequence_id=a.sequence_id
+                  GROUP BY v.city_code,s.node_id
+                )
+                """
+            ).fetchone()[0]
+        return {
+            "graph_ready": int(aggregate["route_sequences"]) > 0,
+            "active_route_sequences": int(aggregate["route_sequences"]),
+            "directed_stop_rows": int(aggregate["directed_stop_rows"]),
+            "unique_graph_stops": int(unique_stops),
+            "city_count": int(aggregate["city_count"]),
+            "source_count": int(aggregate["source_count"]),
+            "nationwide_complete": None,
         }
 
     @staticmethod
@@ -1223,22 +1381,129 @@ class NetworkCatalog:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def search_stops(self, query: str = "", *, city_code: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    def search_hydrated_stops(
+        self,
+        query: str = "",
+        *,
+        city_code: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Search exact stop IDs that participate in the active directed graph."""
         text, bounded = self._bounded_query(query, limit)
-        clauses = ["source_id=(SELECT value FROM catalog_meta WHERE key='active_stops_source_id')", "(node_name LIKE ? ESCAPE '\\' OR node_id LIKE ? ESCAPE '\\' OR mobile_short_no LIKE ? ESCAPE '\\')"]
         pattern = f"%{_like(text)}%"
-        params: list[Any] = [pattern, pattern, pattern]
+        clauses = [
+            "(s.node_name LIKE ? ESCAPE '\\' OR s.node_id LIKE ? ESCAPE '\\')"
+        ]
+        params: list[Any] = [pattern, pattern]
         if city_code:
-            clauses.append("city_code=?")
+            clauses.append("v.city_code=?")
             params.append(_safe_code(city_code, "city_code"))
         params.append(bounded)
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT city_code,node_id,node_name,latitude,longitude,mobile_short_no,city_name,managing_city_name FROM catalog_stops "
-                f"WHERE {' AND '.join(clauses)} ORDER BY city_name,node_name,node_id LIMIT ?",
+                """
+                WITH matched AS (
+                    SELECT v.city_code,v.route_id,v.source,s.node_id,s.node_name,
+                           s.latitude,s.longitude
+                    FROM active_route_sequences a
+                    JOIN route_sequence_versions v ON v.sequence_id=a.sequence_id
+                    JOIN route_sequence_stops s ON s.sequence_id=a.sequence_id
+                    WHERE """
+                + " AND ".join(clauses)
+                + """
+                ), grouped AS (
+                    SELECT city_code,node_id,MIN(node_name) node_name,
+                           MIN(latitude) latitude,MIN(longitude) longitude,
+                           COUNT(DISTINCT route_id) route_count,MIN(source) source
+                    FROM matched GROUP BY city_code,node_id
+                )
+                SELECT g.city_code,g.node_id,g.node_name,g.latitude,g.longitude,
+                       '' mobile_short_no,
+                       COALESCE(
+                         (SELECT cs.city_name FROM catalog_stops cs
+                          WHERE cs.source_id=(SELECT value FROM catalog_meta WHERE key='active_stops_source_id')
+                            AND cs.city_code=g.city_code
+                          GROUP BY cs.city_name ORDER BY COUNT(*) DESC,cs.city_name LIMIT 1),
+                         (SELECT tc.city_name FROM topology_discovered_cities tc
+                          WHERE tc.city_code=g.city_code ORDER BY tc.provider LIMIT 1),
+                         ''
+                       ) city_name,
+                       COALESCE(
+                         (SELECT cs.managing_city_name FROM catalog_stops cs
+                          WHERE cs.source_id=(SELECT value FROM catalog_meta WHERE key='active_stops_source_id')
+                            AND cs.city_code=g.city_code
+                          GROUP BY cs.managing_city_name
+                          ORDER BY COUNT(*) DESC,cs.managing_city_name LIMIT 1),
+                         ''
+                       ) managing_city_name,
+                       g.route_count,g.source
+                FROM grouped g ORDER BY g.node_name,g.node_id LIMIT ?
+                """,
                 params,
             ).fetchall()
-        return [dict(row) for row in rows]
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["catalog_kind"] = "HYDRATED_TOPOLOGY"
+            item["graph_ready"] = True
+            results.append(item)
+        return results
+
+    def search_stops(self, query: str = "", *, city_code: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        text, bounded = self._bounded_query(query, limit)
+        clauses = ["cs.source_id=(SELECT value FROM catalog_meta WHERE key='active_stops_source_id')", "(cs.node_name LIKE ? ESCAPE '\\' OR cs.node_id LIKE ? ESCAPE '\\' OR cs.mobile_short_no LIKE ? ESCAPE '\\')"]
+        pattern = f"%{_like(text)}%"
+        params: list[Any] = [pattern, pattern, pattern]
+        if city_code:
+            clauses.append("cs.city_code=?")
+            params.append(_safe_code(city_code, "city_code"))
+        params.append(bounded)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT cs.city_code,cs.node_id,cs.node_name,cs.latitude,cs.longitude,
+                       cs.mobile_short_no,cs.city_name,cs.managing_city_name,cs.source_id,
+                       (
+                         SELECT COUNT(DISTINCT v.route_id) FROM active_route_sequences a
+                         JOIN route_sequence_versions v ON v.sequence_id=a.sequence_id
+                         JOIN route_sequence_stops s ON s.sequence_id=a.sequence_id
+                         WHERE v.city_code=cs.city_code AND s.node_id=cs.node_id
+                       ) route_count
+                FROM catalog_stops cs WHERE """
+                + " AND ".join(clauses)
+                + " ORDER BY cs.city_name,cs.node_name,cs.node_id LIMIT ?",
+                params,
+            ).fetchall()
+        static_results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["source"] = item.pop("source_id")
+            item["catalog_kind"] = "OFFICIAL_STATIC_CATALOG"
+            item["route_count"] = int(item["route_count"])
+            item["graph_ready"] = item["route_count"] > 0
+            static_results.append(item)
+
+        hydrated_results = self.search_hydrated_stops(
+            text, city_code=city_code, limit=bounded
+        )
+        combined: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in hydrated_results + static_results:
+            key = (item["city_code"], item["node_id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            combined.append(item)
+        combined.sort(
+            key=lambda item: (
+                not bool(item.get("graph_ready")),
+                0 if item.get("catalog_kind") == "HYDRATED_TOPOLOGY" else 1,
+                item.get("city_name") or "",
+                item.get("node_name") or "",
+                item.get("node_id") or "",
+            )
+        )
+        return combined[:bounded]
 
     def search_routes(self, query: str = "", *, city_code: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         text, bounded = self._bounded_query(query, limit)

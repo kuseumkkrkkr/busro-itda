@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
@@ -107,6 +108,31 @@ class JourneyPlannerCase(unittest.TestCase):
         self.assertEqual(transfer["to"]["node_id"], "X")
         self.assertEqual(transfer["evidence"]["type"], "shared_node_id")
 
+    def test_candidate_steps_expose_official_stop_coordinates_for_map(self):
+        self.hydrate(
+            "MAP",
+            [
+                self.stop("O", 1, 36.5001, 127.3001),
+                self.stop("D", 2, 36.5202, 127.3202),
+            ],
+        )
+        candidate = JourneyPlanner().plan(
+            self.catalog.snapshot(),
+            origin_node_id="O",
+            destination_node_id="D",
+            alternatives=1,
+        )["alternatives"][0]
+
+        step = candidate["steps"][0]
+        self.assertEqual(
+            (step["from"]["latitude"], step["from"]["longitude"]),
+            (36.5001, 127.3001),
+        )
+        self.assertEqual(
+            (step["to"]["latitude"], step["to"]["longitude"]),
+            (36.5202, 127.3202),
+        )
+
     def test_preference_changes_dijkstra_ranking_without_fake_reliability(self):
         direct = [self.stop("O", 1, 36.5000, 127.3000)]
         direct.extend(
@@ -156,6 +182,49 @@ class JourneyPlannerCase(unittest.TestCase):
         self.assertEqual(len(graph.edges), 30)
         self.assertEqual(planner.max_graph_nodes, 500_000)
         self.assertEqual(planner.max_parallel_searches, 8)
+
+    def test_transfer_edge_ids_are_deterministic_unique_and_internal(self):
+        for route_id in ("USER_ROUTE_A", "USER_ROUTE_B", "USER_ROUTE_C"):
+            self.hydrate(
+                route_id,
+                [self.stop("USER_STOP", 1, 36.5, 127.3), self.stop(f"{route_id}_END", 2, 36.51, 127.31)],
+            )
+        snapshot = self.catalog.snapshot()
+        first_graph = JourneyPlanner().build_graph(snapshot)
+        second_graph = JourneyPlanner().build_graph(snapshot)
+
+        def transfer_ids(planner, graph):
+            return [
+                edge.edge_id
+                for node_index in range(len(graph.nodes))
+                for edge in planner._transfer_edges(graph, node_index)
+            ]
+
+        first_ids = transfer_ids(JourneyPlanner(), first_graph)
+        second_ids = transfer_ids(JourneyPlanner(), second_graph)
+        self.assertEqual(first_ids, second_ids)
+        self.assertEqual(len(first_ids), 12)
+        self.assertEqual(len(first_ids), len(set(first_ids)))
+        for edge_id in first_ids:
+            self.assertRegex(edge_id, r"^transfer:\d+:\d+:(shared_node_id|geodesic_proximity)$")
+            self.assertNotIn("USER_ROUTE", edge_id)
+            self.assertNotIn("USER_STOP", edge_id)
+
+    def test_duplicate_alternative_is_searched_at_most_twice(self):
+        self.hydrate(
+            "ONLY",
+            [self.stop("O", 1, 36.5, 127.3), self.stop("D", 2, 36.51, 127.31)],
+        )
+        planner = JourneyPlanner()
+        with patch.object(planner, "_shortest_path", wraps=planner._shortest_path) as shortest_path:
+            result = planner.plan(
+                self.catalog.snapshot(),
+                origin_node_id="O",
+                destination_node_id="D",
+                alternatives=2,
+            )
+        self.assertEqual(len(result["alternatives"]), 1)
+        self.assertEqual(shortest_path.call_count, 3)
 
     def test_missing_schedule_or_passage_history_never_emits_probability(self):
         self.hydrate_three_paths()

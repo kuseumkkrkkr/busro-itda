@@ -28,6 +28,8 @@ DEFAULT_MAX_GRAPH_EDGES = 750_000
 DEFAULT_MAX_EXPANSIONS = 600_000
 DEFAULT_MAX_PARALLEL_SEARCHES = 8
 MAX_ALTERNATIVES = 5
+MAX_ALTERNATIVE_ATTEMPTS = 2
+PURE_TRANSFER_REUSE_PENALTY = 16
 MAX_WALK_TARGET_STOPS = 24
 MAX_ROUTE_STATES_PER_STOP = 256
 MAX_SPATIAL_BUCKET = 4_096
@@ -371,10 +373,14 @@ class JourneyPlanner:
             for slot in range(requested_alternatives):
                 criterion = criteria[slot % len(criteria)]
                 found: tuple[GraphEdge, ...] | None = None
-                for attempt in range(requested_alternatives * 3):
+                for attempt in range(MAX_ALTERNATIVE_ATTEMPTS):
                     path = self._shortest_path(graph, starts, goals, criterion, penalties, work_budget, attempt)
                     if path is None:
                         break
+                    if not any(edge.kind == "ride" for edge in path):
+                        for edge in path:
+                            penalties[edge.edge_id] += PURE_TRANSFER_REUSE_PENALTY
+                        continue
                     signature = tuple(edge.edge_id for edge in path)
                     if signature not in signatures:
                         found = path
@@ -537,13 +543,9 @@ class JourneyPlanner:
     ) -> GraphEdge:
         source = graph.nodes[source_index]
         target = graph.nodes[target_index]
-        identity = [
-            "transfer", source.city_code, source.route_id, source.node_order,
-            target.city_code, target.route_id, target.node_order, evidence_type,
-        ]
         return GraphEdge(
             index=-1,
-            edge_id=hashlib.sha256(_canonical(identity).encode("utf-8")).hexdigest()[:24],
+            edge_id=f"transfer:{source_index}:{target_index}:{evidence_type}",
             source_index=source_index,
             target_index=target_index,
             kind="transfer",
@@ -629,8 +631,22 @@ class JourneyPlanner:
                 {
                     "kind": edge.kind,
                     "route_id": edge.route_id or None,
-                    "from": {"city_code": source.city_code, "node_id": source.node_id, "node_name": source.node_name, "node_order": source.node_order},
-                    "to": {"city_code": target.city_code, "node_id": target.node_id, "node_name": target.node_name, "node_order": target.node_order},
+                    "from": {
+                        "city_code": source.city_code,
+                        "node_id": source.node_id,
+                        "node_name": source.node_name,
+                        "node_order": source.node_order,
+                        "latitude": source.latitude,
+                        "longitude": source.longitude,
+                    },
+                    "to": {
+                        "city_code": target.city_code,
+                        "node_id": target.node_id,
+                        "node_name": target.node_name,
+                        "node_order": target.node_order,
+                        "latitude": target.latitude,
+                        "longitude": target.longitude,
+                    },
                     "distance_m": edge.distance_m,
                     "evidence": {"type": edge.evidence_type, "source": edge.evidence_source, "captured_at": edge.captured_at},
                 }

@@ -214,7 +214,7 @@
       }
     },
     generateJourneys(payload) {
-      return request("/journeys/generate", { method: "POST", timeout: 12000, body: payload });
+      return request("/journeys/generate", { method: "POST", timeout: 20000, body: payload });
     },
     hydrateRoute(cityCode, routeId) {
       return request("/network/hydrate", { method: "POST", timeout: 12000, body: {

@@ -138,6 +138,146 @@ class TopologyIngestTests(unittest.TestCase):
         self.assertIn("authorization", result["notice"])
         self.assertEqual(result["coverage"]["targets"], 0)
 
+    def test_one_city_service_error_is_recorded_and_other_cities_continue(self):
+        def partial(operation, parameters):
+            if operation == "cities":
+                return response(
+                    [
+                        {"citycode": "25", "cityname": "오류 지역"},
+                        {"citycode": "26", "cityname": "정상 지역"},
+                    ]
+                )
+            if operation == "routes" and parameters["cityCode"] == "25":
+                raise TagoError("99", "UPSTREAM CITY ERROR")
+            if operation == "routes":
+                return response(
+                    [{"citycode": "26", "routeid": "OK_ROUTE", "routeno": "1"}],
+                    total=1,
+                    page=1,
+                    size=2,
+                )
+            if operation == "route_stops":
+                return response(
+                    [
+                        {"citycode": "26", "routeid": "OK_ROUTE", "nodeid": "A", "nodenm": "A", "nodeord": 1},
+                        {"citycode": "26", "routeid": "OK_ROUTE", "nodeid": "B", "nodenm": "B", "nodeord": 2},
+                    ],
+                    total=2,
+                    page=1,
+                    size=2,
+                )
+            raise AssertionError(operation)
+
+        result = self.ingestor(partial).run()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["run"]["status"], "PARTIAL")
+        self.assertEqual(result["discovery_failures"], 1)
+        self.assertEqual(result["coverage"]["complete"], 1)
+        self.assertEqual(
+            self.catalog.planning_snapshot().route_sequences[0].route_id,
+            "OK_ROUTE",
+        )
+        with self.catalog.connect() as connection:
+            failed = connection.execute(
+                "SELECT error_code FROM topology_discovery_progress WHERE provider='TAGO' AND scope_key='routes:25'"
+            ).fetchone()
+        self.assertEqual(failed["error_code"], "99")
+
+    def test_hangul_route_ids_survive_and_bad_city_data_does_not_block_20_targets(self):
+        route_ids = ["GMB수점10"] + [f"ROUTE_{index:02d}" for index in range(19)]
+
+        def partial_discovery(operation, parameters):
+            if operation == "cities":
+                return response(
+                    [
+                        {"citycode": "37050", "cityname": "정상 지역"},
+                        {"citycode": "38010", "cityname": "오류 지역"},
+                    ]
+                )
+            if operation == "routes" and parameters["cityCode"] == "37050":
+                return response(
+                    [
+                        {
+                            "citycode": "37050",
+                            "routeid": route_id,
+                            "routeno": str(index + 1),
+                        }
+                        for index, route_id in enumerate(route_ids)
+                    ],
+                    total=20,
+                    page=1,
+                    size=100,
+                )
+            if operation == "routes":
+                return response(
+                    [
+                        {
+                            "citycode": "38010",
+                            "routeid": "INVALID/ROUTE",
+                            "routeno": "1",
+                        }
+                    ],
+                    total=1,
+                    page=1,
+                    size=100,
+                )
+            if operation == "route_stops":
+                route_id = parameters["routeId"]
+                prefix = "HANG" if route_id == "GMB수점10" else route_id[-2:]
+                return response(
+                    [
+                        {
+                            "citycode": "37050",
+                            "routeid": route_id,
+                            "nodeid": f"{prefix}A",
+                            "nodenm": "A",
+                            "nodeord": 1,
+                        },
+                        {
+                            "citycode": "37050",
+                            "routeid": route_id,
+                            "nodeid": f"{prefix}B",
+                            "nodenm": "B",
+                            "nodeord": 2,
+                        },
+                    ],
+                    total=2,
+                    page=1,
+                    size=100,
+                )
+            raise AssertionError(operation)
+
+        result = self.ingestor(
+            partial_discovery,
+            request_budget=50,
+            page_size=100,
+            target_limit=20,
+        ).run()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["run"]["status"], "PARTIAL")
+        self.assertEqual(result["run"]["targets_processed"], 20)
+        self.assertEqual(result["run"]["succeeded"], 20)
+        self.assertEqual(result["coverage"]["targets"], 20)
+        self.assertEqual(result["coverage"]["complete"], 20)
+        self.assertEqual(result["discovery_failures"], 1)
+        self.assertIn(
+            "GMB수점10",
+            {
+                sequence.route_id
+                for sequence in self.catalog.planning_snapshot().route_sequences
+            },
+        )
+        with self.catalog.connect() as connection:
+            failed = connection.execute(
+                "SELECT status,error_code FROM topology_discovery_progress "
+                "WHERE provider='TAGO' AND scope_key='routes:38010'"
+            ).fetchone()
+        self.assertEqual(dict(failed), {
+            "status": "FAILED",
+            "error_code": "ROUTE_DISCOVERY_DATA_GAP",
+        })
+
     def test_static_catalog_identifiers_require_explicit_provider_verification(self):
         with self.assertRaises(CatalogValidationError):
             self.catalog.seed_topology_targets_from_catalog(provider="TAGO")
