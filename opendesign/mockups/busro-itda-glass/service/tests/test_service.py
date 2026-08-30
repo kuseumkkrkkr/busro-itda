@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import http.client
 from http.server import BaseHTTPRequestHandler
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -21,11 +22,37 @@ if str(SERVICE_DIR) not in sys.path:
 
 from app import AppError, BusroService  # noqa: E402
 from config import Settings  # noqa: E402
+from db import Store  # noqa: E402
 from server import BusroHTTPServer, Handler  # noqa: E402
 from tago import POSITIONS_URL, TagoError, fetch_positions  # noqa: E402
 
 
 FIXED_NOW = datetime(2026, 8, 31, 3, 0, tzinfo=timezone.utc)
+
+
+class SlowDripResponse:
+    """Keep ``read()`` active while making progress below an inactivity timeout."""
+
+    def __init__(self, entered: threading.Event, release: threading.Event, exited: threading.Event):
+        self.entered = entered
+        self.release = release
+        self.exited = exited
+        self.drips = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self, limit: int) -> bytes:
+        self.entered.set()
+        try:
+            while not self.release.wait(timeout=0.005):
+                self.drips += 1
+            return b'{"elements": []}'[:limit]
+        finally:
+            self.exited.set()
 
 
 class ServiceCase(unittest.TestCase):
@@ -43,6 +70,243 @@ class ServiceCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_guard_settings_are_bounded_and_operator_token_is_validated(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "BUSRO_TAGO_MAX_CONCURRENT_CALLS": "999",
+                "BUSRO_TAGO_ADMISSION_TIMEOUT_SECONDS": "-4",
+                "BUSRO_TAGO_DAILY_CALL_BUDGET": "999999",
+                "BUSRO_OPERATOR_TOKEN": "0123456789abcdef",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env(fixture_override=True)
+        self.assertEqual(settings.tago_max_concurrent_calls, 32)
+        self.assertEqual(settings.tago_admission_timeout_seconds, 0.01)
+        self.assertEqual(settings.tago_daily_call_budget, 100_000)
+        self.assertEqual(settings.operator_token, "0123456789abcdef")
+
+        with patch.dict(os.environ, {"BUSRO_OPERATOR_TOKEN": "too-short"}, clear=True):
+            with self.assertRaises(ValueError):
+                Settings.from_env(fixture_override=True)
+
+    def test_daily_tago_attempt_reservation_is_atomic(self) -> None:
+        stores = (self.service.store, Store(self.service.settings.db_path))
+
+        def reserve(index):
+            return stores[index % len(stores)].reserve_tago_attempt(
+                service_date="2026-09-01",
+                attempted_at="2026-08-31T15:00:00Z",
+                daily_limit=7,
+            )
+
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            reservations = list(executor.map(reserve, range(50)))
+
+        self.assertEqual(sum(1 for allowed, _count in reservations if allowed), 7)
+        self.assertEqual(self.service.store.tago_attempt_count("2026-09-01"), 7)
+
+    def test_live_tago_budget_counts_only_singleflight_leader_and_not_cache_hits(self) -> None:
+        live = BusroService(
+            replace(
+                self.service.settings,
+                fixture_mode=False,
+                tago_service_key="unit-test-key",
+                tago_daily_call_budget=1,
+                db_path=Path(self.temp.name) / "live-budget.sqlite3",
+            ),
+            clock=lambda: FIXED_NOW,
+        )
+        upstream = json.loads(
+            self.service.settings.fixture_path.read_text(encoding="utf-8")
+        )
+        barrier = threading.Barrier(20)
+        calls = 0
+        calls_lock = threading.Lock()
+
+        def slow_fetch(**_kwargs):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            time.sleep(0.05)
+            return upstream
+
+        def request(_index):
+            barrier.wait(timeout=3)
+            return live.arrivals({"city_code": "25", "node_id": "DJB8001793"})
+
+        with patch("app.fetch_arrivals", side_effect=slow_fetch):
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                results = list(executor.map(request, range(20)))
+            cached = live.arrivals({"city_code": "25", "node_id": "DJB8001793"})
+            with self.assertRaises(AppError) as exhausted:
+                live.arrivals({"city_code": "25", "node_id": "DJB8001794"})
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(live.store.tago_attempt_count("2026-08-31"), 1)
+        self.assertTrue(cached["cached"])
+        self.assertEqual(len(results), 20)
+        self.assertEqual(exhausted.exception.status, 429)
+        self.assertEqual(exhausted.exception.code, "TAGO_DAILY_BUDGET_EXHAUSTED")
+        self.assertEqual(exhausted.exception.details["retry_after_seconds"], 43_200)
+        self.assertEqual(
+            exhausted.exception.details["resets_at"],
+            "2026-09-01T00:00:00+09:00",
+        )
+
+    def test_osm_slow_drip_obeys_hard_deadline_and_releases_singleflight(self) -> None:
+        body = {
+            "route_ref": "601",
+            "stops": [
+                {"latitude": 36.601, "longitude": 127.298},
+                {"latitude": 36.565, "longitude": 127.315},
+            ],
+            "allow_road_estimate": False,
+        }
+        entered = threading.Event()
+        release = threading.Event()
+        exited = threading.Event()
+        response = SlowDripResponse(entered, release, exited)
+        geometry_gate = threading.BoundedSemaphore(1)
+        upstream_gate = threading.BoundedSemaphore(1)
+
+        def request_geometry(request_body=body) -> AppError:
+            try:
+                self.service.route_geometry(request_body)
+            except AppError as exc:
+                return exc
+            self.fail("slow-drip geometry request unexpectedly succeeded")
+
+        started = time.monotonic()
+        try:
+            with (
+                patch("osm.MAX_RESOLVE_TIMEOUT_SECONDS", 0.08),
+                patch("osm.GEOMETRY_ADMISSION_WAIT_SECONDS", 0.03),
+                patch("osm._GEOMETRY_ADMISSION", geometry_gate),
+                patch("osm._UPSTREAM_HTTP_ADMISSION", upstream_gate),
+                patch("osm.urlopen", return_value=response) as opened,
+                ThreadPoolExecutor(max_workers=2) as executor,
+            ):
+                leader = executor.submit(request_geometry)
+                self.assertTrue(entered.wait(timeout=0.5))
+                follower = executor.submit(request_geometry)
+                errors = [leader.result(timeout=0.5), follower.result(timeout=0.5)]
+                distinct_started = time.monotonic()
+                distinct_error = request_geometry({**body, "route_ref": "602"})
+                distinct_elapsed = time.monotonic() - distinct_started
+
+            elapsed = time.monotonic() - started
+            self.assertTrue(all(error.code == "OSM_DEADLINE_EXCEEDED" for error in errors))
+            self.assertTrue(all(error.status == 504 for error in errors))
+            self.assertEqual(distinct_error.code, "OSM_BUSY")
+            self.assertEqual(distinct_error.status, 429)
+            self.assertLess(distinct_elapsed, 0.15)
+            self.assertLess(elapsed, 0.45)
+            self.assertEqual(opened.call_count, 1)
+            self.assertGreater(response.drips, 1)
+            self.assertEqual(self.service._singleflight._entries, {})
+            self.assertTrue(geometry_gate.acquire(blocking=False))
+            geometry_gate.release()
+            self.assertFalse(upstream_gate.acquire(blocking=False))
+        finally:
+            release.set()
+            self.assertTrue(exited.wait(timeout=0.5))
+
+        self.assertTrue(upstream_gate.acquire(timeout=0.5))
+        upstream_gate.release()
+
+    def test_tago_budget_rolls_over_at_kst_midnight(self) -> None:
+        now = [datetime(2026, 8, 31, 14, 59, tzinfo=timezone.utc)]
+        live = BusroService(
+            replace(
+                self.service.settings,
+                fixture_mode=False,
+                tago_service_key="unit-test-key",
+                tago_daily_call_budget=1,
+                db_path=Path(self.temp.name) / "kst-budget.sqlite3",
+            ),
+            clock=lambda: now[0],
+        )
+        upstream = json.loads(
+            self.service.settings.fixture_path.read_text(encoding="utf-8")
+        )
+        with patch("app.fetch_arrivals", return_value=upstream) as fetched:
+            live.arrivals({"city_code": "25", "node_id": "DJB8001793"})
+            with self.assertRaises(AppError):
+                live.arrivals({"city_code": "25", "node_id": "DJB8001794"})
+            now[0] = datetime(2026, 8, 31, 15, 0, tzinfo=timezone.utc)
+            live.arrivals({"city_code": "25", "node_id": "DJB8001795"})
+
+        self.assertEqual(fetched.call_count, 2)
+        self.assertEqual(live.store.tago_attempt_count("2026-08-31"), 1)
+        self.assertEqual(live.store.tago_attempt_count("2026-09-01"), 1)
+
+    def test_failed_live_tago_fetch_still_consumes_one_attempt(self) -> None:
+        live = BusroService(
+            replace(
+                self.service.settings,
+                fixture_mode=False,
+                tago_service_key="unit-test-key",
+                db_path=Path(self.temp.name) / "failed-attempt.sqlite3",
+            ),
+            clock=lambda: FIXED_NOW,
+        )
+        with patch("app.fetch_arrivals", side_effect=TagoError("UPSTREAM", "failed")):
+            with self.assertRaises(AppError):
+                live.arrivals({"city_code": "25", "node_id": "DJB8001793"})
+        self.assertEqual(live.store.tago_attempt_count("2026-08-31"), 1)
+
+    def test_process_wide_tago_semaphore_rejects_a_second_service_quickly(self) -> None:
+        first = BusroService(
+            replace(
+                self.service.settings,
+                fixture_mode=False,
+                tago_service_key="unit-test-key",
+                tago_max_concurrent_calls=1,
+                tago_admission_timeout_seconds=0.02,
+                db_path=Path(self.temp.name) / "guard-first.sqlite3",
+            ),
+            clock=lambda: FIXED_NOW,
+        )
+        second = BusroService(
+            replace(first.settings, db_path=Path(self.temp.name) / "guard-second.sqlite3"),
+            clock=lambda: FIXED_NOW,
+        )
+        upstream = json.loads(
+            self.service.settings.fixture_path.read_text(encoding="utf-8")
+        )
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_fetch(**_kwargs):
+            entered.set()
+            release.wait(timeout=2)
+            return upstream
+
+        with (
+            patch("app._TAGO_UPSTREAM_SEMAPHORE", threading.BoundedSemaphore(1)),
+            patch("app._TAGO_UPSTREAM_LIMIT", 1),
+            patch("app.fetch_arrivals", side_effect=blocked_fetch),
+            ThreadPoolExecutor(max_workers=1) as executor,
+        ):
+            future = executor.submit(
+                first.arrivals,
+                {"city_code": "25", "node_id": "DJB8001793"},
+            )
+            self.assertTrue(entered.wait(timeout=1))
+            try:
+                with self.assertRaises(AppError) as busy:
+                    second.arrivals({"city_code": "25", "node_id": "DJB8001794"})
+            finally:
+                release.set()
+            self.assertTrue(future.result()["ok"])
+
+        self.assertEqual(busy.exception.status, 429)
+        self.assertEqual(busy.exception.code, "TAGO_UPSTREAM_BUSY")
+        self.assertEqual(first.store.tago_attempt_count("2026-08-31"), 1)
+        self.assertEqual(second.store.tago_attempt_count("2026-08-31"), 0)
 
     @staticmethod
     def position_payload(node_order: int, node_id: str, node_name: str) -> dict:
@@ -500,6 +764,305 @@ class ServiceCase(unittest.TestCase):
         )
         self.assertEqual(replay["summary"]["eligible_days"], 0)
 
+    def test_live_replay_requires_registered_official_schedule_origin(self) -> None:
+        live = BusroService(
+            replace(
+                self.service.settings,
+                fixture_mode=False,
+                tago_service_key="not-used-by-replay",
+                db_path=Path(self.temp.name) / "live-replay.sqlite3",
+            ),
+            clock=lambda: FIXED_NOW,
+        )
+        leg = {
+            "id": "official-source-leg",
+            "route_id": "DJB30300052",
+            "node_id": "DJB8005622",
+            "node_order": 2,
+            "scheduled_arrival": "12:01",
+            "next_departure": "12:10",
+            "minimum_transfer_minutes": 5,
+        }
+
+        with self.assertRaises(AppError) as missing:
+            live.replay({"route": "route-source", "legs": [leg], "dates": ["2026-08-31"]})
+        self.assertEqual(missing.exception.code, "VERIFIED_TIMETABLE_SOURCE_REQUIRED")
+        self.assertEqual(missing.exception.status, 422)
+
+        with self.assertRaises(AppError) as route_only:
+            live.replay(
+                {
+                    "route": "route-source",
+                    "legs": [{**leg, "time_evidence_source": "tago-routes"}],
+                    "dates": ["2026-08-31"],
+                }
+            )
+        self.assertEqual(route_only.exception.code, "UNVERIFIED_TIMETABLE_SOURCE")
+        self.assertEqual(route_only.exception.details["required_status"], "VERIFIED_SCHEDULE_ORIGIN")
+
+        with self.assertRaises(AppError) as registry_only:
+            live.replay(
+                {
+                    "route": "route-source",
+                    "legs": [{**leg, "time_evidence_source": "yeongdong-timetable"}],
+                    "dates": ["2026-08-31"],
+                }
+            )
+        self.assertEqual(registry_only.exception.status, 422)
+        self.assertEqual(
+            registry_only.exception.code, "OFFICIAL_SCHEDULE_RECORD_REQUIRED"
+        )
+        self.assertEqual(
+            registry_only.exception.details["reason"],
+            "NO_SERVER_SCHEDULE_STORE_FOR_SOURCE",
+        )
+
+        with self.assertRaises(AppError) as missing_metadata:
+            live.replay(
+                {
+                    "route": "route-source",
+                    "legs": [{**leg, "time_evidence_source": "ktdb-gtfs-2024"}],
+                    "dates": ["2026-08-31"],
+                }
+            )
+        self.assertEqual(missing_metadata.exception.status, 422)
+        self.assertEqual(
+            missing_metadata.exception.code, "OFFICIAL_SCHEDULE_RECORD_REQUIRED"
+        )
+        self.assertEqual(
+            missing_metadata.exception.details["reason"],
+            "LIVE_SCHEDULE_METADATA_REQUIRED",
+        )
+        self.assertIn(
+            "next_route_id", missing_metadata.exception.details["missing_fields"]
+        )
+
+        complete_leg = {
+            **leg,
+            "time_evidence_source": "ktdb-gtfs-2024",
+            "time_evidence_trip_id": "GTFS:KTDB:TARRIVAL000000000001",
+            "next_route_id": "GTFS:KTDB:RNEXT0000000000001:PNEXT000000000000000000000000000000000001",
+            "next_node_id": "GTFS:KTDB:SNEXT0000000000001",
+            "next_node_order": 1,
+            "next_time_evidence_trip_id": "GTFS:KTDB:TNEXT000000000000001",
+        }
+        with self.assertRaises(AppError) as missing_feed:
+            live.replay(
+                {
+                    "route": "route-source",
+                    "legs": [complete_leg],
+                    "dates": ["2026-08-31"],
+                }
+            )
+        self.assertEqual(missing_feed.exception.status, 422)
+        self.assertEqual(
+            missing_feed.exception.code, "OFFICIAL_SCHEDULE_RECORD_REQUIRED"
+        )
+        self.assertEqual(
+            missing_feed.exception.details["reason"], "ACTIVE_GTFS_FEED_REQUIRED"
+        )
+        self.assertEqual(missing_feed.exception.details["phase"], "arrival")
+
+    def test_live_replay_uses_two_bound_gtfs_records_instead_of_request_times(self) -> None:
+        live = BusroService(
+            replace(
+                self.service.settings,
+                fixture_mode=False,
+                tago_service_key="not-used-by-replay",
+                db_path=Path(self.temp.name) / "live-bound-schedule.sqlite3",
+            ),
+            clock=lambda: FIXED_NOW,
+        )
+        route_id = "GTFS:KTDB:R0123456789abcdef0123:P0123456789abcdef0123456789abcdef01234567"
+        node_id = "GTFS:KTDB:S0123456789abcdef0123"
+        trip_id = "GTFS:KTDB:T0123456789abcdef0123"
+        next_route_id = "GTFS:KTDB:Rfedcba98765432100123:Pfedcba9876543210fedcba9876543210fedcba98"
+        next_node_id = "GTFS:KTDB:Sfedcba98765432100123"
+        next_trip_id = "GTFS:KTDB:Tfedcba98765432100123"
+        arrival_evidence = {
+            "data_gap": False,
+            "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE",
+            "feed": {"feed_id": "official-feed-bound"},
+            "trips": [
+                {
+                    "trip_namespace_id": trip_id,
+                    "calendar": {"operates_on_date": True},
+                    "stop_times": [
+                        {
+                            "stop_sequence": 2,
+                            "node_id": node_id,
+                            "arrival_time": "12:01:00",
+                            "arrival_seconds": 12 * 3600 + 60,
+                            "departure_time": "12:02:00",
+                            "departure_seconds": 12 * 3600 + 2 * 60,
+                        }
+                    ],
+                }
+            ],
+        }
+        next_departure_evidence = {
+            "data_gap": False,
+            "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE",
+            "feed": {"feed_id": "official-feed-bound"},
+            "trips": [
+                {
+                    "trip_namespace_id": next_trip_id,
+                    "calendar": {"operates_on_date": True},
+                    "stop_times": [
+                        {
+                            "stop_sequence": 1,
+                            "node_id": next_node_id,
+                            "arrival_time": "12:09:00",
+                            "arrival_seconds": 12 * 3600 + 9 * 60,
+                            "departure_time": "12:10:00",
+                            "departure_seconds": 12 * 3600 + 10 * 60,
+                        }
+                    ],
+                }
+            ],
+        }
+        passage = {
+            "passage_id": "passage-official-record",
+            "city_code": "GTFS-KTDB",
+            "route_id": route_id,
+            "node_id": node_id,
+            "vehicle_no": "TEST-1",
+            "service_date": "2026-08-31",
+            "observed_from": "2026-08-31T03:00:00Z",
+            "observed_to": "2026-08-31T03:01:00Z",
+            "from_node_order": 1,
+            "node_order": 2,
+            "node_order_delta": 1,
+            "precision": "polling_window",
+            "status": "PASSAGE",
+        }
+        request_body = {
+            "route": "route-bound-record",
+            "legs": [
+                {
+                    "id": "bound-record-leg",
+                    "route_id": route_id,
+                    "node_id": node_id,
+                    "node_order": 2,
+                    # These client values would miss by many hours if trusted.
+                    "scheduled_arrival": "00:01",
+                    "next_departure": "00:02",
+                    "minimum_transfer_minutes": 5,
+                    "time_evidence_source": "ktdb-gtfs-2024",
+                    "time_evidence_trip_id": trip_id,
+                    "next_route_id": next_route_id,
+                    "next_node_id": next_node_id,
+                    "next_node_order": 1,
+                    "next_time_evidence_trip_id": next_trip_id,
+                }
+            ],
+            "dates": ["2026-08-31"],
+        }
+
+        def schedule_evidence_lookup(**kwargs):
+            if kwargs["graph_route_id"] == route_id:
+                return arrival_evidence
+            if kwargs["graph_route_id"] == next_route_id:
+                return next_departure_evidence
+            raise AssertionError(f"unexpected route lookup: {kwargs['graph_route_id']}")
+
+        with (
+            patch.object(
+                live.network_catalog,
+                "gtfs_schedule_evidence",
+                side_effect=schedule_evidence_lookup,
+            ) as schedule_lookup,
+            patch.object(live.store, "replay_events", return_value=[passage]),
+        ):
+            replays = {
+                minutes: live.replay(
+                    {
+                        **request_body,
+                        "legs": [
+                            {
+                                **request_body["legs"][0],
+                                "minimum_transfer_minutes": minutes,
+                            }
+                        ],
+                    }
+                )
+                for minutes in (0, 60)
+            }
+
+        self.assertEqual(schedule_lookup.call_count, 4)
+        self.assertEqual(
+            [item.kwargs["graph_route_id"] for item in schedule_lookup.call_args_list],
+            [route_id, next_route_id, route_id, next_route_id],
+        )
+        self.assertEqual(
+            schedule_lookup.call_args_list[0].kwargs,
+            {
+                "provider": "KTDB",
+                "graph_route_id": route_id,
+                "service_date": "2026-08-31",
+                "limit": 100,
+            },
+        )
+        self.assertEqual(
+            schedule_lookup.call_args_list[1].kwargs,
+            {
+                "provider": "KTDB",
+                "graph_route_id": next_route_id,
+                "service_date": "2026-08-31",
+                "limit": 100,
+            },
+        )
+        replay = replays[0]
+        self.assertEqual(replay, replays[60])
+        self.assertEqual(replay["daily"][0]["status"], "success")
+        self.assertEqual(
+            replay["basis"]["minimum_transfer_source"], "server_safety_policy"
+        )
+        self.assertEqual(replay["basis"]["minimum_transfer_minutes"], 5)
+        self.assertEqual(
+            replay["daily"][0]["legs"][0]["minimum_transfer_source"],
+            "server_safety_policy",
+        )
+        self.assertEqual(
+            replay["daily"][0]["legs"][0]["minimum_transfer_minutes"], 5
+        )
+        self.assertEqual(
+            replay["daily"][0]["legs"][0]["schedule_records"]["arrival"]["trip_id"],
+            trip_id,
+        )
+        self.assertEqual(
+            replay["daily"][0]["legs"][0]["schedule_records"]["arrival"]["arrival_time"],
+            "12:01:00",
+        )
+        self.assertEqual(
+            replay["daily"][0]["legs"][0]["schedule_records"]["next_departure"]["trip_id"],
+            next_trip_id,
+        )
+        self.assertEqual(
+            replay["daily"][0]["legs"][0]["schedule_records"]["next_departure"]["departure_time"],
+            "12:10:00",
+        )
+        self.assertEqual(
+            replay["basis"]["schedule_evidence"], "server_gtfs_schedule_records"
+        )
+        self.assertEqual(replay["basis"]["schedule_value_scope"], "server_record_values_only")
+
+        with patch.object(
+            live.network_catalog,
+            "gtfs_schedule_evidence",
+            side_effect=[arrival_evidence, {**next_departure_evidence, "trips": []}],
+        ):
+            with self.assertRaises(AppError) as missing_next_record:
+                live.replay(request_body)
+        self.assertEqual(missing_next_record.exception.status, 422)
+        self.assertEqual(
+            missing_next_record.exception.code, "OFFICIAL_SCHEDULE_RECORD_REQUIRED"
+        )
+        self.assertEqual(
+            missing_next_record.exception.details["phase"], "next_departure"
+        )
+        self.assertEqual(missing_next_record.exception.details["matching_records"], 0)
+
     def test_position_service_date_and_filters_use_kst(self) -> None:
         now = [datetime(2026, 8, 31, 14, 59, tzinfo=timezone.utc)]
         service = BusroService(self.service.settings, clock=lambda: now[0])
@@ -716,6 +1279,108 @@ class HTTPCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["daily"][0]["status"], "data_gap")
         self.assertEqual(payload["summary"]["eligible_days"], 0)
+
+    def test_operator_endpoints_require_token_off_loopback_and_when_configured(self) -> None:
+        protected_paths = (
+            "/api/collect",
+            "/api/positions/collect",
+            "/api/mappings/validate",
+            "/api/network/hydrate",
+        )
+        with patch.object(Handler, "_client_is_loopback", return_value=False):
+            for path in protected_paths:
+                with self.subTest(path=path):
+                    status, payload, _ = self.request("POST", path, body={})
+                    self.assertEqual(status, 403)
+                    self.assertEqual(payload["error"]["code"], "OPERATOR_AUTH_REQUIRED")
+
+            operator_token = "0123456789abcdef"
+            self.server.service.settings = replace(
+                self.server.service.settings,
+                operator_token=operator_token,
+            )
+            denied_status, denied_payload, _ = self.request(
+                "POST",
+                "/api/collect",
+                body={"city_code": "25", "node_id": "DJB8001793"},
+                headers={"Authorization": "Bearer incorrect-token"},
+            )
+            allowed_status, allowed_payload, _ = self.request(
+                "POST",
+                "/api/collect",
+                body={"city_code": "25", "node_id": "DJB8001793"},
+                headers={
+                    "Authorization": f"Bearer {operator_token}",
+                    "Idempotency-Key": "operator-collect-0001",
+                },
+            )
+            options_status, _options_payload, options_headers = self.request(
+                "OPTIONS",
+                "/api/collect",
+                headers={"Origin": "http://127.0.0.1:8290"},
+            )
+
+        with patch.object(Handler, "_client_is_loopback", return_value=True):
+            loopback_missing_status, loopback_missing_payload, _ = self.request(
+                "POST",
+                "/api/collect",
+                body={"city_code": "25", "node_id": "DJB8001794"},
+            )
+            loopback_wrong_status, loopback_wrong_payload, _ = self.request(
+                "POST",
+                "/api/collect",
+                body={"city_code": "25", "node_id": "DJB8001794"},
+                headers={"X-Busro-Operator-Token": "incorrect-token"},
+            )
+            loopback_allowed_status, loopback_allowed_payload, _ = self.request(
+                "POST",
+                "/api/collect",
+                body={"city_code": "25", "node_id": "DJB8001794"},
+                headers={
+                    "X-Busro-Operator-Token": operator_token,
+                    "Idempotency-Key": "operator-loopback-0001",
+                },
+            )
+
+        self.assertEqual(denied_status, 403)
+        self.assertEqual(denied_payload["error"]["code"], "OPERATOR_AUTH_REQUIRED")
+        self.assertEqual(allowed_status, 201)
+        self.assertTrue(allowed_payload["created"])
+        self.assertNotIn(operator_token, json.dumps(allowed_payload))
+        self.assertNotIn(operator_token, json.dumps(self.server.service.status()))
+        self.assertEqual(options_status, 204)
+        self.assertIn("Authorization", options_headers["Access-Control-Allow-Headers"])
+        self.assertEqual(loopback_missing_status, 403)
+        self.assertEqual(loopback_missing_payload["error"]["code"], "OPERATOR_AUTH_REQUIRED")
+        self.assertEqual(loopback_wrong_status, 403)
+        self.assertEqual(loopback_wrong_payload["error"]["code"], "OPERATOR_AUTH_REQUIRED")
+        self.assertEqual(loopback_allowed_status, 201)
+        self.assertTrue(loopback_allowed_payload["created"])
+
+    def test_tago_budget_exhaustion_is_http_429_with_retry_after(self) -> None:
+        service = self.server.service
+        service.settings = replace(
+            service.settings,
+            fixture_mode=False,
+            tago_service_key="unit-test-key",
+            tago_daily_call_budget=1,
+        )
+        upstream = json.loads(service.settings.fixture_path.read_text(encoding="utf-8"))
+        with patch("app.fetch_arrivals", return_value=upstream) as fetched:
+            first_status, _first_payload, _ = self.request(
+                "GET", "/api/arrivals?city_code=25&node_id=DJB8001793"
+            )
+            second_status, second_payload, second_headers = self.request(
+                "GET", "/api/arrivals?city_code=25&node_id=DJB8001794"
+            )
+
+        self.assertEqual(first_status, 200)
+        self.assertEqual(second_status, 429)
+        self.assertEqual(second_payload["error"]["code"], "TAGO_DAILY_BUDGET_EXHAUSTED")
+        self.assertEqual(second_headers["Retry-After"], "43200")
+        self.assertEqual(fetched.call_count, 1)
+        self.assertEqual(service.store.tago_attempt_count("2026-08-31"), 1)
+        self.assertNotIn("unit-test-key", json.dumps(second_payload))
 
     def test_server_rejects_unbounded_concurrency_and_socket_timeouts(self) -> None:
         with self.assertRaises(ValueError):

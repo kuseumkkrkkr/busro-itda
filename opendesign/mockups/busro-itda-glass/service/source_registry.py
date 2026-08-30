@@ -32,6 +32,7 @@ VALID_STATUSES = frozenset(
 ALLOWED_URL_HOSTS = frozenset(
     {
         "www.data.go.kr",
+        "www.ktdb.go.kr",
         "www.yd21.go.kr",
         "www.gc.go.kr",
         "bus.gimcheon.go.kr",

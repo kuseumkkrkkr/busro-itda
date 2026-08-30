@@ -12,6 +12,8 @@ import json
 import math
 import re
 import socket
+import threading
+import time
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
@@ -23,8 +25,15 @@ OSRM_URL = "https://router.project-osrm.org"
 ROUTE_REF_RE = re.compile(r"^[0-9A-Za-z가-힣._ -]{1,24}$")
 MAX_STOPS = 160
 MAX_UPSTREAM_BYTES = 4_000_000
+OSRM_CHUNK_SIZE = 20
+MAX_OSRM_CHUNKS = 9
+MAX_CONCURRENT_GEOMETRY_REQUESTS = 3
+GEOMETRY_ADMISSION_WAIT_SECONDS = 0.25
+MAX_RESOLVE_TIMEOUT_SECONDS = 20.0
 KOREA_LAT_RANGE = (32.0, 39.8)
 KOREA_LON_RANGE = (123.0, 132.5)
+_GEOMETRY_ADMISSION = threading.BoundedSemaphore(MAX_CONCURRENT_GEOMETRY_REQUESTS)
+_UPSTREAM_HTTP_ADMISSION = threading.BoundedSemaphore(MAX_CONCURRENT_GEOMETRY_REQUESTS)
 
 
 class OSMError(Exception):
@@ -33,6 +42,34 @@ class OSMError(Exception):
         self.code = code
         self.message = message
         self.status = status
+
+
+def _resolve_deadline(timeout_seconds: float) -> float:
+    try:
+        requested = float(timeout_seconds)
+    except (TypeError, ValueError) as exc:
+        raise OSMError("INVALID_OSM_TIMEOUT", "OSM geometry timeout must be a positive number", status=400) from exc
+    if not math.isfinite(requested) or requested <= 0:
+        raise OSMError("INVALID_OSM_TIMEOUT", "OSM geometry timeout must be a positive number", status=400)
+    return time.monotonic() + min(requested, MAX_RESOLVE_TIMEOUT_SECONDS)
+
+
+def _deadline_timeout(deadline: float | None, requested: float) -> float:
+    if deadline is None:
+        return min(max(float(requested), 2.0), 15.0)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise OSMError(
+            "OSM_DEADLINE_EXCEEDED",
+            "OSM geometry resolution exceeded its total time limit",
+            status=504,
+        )
+    return min(remaining, 15.0)
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None:
+        _deadline_timeout(deadline, 0.0)
 
 
 def _validate_endpoint(value: str, expected_host: str) -> str:
@@ -62,10 +99,82 @@ def _coordinates(stops: Iterable[dict[str, Any]]) -> list[tuple[float, float]]:
     return result
 
 
-def _read_json(request: Request, *, timeout_seconds: float) -> dict[str, Any]:
+def _read_json_blocking(request: Request, *, timeout_seconds: float) -> bytes:
+    with urlopen(request, timeout=timeout_seconds) as response:
+        return response.read(MAX_UPSTREAM_BYTES + 1)
+
+
+def _read_json(
+    request: Request, *, timeout_seconds: float, _deadline: float | None = None,
+) -> dict[str, Any]:
+    """Read one upstream response without letting slow-drip I/O own the caller.
+
+    ``urllib`` applies its timeout to socket inactivity, not to the whole body.
+    Run the blocking read in a daemon worker and keep the admission permit until
+    that worker really exits.  The caller observes a hard wall-clock timeout,
+    while abandoned slow readers and their response buffers stay process-wide
+    bounded by ``MAX_CONCURRENT_GEOMETRY_REQUESTS``.  Python cannot safely kill
+    a stuck thread, so a permanently stalled reader intentionally keeps one of
+    those permits for process lifetime; saturation fails fast instead of
+    creating more reader threads.
+    """
+    started_at = time.monotonic()
+    call_deadline = started_at + max(0.0, float(timeout_seconds))
+    deadline = min(call_deadline, _deadline) if _deadline is not None else call_deadline
+
+    def wall_timeout() -> OSMError:
+        if _deadline is not None and _deadline <= call_deadline:
+            return OSMError(
+                "OSM_DEADLINE_EXCEEDED",
+                "OSM geometry resolution exceeded its total time limit",
+                status=504,
+            )
+        return OSMError("OSM_TIMEOUT", "OSM geometry service timed out", status=504)
+
+    remaining = deadline - time.monotonic()
+    admission = _UPSTREAM_HTTP_ADMISSION
+    if remaining <= 0:
+        raise wall_timeout()
+    admission_wait = min(GEOMETRY_ADMISSION_WAIT_SECONDS, remaining)
+    if not admission.acquire(timeout=admission_wait):
+        if deadline - time.monotonic() <= 0:
+            raise wall_timeout()
+        raise OSMError(
+            "OSM_BUSY",
+            "OSM geometry capacity is busy; retry shortly",
+            status=429,
+        )
+
+    finished = threading.Event()
+    outcome: dict[str, Any] = {}
+
+    def read_in_worker() -> None:
+        try:
+            socket_timeout = deadline - time.monotonic()
+            if socket_timeout <= 0:
+                raise wall_timeout()
+            outcome["payload"] = _read_json_blocking(request, timeout_seconds=socket_timeout)
+        except BaseException as exc:
+            outcome["error"] = exc
+        finally:
+            admission.release()
+            finished.set()
+
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:
-            payload = response.read(MAX_UPSTREAM_BYTES + 1)
+        worker = threading.Thread(target=read_in_worker, name="osm-upstream-read", daemon=True)
+        worker.start()
+    except Exception:
+        admission.release()
+        raise
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not finished.wait(timeout=remaining):
+        raise wall_timeout()
+
+    try:
+        if "error" in outcome:
+            raise outcome["error"]
+        payload = outcome["payload"]
     except HTTPError as exc:
         raise OSMError("OSM_HTTP_ERROR", f"OSM service returned HTTP {exc.code}") from exc
     except (TimeoutError, socket.timeout) as exc:
@@ -131,7 +240,7 @@ def _relation_score(lines: list[list[list[float]]], ordered: list[tuple[float, f
 
 def fetch_bus_relation(
     *, route_ref: str, stops: Iterable[dict[str, Any]], timeout_seconds: float = 12.0,
-    overpass_url: str = OVERPASS_URL,
+    overpass_url: str = OVERPASS_URL, _deadline: float | None = None,
 ) -> dict[str, Any] | None:
     route_ref = str(route_ref or "").strip()
     if not ROUTE_REF_RE.fullmatch(route_ref):
@@ -159,7 +268,12 @@ def fetch_bus_relation(
         },
         method="POST",
     )
-    payload = _read_json(request, timeout_seconds=min(max(timeout_seconds, 2.0), 15.0))
+    payload = _read_json(
+        request,
+        timeout_seconds=_deadline_timeout(_deadline, timeout_seconds),
+        _deadline=_deadline,
+    )
+    _check_deadline(_deadline)
     candidates: list[tuple[float, dict[str, Any], list[list[list[float]]]]] = []
     elements = payload.get("elements") if isinstance(payload.get("elements"), list) else []
     for element in elements[:50]:
@@ -168,6 +282,7 @@ def fetch_bus_relation(
         lines = _relation_lines(element)
         if lines:
             candidates.append((_relation_score(lines, ordered), element, lines))
+    _check_deadline(_deadline)
     if not candidates:
         return None
     score, chosen, lines = min(candidates, key=lambda item: (item[0], int(item[1].get("id") or 0)))
@@ -191,9 +306,13 @@ def fetch_bus_relation(
     }
 
 
-def _chunks(points: list[tuple[float, float]], size: int = 20):
+def _chunks(points: list[tuple[float, float]], size: int = OSRM_CHUNK_SIZE):
     start = 0
+    count = 0
     while start < len(points) - 1:
+        count += 1
+        if count > MAX_OSRM_CHUNKS:
+            raise OSMError("TOO_MANY_OSRM_CHUNKS", "Ordered stops require too many road-router chunks", status=400)
         end = min(len(points), start + size)
         yield points[start:end]
         start = end - 1
@@ -201,6 +320,7 @@ def _chunks(points: list[tuple[float, float]], size: int = 20):
 
 def fetch_road_estimate(
     *, stops: Iterable[dict[str, Any]], timeout_seconds: float = 8.0, osrm_url: str = OSRM_URL,
+    _deadline: float | None = None,
 ) -> dict[str, Any]:
     ordered = _coordinates(stops)
     endpoint = _validate_endpoint(osrm_url, "router.project-osrm.org")
@@ -208,13 +328,19 @@ def fetch_road_estimate(
     distance = 0.0
     duration = 0.0
     for chunk in _chunks(ordered):
+        _check_deadline(_deadline)
         encoded = ";".join(f"{quote(str(lon), safe='.-')},{quote(str(lat), safe='.-')}" for lat, lon in chunk)
         query = urlencode({"overview": "full", "geometries": "geojson", "steps": "false", "continue_straight": "true"})
         request = Request(
             f"{endpoint}/route/v1/driving/{encoded}?{query}",
             headers={"Accept": "application/json", "User-Agent": "busro-itda/0.3 (local-development)"},
         )
-        payload = _read_json(request, timeout_seconds=min(max(timeout_seconds, 2.0), 15.0))
+        payload = _read_json(
+            request,
+            timeout_seconds=_deadline_timeout(_deadline, timeout_seconds),
+            _deadline=_deadline,
+        )
+        _check_deadline(_deadline)
         routes = payload.get("routes") if isinstance(payload.get("routes"), list) else []
         if payload.get("code") != "Ok" or not routes:
             raise OSMError("OSRM_NO_ROUTE", "OSM road router could not connect the ordered stops", status=422)
@@ -229,6 +355,7 @@ def fetch_road_estimate(
         combined.extend(valid)
         distance += float(route.get("distance") or 0)
         duration += float(route.get("duration") or 0)
+        _check_deadline(_deadline)
     return {
         "ok": True,
         "geometry": {"type": "LineString", "coordinates": combined},
@@ -246,24 +373,51 @@ def resolve_route_geometry(
     *, route_ref: str, stops: Iterable[dict[str, Any]], timeout_seconds: float = 12.0,
     allow_road_estimate: bool = True,
 ) -> dict[str, Any]:
-    materialized = list(stops)
-    relation_error: OSMError | None = None
+    deadline = _resolve_deadline(timeout_seconds)
+    admission_wait = min(GEOMETRY_ADMISSION_WAIT_SECONDS, max(0.0, deadline - time.monotonic()))
+    if not _GEOMETRY_ADMISSION.acquire(timeout=admission_wait):
+        raise OSMError(
+            "OSM_BUSY",
+            "OSM geometry capacity is busy; retry shortly",
+            status=429,
+        )
     try:
-        relation = fetch_bus_relation(route_ref=route_ref, stops=materialized, timeout_seconds=timeout_seconds)
-        if relation is not None:
-            return relation
-    except OSMError as exc:
-        relation_error = exc
-    if allow_road_estimate:
+        _check_deadline(deadline)
+        materialized = list(stops)
+        relation_error: OSMError | None = None
         try:
-            result = fetch_road_estimate(stops=materialized, timeout_seconds=timeout_seconds)
-            if relation_error:
-                result["relation_lookup_error"] = relation_error.code
-            return result
-        except OSMError:
-            if relation_error:
-                raise relation_error
-            raise
-    if relation_error:
-        raise relation_error
-    raise OSMError("OSM_ROUTE_NOT_MAPPED", "No matching OSM bus route relation was found", status=404)
+            relation = fetch_bus_relation(
+                route_ref=route_ref,
+                stops=materialized,
+                timeout_seconds=timeout_seconds,
+                _deadline=deadline,
+            )
+            if relation is not None:
+                return relation
+        except OSMError as exc:
+            _check_deadline(deadline)
+            if exc.code == "OSM_DEADLINE_EXCEEDED":
+                raise
+            relation_error = exc
+        if allow_road_estimate:
+            try:
+                result = fetch_road_estimate(
+                    stops=materialized,
+                    timeout_seconds=timeout_seconds,
+                    _deadline=deadline,
+                )
+                if relation_error:
+                    result["relation_lookup_error"] = relation_error.code
+                return result
+            except OSMError as exc:
+                _check_deadline(deadline)
+                if exc.code == "OSM_DEADLINE_EXCEEDED":
+                    raise
+                if relation_error:
+                    raise relation_error
+                raise
+        if relation_error:
+            raise relation_error
+        raise OSMError("OSM_ROUTE_NOT_MAPPED", "No matching OSM bus route relation was found", status=404)
+    finally:
+        _GEOMETRY_ADMISSION.release()

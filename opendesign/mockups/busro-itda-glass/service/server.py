@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 import getpass
+import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
 import mimetypes
 from pathlib import Path
@@ -23,6 +25,14 @@ STATIC_FILES = frozenset(
         "index.html", "tokens.css", "glass.css", "screens.css", "nationwide.css",
         "api.js", "map.js", "components.jsx", "nationwide.jsx", "screens.jsx", "app.jsx",
         "components.compiled.js", "nationwide.compiled.js", "screens.compiled.js", "app.compiled.js",
+    }
+)
+OPERATOR_ENDPOINTS = frozenset(
+    {
+        "/api/collect",
+        "/api/positions/collect",
+        "/api/mappings/validate",
+        "/api/network/hydrate",
     }
 )
 
@@ -85,7 +95,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self._common_headers()
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Idempotency-Key, Authorization, X-Busro-Operator-Token",
+        )
         self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
@@ -100,6 +113,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urlsplit(self.path)
         try:
+            if method == "POST" and parsed.path in OPERATOR_ENDPOINTS:
+                self._require_operator()
             if method == "GET" and not parsed.path.startswith("/api/"):
                 self._static_response(parsed.path)
                 return
@@ -165,7 +180,20 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 raise AppError("NOT_FOUND", "API endpoint not found", status=404)
         except AppError as exc:
-            self._json_response(exc.status, exc.payload())
+            retry_after = None
+            if exc.status == 429 and isinstance(exc.details, dict):
+                try:
+                    retry_after = min(
+                        86_400,
+                        max(1, int(exc.details.get("retry_after_seconds", 1))),
+                    )
+                except (TypeError, ValueError):
+                    retry_after = 1
+            self._json_response(
+                exc.status,
+                exc.payload(),
+                retry_after_seconds=retry_after,
+            )
         except Exception:
             # Keep implementation and secret-bearing exception text out of responses.
             self._json_response(
@@ -225,12 +253,46 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _json_response(self, status: int, payload: dict[str, Any]) -> None:
+    def _client_is_loopback(self) -> bool:
+        try:
+            address = ipaddress.ip_address(str(self.client_address[0]).split("%", 1)[0])
+        except ValueError:
+            return False
+        if address.is_loopback:
+            return True
+        return bool(address.version == 6 and address.ipv4_mapped and address.ipv4_mapped.is_loopback)
+
+    def _require_operator(self) -> None:
+        expected = self.service.settings.operator_token
+        if not expected and self._client_is_loopback():
+            return
+        supplied = self.headers.get("X-Busro-Operator-Token")
+        if supplied is None:
+            authorization = self.headers.get("Authorization", "")
+            scheme, separator, value = authorization.partition(" ")
+            if separator and scheme.lower() == "bearer":
+                supplied = value
+        if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+            raise AppError(
+                "OPERATOR_AUTH_REQUIRED",
+                "Operator authorization is required for this endpoint",
+                status=403,
+            )
+
+    def _json_response(
+        self,
+        status: int,
+        payload: dict[str, Any],
+        *,
+        retry_after_seconds: int | None = None,
+    ) -> None:
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self._common_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
+        if retry_after_seconds is not None:
+            self.send_header("Retry-After", str(retry_after_seconds))
         self.end_headers()
         self._write_response(encoded)
 

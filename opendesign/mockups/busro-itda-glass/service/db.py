@@ -58,6 +58,11 @@ class Store:
                     expires_at INTEGER NOT NULL,
                     payload_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS upstream_daily_attempts (
+                    service_date TEXT PRIMARY KEY,
+                    attempted_calls INTEGER NOT NULL CHECK(attempted_calls >= 0),
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS snapshots (
                     snapshot_id TEXT PRIMARY KEY,
                     idempotency_key TEXT NOT NULL UNIQUE,
@@ -203,6 +208,47 @@ class Store:
                 (cache_key, int(time.time()) + ttl_seconds, _json(payload)),
             )
             connection.commit()
+
+    def reserve_tago_attempt(
+        self,
+        *,
+        service_date: str,
+        attempted_at: str,
+        daily_limit: int,
+    ) -> tuple[bool, int]:
+        """Atomically reserve one real TAGO attempt for a KST service date."""
+        with self.write_connect() as connection:
+            row = connection.execute(
+                """INSERT INTO upstream_daily_attempts(
+                       service_date, attempted_calls, updated_at
+                   ) VALUES(?, 1, ?)
+                   ON CONFLICT(service_date) DO UPDATE SET
+                     attempted_calls=upstream_daily_attempts.attempted_calls + 1,
+                     updated_at=excluded.updated_at
+                   WHERE upstream_daily_attempts.attempted_calls < ?
+                   RETURNING attempted_calls""",
+                (service_date, attempted_at, daily_limit),
+            ).fetchone()
+            if row is None:
+                current = connection.execute(
+                    "SELECT attempted_calls FROM upstream_daily_attempts WHERE service_date=?",
+                    (service_date,),
+                ).fetchone()
+                attempted_calls = int(current["attempted_calls"]) if current else 0
+                allowed = False
+            else:
+                attempted_calls = int(row["attempted_calls"])
+                allowed = True
+            connection.commit()
+        return allowed, attempted_calls
+
+    def tago_attempt_count(self, service_date: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT attempted_calls FROM upstream_daily_attempts WHERE service_date=?",
+                (service_date,),
+            ).fetchone()
+            return int(row["attempted_calls"]) if row else 0
 
     def get_snapshot_by_idempotency(self, key: str) -> dict[str, Any] | None:
         with self.connect() as connection:

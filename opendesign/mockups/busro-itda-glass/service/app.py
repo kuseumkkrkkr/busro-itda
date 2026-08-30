@@ -33,10 +33,22 @@ from tago import (
 CITY_CODE_RE = re.compile(r"^[0-9]{1,9}$")
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 NODE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{2,64}$")
+TRANSPORT_IDENTIFIER_RE = re.compile(r"^[0-9A-Za-z가-힣_.:-]{1,96}$")
 IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 VEHICLE_NO_RE = re.compile(r"^[0-9A-Za-z가-힣-]{1,32}$")
 PASSAGE_STATUSES = {"PASSAGE", "DATA_GAP", "REGRESSION"}
 SEOUL_TZ = timezone(timedelta(hours=9), name="Asia/Seoul")
+
+# A source-registry entry proves only who publishes a timetable.  This map is
+# deliberately limited to origins that have a normalized, queryable server-side
+# schedule store.  Municipal HTML/file origins remain DATA_GAP until ingested.
+GTFS_SCHEDULE_SOURCE_PROVIDERS = {"ktdb-gtfs-2024": "KTDB"}
+LIVE_REPLAY_MINIMUM_TRANSFER_MINUTES = 5
+LIVE_REPLAY_MINIMUM_TRANSFER_SOURCE = "server_safety_policy"
+
+_TAGO_UPSTREAM_GUARD_LOCK = threading.Lock()
+_TAGO_UPSTREAM_SEMAPHORE: threading.BoundedSemaphore | None = None
+_TAGO_UPSTREAM_LIMIT: int | None = None
 
 
 def utc_now() -> datetime:
@@ -50,6 +62,16 @@ def iso_utc(value: datetime) -> str:
 def canonical_hash(value: Any) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _process_tago_semaphore(limit: int) -> threading.BoundedSemaphore:
+    """Return the one process-wide TAGO admission semaphore."""
+    global _TAGO_UPSTREAM_LIMIT, _TAGO_UPSTREAM_SEMAPHORE
+    with _TAGO_UPSTREAM_GUARD_LOCK:
+        if _TAGO_UPSTREAM_SEMAPHORE is None:
+            _TAGO_UPSTREAM_LIMIT = limit
+            _TAGO_UPSTREAM_SEMAPHORE = threading.BoundedSemaphore(limit)
+        return _TAGO_UPSTREAM_SEMAPHORE
 
 
 class AppError(Exception):
@@ -128,8 +150,69 @@ class BusroService:
         self.journey_planner = JourneyPlanner()
         self._planner_graph_lock = threading.Lock()
         self.source_registry = load_default_registry()
+        self._verified_schedule_origins = {
+            source["id"]: {
+                "source_id": source["id"],
+                "name": source["name"],
+                "municipality": source["municipality"],
+                "status": source["status"],
+            }
+            for offset in (0, 100)
+            for source in self.source_registry.list_sources(
+                status="VERIFIED_SCHEDULE_ORIGIN", limit=100, offset=offset
+            )
+        }
         self._fixture_delays: dict[str, Any] | None = None
         self._singleflight = _KeyedSingleFlight()
+
+    def _tago_upstream_call(self, operation: str, callback):
+        """Admit and account exactly one live TAGO network attempt."""
+        key = self.settings.tago_service_key
+        if self.settings.fixture_mode or not key or "\r" in key or "\n" in key or len(key) > 1024:
+            return callback()
+
+        semaphore = _process_tago_semaphore(self.settings.tago_max_concurrent_calls)
+        acquired = semaphore.acquire(timeout=self.settings.tago_admission_timeout_seconds)
+        if not acquired:
+            raise AppError(
+                "TAGO_UPSTREAM_BUSY",
+                "TAGO upstream capacity is busy; retry shortly",
+                status=429,
+                details={"operation": operation, "retry_after_seconds": 1},
+            )
+        try:
+            now = self.clock()
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            kst_now = now.astimezone(SEOUL_TZ)
+            service_date = kst_now.date().isoformat()
+            allowed, attempted_calls = self.store.reserve_tago_attempt(
+                service_date=service_date,
+                attempted_at=iso_utc(now),
+                daily_limit=self.settings.tago_daily_call_budget,
+            )
+            if not allowed:
+                next_day = datetime.combine(
+                    kst_now.date() + timedelta(days=1),
+                    datetime_time.min,
+                    tzinfo=SEOUL_TZ,
+                )
+                retry_after = max(1, math.ceil((next_day - kst_now).total_seconds()))
+                raise AppError(
+                    "TAGO_DAILY_BUDGET_EXHAUSTED",
+                    "The server's KST daily TAGO call budget is exhausted",
+                    status=429,
+                    details={
+                        "service_date": service_date,
+                        "attempted_calls": attempted_calls,
+                        "daily_limit": self.settings.tago_daily_call_budget,
+                        "retry_after_seconds": retry_after,
+                        "resets_at": next_day.isoformat(),
+                    },
+                )
+            return callback()
+        finally:
+            semaphore.release()
 
     def status(self) -> dict[str, Any]:
         tago_state = "fixture" if self.settings.fixture_mode else ("ready" if self.settings.tago_service_key else "missing_key")
@@ -740,13 +823,16 @@ class BusroService:
                 existing["cached"] = True
                 return existing
             try:
-                upstream = fetch_catalog(
-                    operation=operation,
-                    parameters=parameters,
-                    service_key=self.settings.tago_service_key,
-                    timeout_seconds=self.settings.tago_timeout_seconds,
-                    fixture_mode=self.settings.fixture_mode,
-                    fixture_path=self.settings.catalog_fixture_path,
+                upstream = self._tago_upstream_call(
+                    operation,
+                    lambda: fetch_catalog(
+                        operation=operation,
+                        parameters=parameters,
+                        service_key=self.settings.tago_service_key,
+                        timeout_seconds=self.settings.tago_timeout_seconds,
+                        fixture_mode=self.settings.fixture_mode,
+                        fixture_path=self.settings.catalog_fixture_path,
+                    ),
                 )
                 records, metadata = normalize_catalog(
                     upstream,
@@ -834,13 +920,16 @@ class BusroService:
                     cached["cached"] = True
                     return cached
             try:
-                upstream = fetch_arrivals(
-                    city_code=city_code,
-                    node_id=node_id,
-                    service_key=self.settings.tago_service_key,
-                    timeout_seconds=self.settings.tago_timeout_seconds,
-                    fixture_mode=self.settings.fixture_mode,
-                    fixture_path=self.settings.fixture_path,
+                upstream = self._tago_upstream_call(
+                    "arrivals",
+                    lambda: fetch_arrivals(
+                        city_code=city_code,
+                        node_id=node_id,
+                        service_key=self.settings.tago_service_key,
+                        timeout_seconds=self.settings.tago_timeout_seconds,
+                        fixture_mode=self.settings.fixture_mode,
+                        fixture_path=self.settings.fixture_path,
+                    ),
                 )
                 arrivals, metadata = normalize_arrivals(upstream)
             except TagoError as exc:
@@ -883,13 +972,16 @@ class BusroService:
                     cached["cached"] = True
                     return cached
             try:
-                upstream = fetch_positions(
-                    city_code=city_code,
-                    route_id=route_id,
-                    service_key=self.settings.tago_service_key,
-                    timeout_seconds=self.settings.tago_timeout_seconds,
-                    fixture_mode=self.settings.fixture_mode,
-                    fixture_path=self.settings.position_fixture_path,
+                upstream = self._tago_upstream_call(
+                    "positions",
+                    lambda: fetch_positions(
+                        city_code=city_code,
+                        route_id=route_id,
+                        service_key=self.settings.tago_service_key,
+                        timeout_seconds=self.settings.tago_timeout_seconds,
+                        fixture_mode=self.settings.fixture_mode,
+                        fixture_path=self.settings.position_fixture_path,
+                    ),
                 )
                 normalized, metadata = normalize_positions(upstream, route_id=route_id)
             except (TagoError, OSError, json.JSONDecodeError) as exc:
@@ -1228,12 +1320,21 @@ class BusroService:
         for service_date in dates:
             leg_results: list[dict[str, Any]] = []
             for leg in legs:
-                cache_key = (leg["route_id"], service_date.isoformat(), leg["vehicle_no"])
+                effective_leg = (
+                    leg
+                    if self.settings.fixture_mode
+                    else self._live_replay_schedule_leg(leg, service_date)
+                )
+                cache_key = (
+                    effective_leg["route_id"],
+                    service_date.isoformat(),
+                    effective_leg["vehicle_no"],
+                )
                 if cache_key not in cache:
                     events = self.store.replay_events(
-                        route_id=leg["route_id"],
+                        route_id=effective_leg["route_id"],
                         service_date=service_date.isoformat(),
-                        vehicle_no=leg["vehicle_no"],
+                        vehicle_no=effective_leg["vehicle_no"],
                         limit=500,
                     )
                     processed_events += len(events)
@@ -1246,7 +1347,7 @@ class BusroService:
                     cache[cache_key] = events
                 leg_results.append(
                     self._replay_leg_result(
-                        leg,
+                        effective_leg,
                         service_date,
                         cache[cache_key],
                         match_window_minutes=match_window,
@@ -1279,18 +1380,43 @@ class BusroService:
         failure_days = sum(item["status"] == "failure" for item in daily)
         gap_days = sum(item["status"] == "data_gap" for item in daily)
         eligible_days = success_days + failure_days
+        basis = {
+            "mode": "fixture" if self.settings.fixture_mode else "live",
+            "evidence": "route-mapped_vehicle_position_transitions",
+            "schedule_evidence": (
+                "fixture_request"
+                if self.settings.fixture_mode
+                else "server_gtfs_schedule_records"
+            ),
+            "schedule_source_ids": sorted(
+                {
+                    leg["time_evidence_source"]["source_id"]
+                    for leg in legs
+                    if leg["time_evidence_source"] is not None
+                }
+            ),
+            "schedule_value_scope": (
+                "fixture_only"
+                if self.settings.fixture_mode
+                else "server_record_values_only"
+            ),
+            "precision": "polling_window",
+            "match_window_minutes": match_window,
+            "data_gap_excluded_from_denominator": True,
+            "events_scanned": processed_events,
+        }
+        if not self.settings.fixture_mode:
+            basis.update(
+                {
+                    "minimum_transfer_source": LIVE_REPLAY_MINIMUM_TRANSFER_SOURCE,
+                    "minimum_transfer_minutes": LIVE_REPLAY_MINIMUM_TRANSFER_MINUTES,
+                }
+            )
         return {
             "ok": True,
             "route": route_info,
             "timezone": "Asia/Seoul",
-            "basis": {
-                "mode": "fixture" if self.settings.fixture_mode else "live",
-                "evidence": "route-mapped_vehicle_position_transitions",
-                "precision": "polling_window",
-                "match_window_minutes": match_window,
-                "data_gap_excluded_from_denominator": True,
-                "events_scanned": processed_events,
-            },
+            "basis": basis,
             "daily": daily,
             "summary": {
                 "days": len(daily),
@@ -1480,30 +1606,109 @@ class BusroService:
         if not isinstance(value, dict):
             raise AppError("INVALID_LEG", f"legs[{index}] must be an object")
         leg_id = self._identifier(value.get("id") or f"leg-{index + 1}", f"legs[{index}].id")
-        route_id = self._identifier(value.get("route_id"), f"legs[{index}].route_id")
+        route_id = (
+            self._identifier(value.get("route_id"), f"legs[{index}].route_id")
+            if self.settings.fixture_mode
+            else self._transport_identifier(
+                value.get("route_id"), f"legs[{index}].route_id"
+            )
+        )
         node_id = str(value.get("node_id") or "")
         if not NODE_ID_RE.fullmatch(node_id):
             raise AppError("INVALID_NODE_ID", f"legs[{index}].node_id has an invalid format")
         node_order = self._bounded_int(
             value.get("node_order"), f"legs[{index}].node_order", 1, 9999
         )
-        scheduled = self._clock_minutes(
-            value.get("scheduled_arrival"), f"legs[{index}].scheduled_arrival"
-        )
-        next_departure = self._clock_minutes(
-            value.get("next_departure"), f"legs[{index}].next_departure"
-        )
-        if next_departure < scheduled:
-            next_departure += 24 * 60
-        minimum_transfer = self._bounded_int(
-            value.get("minimum_transfer_minutes", 5),
-            f"legs[{index}].minimum_transfer_minutes",
-            0,
-            60,
-        )
+        scheduled: int | float | None = None
+        next_departure: int | float | None = None
+        if self.settings.fixture_mode:
+            scheduled = self._clock_minutes(
+                value.get("scheduled_arrival"), f"legs[{index}].scheduled_arrival"
+            )
+            next_departure = self._clock_minutes(
+                value.get("next_departure"), f"legs[{index}].next_departure"
+            )
+            if next_departure < scheduled:
+                next_departure += 24 * 60
+        if self.settings.fixture_mode:
+            minimum_transfer = self._bounded_int(
+                value.get("minimum_transfer_minutes", 5),
+                f"legs[{index}].minimum_transfer_minutes",
+                0,
+                60,
+            )
+            minimum_transfer_source = None
+        else:
+            # A client-supplied transfer allowance is not schedule evidence.
+            minimum_transfer = LIVE_REPLAY_MINIMUM_TRANSFER_MINUTES
+            minimum_transfer_source = LIVE_REPLAY_MINIMUM_TRANSFER_SOURCE
         vehicle_no = value.get("vehicle_no")
         if vehicle_no is not None:
             vehicle_no = self._vehicle_no(vehicle_no, f"legs[{index}].vehicle_no")
+        source_value = value.get("time_evidence_source")
+        time_evidence_source: dict[str, Any] | None = None
+        if source_value not in (None, ""):
+            source_id = self._identifier(
+                source_value, f"legs[{index}].time_evidence_source"
+            )
+            time_evidence_source = self._verified_schedule_origins.get(source_id)
+            if time_evidence_source is None:
+                raise AppError(
+                    "UNVERIFIED_TIMETABLE_SOURCE",
+                    "time_evidence_source must identify a registered official schedule origin",
+                    status=422,
+                    details={
+                        "leg": leg_id,
+                        "source_id": source_id,
+                        "required_status": "VERIFIED_SCHEDULE_ORIGIN",
+                    },
+                )
+        elif not self.settings.fixture_mode:
+            raise AppError(
+                "VERIFIED_TIMETABLE_SOURCE_REQUIRED",
+                "Live replay requires a registered official timetable source for every leg",
+                status=422,
+                details={
+                    "leg": leg_id,
+                    "field": f"legs[{index}].time_evidence_source",
+                    "required_status": "VERIFIED_SCHEDULE_ORIGIN",
+                },
+            )
+        schedule_trip_id = value.get("time_evidence_trip_id")
+        if schedule_trip_id not in (None, ""):
+            schedule_trip_id = self._transport_identifier(
+                schedule_trip_id, f"legs[{index}].time_evidence_trip_id"
+            )
+        else:
+            schedule_trip_id = None
+        next_route_id: str | None = None
+        next_node_id: str | None = None
+        next_node_order: int | None = None
+        next_schedule_trip_id: str | None = None
+        if not self.settings.fixture_mode:
+            if value.get("next_route_id") not in (None, ""):
+                next_route_id = self._transport_identifier(
+                    value.get("next_route_id"), f"legs[{index}].next_route_id"
+                )
+            if value.get("next_node_id") not in (None, ""):
+                next_node_id = str(value.get("next_node_id"))
+                if not NODE_ID_RE.fullmatch(next_node_id):
+                    raise AppError(
+                        "INVALID_NODE_ID",
+                        f"legs[{index}].next_node_id has an invalid format",
+                    )
+            if value.get("next_node_order") not in (None, ""):
+                next_node_order = self._bounded_int(
+                    value.get("next_node_order"),
+                    f"legs[{index}].next_node_order",
+                    1,
+                    9999,
+                )
+            if value.get("next_time_evidence_trip_id") not in (None, ""):
+                next_schedule_trip_id = self._transport_identifier(
+                    value.get("next_time_evidence_trip_id"),
+                    f"legs[{index}].next_time_evidence_trip_id",
+                )
         return {
             "id": leg_id,
             "route_id": route_id,
@@ -1513,6 +1718,249 @@ class BusroService:
             "scheduled_minutes": scheduled,
             "next_departure_minutes": next_departure,
             "minimum_transfer_minutes": minimum_transfer,
+            "minimum_transfer_source": minimum_transfer_source,
+            "time_evidence_source": time_evidence_source,
+            "time_evidence_trip_id": schedule_trip_id,
+            "next_route_id": next_route_id,
+            "next_node_id": next_node_id,
+            "next_node_order": next_node_order,
+            "next_time_evidence_trip_id": next_schedule_trip_id,
+        }
+
+    def _live_replay_schedule_leg(
+        self, leg: dict[str, Any], service_date: date
+    ) -> dict[str, Any]:
+        """Replace client times with exact arrival and next-departure records."""
+        source = leg["time_evidence_source"]
+        source_id = source["source_id"]
+        provider = GTFS_SCHEDULE_SOURCE_PROVIDERS.get(source_id)
+        if provider is None:
+            raise AppError(
+                "OFFICIAL_SCHEDULE_RECORD_REQUIRED",
+                "Live replay requires a server-stored official schedule record",
+                status=422,
+                details={
+                    "leg": leg["id"],
+                    "source_id": source_id,
+                    "route_id": leg["route_id"],
+                    "node_id": leg["node_id"],
+                    "service_date": service_date.isoformat(),
+                    "reason": "NO_SERVER_SCHEDULE_STORE_FOR_SOURCE",
+                },
+            )
+
+        required_metadata = {
+            "time_evidence_trip_id": leg["time_evidence_trip_id"],
+            "next_route_id": leg["next_route_id"],
+            "next_node_id": leg["next_node_id"],
+            "next_node_order": leg["next_node_order"],
+            "next_time_evidence_trip_id": leg["next_time_evidence_trip_id"],
+        }
+        missing_fields = [
+            field for field, value in required_metadata.items() if value is None
+        ]
+        if missing_fields:
+            raise AppError(
+                "OFFICIAL_SCHEDULE_RECORD_REQUIRED",
+                "Live replay requires exact arrival and next-departure schedule metadata",
+                status=422,
+                details={
+                    "leg": leg["id"],
+                    "source_id": source_id,
+                    "service_date": service_date.isoformat(),
+                    "missing_fields": missing_fields,
+                    "reason": "LIVE_SCHEDULE_METADATA_REQUIRED",
+                },
+            )
+
+        arrival_record = self._live_gtfs_stop_time_record(
+            leg_id=leg["id"],
+            source_id=source_id,
+            provider=provider,
+            service_date=service_date,
+            phase="arrival",
+            route_id=leg["route_id"],
+            node_id=leg["node_id"],
+            node_order=leg["node_order"],
+            trip_id=leg["time_evidence_trip_id"],
+        )
+        next_departure_record = self._live_gtfs_stop_time_record(
+            leg_id=leg["id"],
+            source_id=source_id,
+            provider=provider,
+            service_date=service_date,
+            phase="next_departure",
+            route_id=leg["next_route_id"],
+            node_id=leg["next_node_id"],
+            node_order=leg["next_node_order"],
+            trip_id=leg["next_time_evidence_trip_id"],
+        )
+        arrival_seconds = arrival_record["arrival_seconds"]
+        departure_seconds = next_departure_record["departure_seconds"]
+        if (
+            not arrival_record["feed_id"]
+            or arrival_record["feed_id"] != next_departure_record["feed_id"]
+        ):
+            raise AppError(
+                "OFFICIAL_SCHEDULE_RECORD_REQUIRED",
+                "Arrival and next-departure records must share one active feed version",
+                status=422,
+                details={
+                    "leg": leg["id"],
+                    "source_id": source_id,
+                    "service_date": service_date.isoformat(),
+                    "reason": "SCHEDULE_FEED_VERSION_MISMATCH",
+                },
+            )
+        if departure_seconds < arrival_seconds:
+            raise AppError(
+                "OFFICIAL_SCHEDULE_RECORD_REQUIRED",
+                "The official next-departure record precedes the arrival record",
+                status=422,
+                details={
+                    "leg": leg["id"],
+                    "source_id": source_id,
+                    "service_date": service_date.isoformat(),
+                    "reason": "NEXT_DEPARTURE_PRECEDES_ARRIVAL",
+                },
+            )
+        return {
+            **leg,
+            "scheduled_minutes": arrival_seconds / 60,
+            "next_departure_minutes": departure_seconds / 60,
+            "minimum_transfer_minutes": LIVE_REPLAY_MINIMUM_TRANSFER_MINUTES,
+            "minimum_transfer_source": LIVE_REPLAY_MINIMUM_TRANSFER_SOURCE,
+            "schedule_records": {
+                "arrival": arrival_record,
+                "next_departure": next_departure_record,
+            },
+        }
+
+    def _live_gtfs_stop_time_record(
+        self,
+        *,
+        leg_id: str,
+        source_id: str,
+        provider: str,
+        service_date: date,
+        phase: str,
+        route_id: str,
+        node_id: str,
+        node_order: int,
+        trip_id: str,
+    ) -> dict[str, Any]:
+        try:
+            evidence = self.network_catalog.gtfs_schedule_evidence(
+                provider=provider,
+                graph_route_id=route_id,
+                service_date=service_date.isoformat(),
+                limit=100,
+            )
+        except CatalogError as exc:
+            raise AppError(
+                "OFFICIAL_SCHEDULE_RECORD_REQUIRED",
+                "Live replay could not query official schedule evidence",
+                status=422,
+                details={
+                    "leg": leg_id,
+                    "phase": phase,
+                    "source_id": source_id,
+                    "route_id": route_id,
+                    "node_id": node_id,
+                    "service_date": service_date.isoformat(),
+                    "reason": type(exc).__name__.upper(),
+                },
+            ) from exc
+        if evidence.get("data_gap"):
+            raise AppError(
+                "OFFICIAL_SCHEDULE_RECORD_REQUIRED",
+                "Live replay requires an active official schedule feed",
+                status=422,
+                details={
+                    "leg": leg_id,
+                    "phase": phase,
+                    "source_id": source_id,
+                    "route_id": route_id,
+                    "node_id": node_id,
+                    "service_date": service_date.isoformat(),
+                    "reason": evidence.get("reason") or "SCHEDULE_DATA_GAP",
+                },
+            )
+
+        records: list[
+            tuple[dict[str, Any], dict[str, Any], int | None, int | None]
+        ] = []
+        for trip in evidence.get("trips") or []:
+            if (trip.get("calendar") or {}).get("operates_on_date") is not True:
+                continue
+            if str(trip.get("trip_namespace_id") or "") != trip_id:
+                continue
+            for stop_time in trip.get("stop_times") or []:
+                try:
+                    sequence = int(stop_time.get("stop_sequence"))
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    arrival_seconds = (
+                        int(stop_time["arrival_seconds"])
+                        if stop_time.get("arrival_seconds") is not None
+                        else None
+                    )
+                    departure_seconds = (
+                        int(stop_time["departure_seconds"])
+                        if stop_time.get("departure_seconds") is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    stop_time.get("node_id") == node_id
+                    and sequence == node_order
+                    and (phase != "arrival" or arrival_seconds is not None)
+                    and (phase != "next_departure" or departure_seconds is not None)
+                ):
+                    records.append((trip, stop_time, arrival_seconds, departure_seconds))
+
+        if len(records) != 1:
+            reason = (
+                "AMBIGUOUS_GTFS_SCHEDULE_RECORD"
+                if len(records) > 1
+                else "ROUTE_STOP_SERVICE_DATE_RECORD_REQUIRED"
+            )
+            raise AppError(
+                "OFFICIAL_SCHEDULE_RECORD_REQUIRED",
+                "Live replay requires exactly one official trip-stop-date schedule record",
+                status=422,
+                details={
+                    "leg": leg_id,
+                    "phase": phase,
+                    "source_id": source_id,
+                    "route_id": route_id,
+                    "node_id": node_id,
+                    "node_order": node_order,
+                    "service_date": service_date.isoformat(),
+                    "time_evidence_trip_id": trip_id,
+                    "matching_records": len(records),
+                    "reason": reason,
+                },
+            )
+
+        _trip, stop_time, arrival_seconds, departure_seconds = records[0]
+        feed = evidence.get("feed") or {}
+        return {
+            "basis": evidence.get("basis"),
+            "source_id": source_id,
+            "provider": provider,
+            "feed_id": feed.get("feed_id"),
+            "service_date": service_date.isoformat(),
+            "graph_route_id": route_id,
+            "node_id": node_id,
+            "node_order": node_order,
+            "trip_id": trip_id,
+            "arrival_time": stop_time.get("arrival_time"),
+            "arrival_seconds": arrival_seconds,
+            "departure_time": stop_time.get("departure_time"),
+            "departure_seconds": departure_seconds,
         }
 
     def _replay_leg_result(
@@ -1560,7 +2008,13 @@ class BusroService:
             "node_id": leg["node_id"],
             "node_order": leg["node_order"],
             "vehicle_no": leg["vehicle_no"],
+            "time_evidence_source": leg["time_evidence_source"],
         }
+        if leg.get("minimum_transfer_source") is not None:
+            base["minimum_transfer_source"] = leg["minimum_transfer_source"]
+            base["minimum_transfer_minutes"] = leg["minimum_transfer_minutes"]
+        if leg.get("schedule_records") is not None:
+            base["schedule_records"] = leg["schedule_records"]
         if not matching:
             reason = "NO_PASSAGE_EVIDENCE"
             if anomalies:
@@ -1857,6 +2311,16 @@ class BusroService:
         parsed = str(value or "")
         if not IDENTIFIER_RE.fullmatch(parsed):
             raise AppError("INVALID_IDENTIFIER", f"{field} must be 1-64 safe identifier characters")
+        return parsed
+
+    @staticmethod
+    def _transport_identifier(value: Any, field: str) -> str:
+        parsed = str(value or "")
+        if not TRANSPORT_IDENTIFIER_RE.fullmatch(parsed):
+            raise AppError(
+                "INVALID_IDENTIFIER",
+                f"{field} must be a 1-96 character transport identifier",
+            )
         return parsed
 
     def _optional_identifier(self, value: Any, field: str) -> str | None:

@@ -2,7 +2,8 @@
 
 CSV catalogs and authoritative route-stop sequences are deliberately separate.
 Imported IDs are never joined by resemblance, name, or geographic proximity.
-Only ``hydrate_route_sequence`` can create ordered route topology.
+Only explicit authoritative hydration or atomic GTFS activation can create
+ordered route topology.
 """
 
 from __future__ import annotations
@@ -54,8 +55,14 @@ MAX_SEARCH_LIMIT = 100
 MAX_QUERY_CHARS = 100
 MAX_TOPOLOGY_PAGE_ITEMS = 100
 MAX_TOPOLOGY_PAGE_BYTES = 512 * 1024
+MAX_GTFS_ID_CHARS = 512
+MAX_GTFS_EVIDENCE_TRIPS = 100
+MAX_GTFS_EVIDENCE_STOP_TIMES = 10_000
+MAX_GTFS_PATTERNS = 500_000
+MAX_GTFS_STAGE_BYTES = 64 * 1024 * 1024 * 1024
 _CODE = re.compile(r"^[0-9A-Za-z_.:-]{1,96}$")
 _TRANSPORT_IDENTIFIER = re.compile(r"^[0-9A-Za-z가-힣_.:-]{1,96}$")
+_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 class CatalogError(ValueError):
@@ -176,6 +183,33 @@ def _safe_transport_identifier(value: Any, field: str) -> str:
     if not _TRANSPORT_IDENTIFIER.fullmatch(text):
         raise CatalogValidationError(f"{field} has an invalid transport identifier")
     return text
+
+
+def _raw_gtfs_id(value: Any, field: str) -> str:
+    """Preserve a provider-owned GTFS ID exactly without guessing joins."""
+    text = "" if value is None else str(value)
+    if not text:
+        raise CatalogValidationError(f"{field} is required")
+    if len(text) > MAX_GTFS_ID_CHARS:
+        raise CatalogLimitError(f"{field} exceeds {MAX_GTFS_ID_CHARS} characters")
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        raise CatalogValidationError(f"{field} contains control characters")
+    return text
+
+
+def _sha256(value: Any, field: str = "sha256") -> str:
+    text = _safe_text(value, field, required=True, maximum=64).lower()
+    if not _SHA256.fullmatch(text):
+        raise CatalogValidationError(f"{field} must be a 64-character SHA-256")
+    return text
+
+
+def _gtfs_namespaced_id(provider: str, kind: str, raw_id: str) -> str:
+    marker = {"STOP": "S", "ROUTE": "R", "TRIP": "T", "SERVICE": "V"}[kind]
+    digest = hashlib.sha256(
+        _canonical(["GTFS", provider, kind, raw_id]).encode("utf-8")
+    ).hexdigest()
+    return f"GTFS:{provider}:{marker}{digest[:20]}"
 
 
 def _coordinate(value: Any, field: str, minimum: float, maximum: float) -> float:
@@ -354,6 +388,151 @@ class NetworkCatalog:
                     sequence_id TEXT NOT NULL REFERENCES route_sequence_versions(sequence_id),
                     PRIMARY KEY(city_code,route_id)
                 );
+                CREATE TABLE IF NOT EXISTS gtfs_feed_versions (
+                    feed_id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    source_date TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    imported_at TEXT NOT NULL,
+                    member_manifest_json TEXT NOT NULL,
+                    UNIQUE(provider,source_url,source_date,sha256)
+                );
+                CREATE TABLE IF NOT EXISTS active_gtfs_feeds (
+                    provider TEXT PRIMARY KEY,
+                    feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id)
+                );
+                CREATE TABLE IF NOT EXISTS gtfs_feed_tables (
+                    feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id) ON DELETE CASCADE,
+                    file_name TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    byte_count INTEGER NOT NULL,
+                    row_count INTEGER NOT NULL,
+                    PRIMARY KEY(feed_id,file_name),
+                    CHECK(byte_count >= 0 AND row_count >= 0)
+                );
+                CREATE TABLE IF NOT EXISTS gtfs_id_aliases (
+                    feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id) ON DELETE CASCADE,
+                    entity_type TEXT NOT NULL,
+                    raw_id TEXT NOT NULL,
+                    namespaced_id TEXT NOT NULL,
+                    PRIMARY KEY(feed_id,entity_type,raw_id),
+                    CHECK(entity_type IN ('STOP','ROUTE','TRIP','SERVICE'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_gtfs_alias_namespace
+                    ON gtfs_id_aliases(feed_id,entity_type,namespaced_id);
+                CREATE TABLE IF NOT EXISTS gtfs_stops (
+                    feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id) ON DELETE CASCADE,
+                    raw_stop_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    stop_name TEXT NOT NULL,
+                    latitude REAL,
+                    longitude REAL,
+                    PRIMARY KEY(feed_id,raw_stop_id),
+                    UNIQUE(feed_id,node_id)
+                );
+                CREATE TABLE IF NOT EXISTS gtfs_routes (
+                    feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id) ON DELETE CASCADE,
+                    raw_route_id TEXT NOT NULL,
+                    route_namespace_id TEXT NOT NULL,
+                    route_short_name TEXT NOT NULL,
+                    route_long_name TEXT NOT NULL,
+                    route_type INTEGER NOT NULL,
+                    PRIMARY KEY(feed_id,raw_route_id),
+                    UNIQUE(feed_id,route_namespace_id)
+                );
+                CREATE TABLE IF NOT EXISTS gtfs_services (
+                    feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id) ON DELETE CASCADE,
+                    raw_service_id TEXT NOT NULL,
+                    service_namespace_id TEXT NOT NULL,
+                    monday INTEGER NOT NULL,
+                    tuesday INTEGER NOT NULL,
+                    wednesday INTEGER NOT NULL,
+                    thursday INTEGER NOT NULL,
+                    friday INTEGER NOT NULL,
+                    saturday INTEGER NOT NULL,
+                    sunday INTEGER NOT NULL,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    PRIMARY KEY(feed_id,raw_service_id),
+                    UNIQUE(feed_id,service_namespace_id),
+                    CHECK(monday IN (0,1) AND tuesday IN (0,1) AND wednesday IN (0,1)
+                      AND thursday IN (0,1) AND friday IN (0,1) AND saturday IN (0,1)
+                      AND sunday IN (0,1))
+                );
+                CREATE TABLE IF NOT EXISTS gtfs_calendar_dates (
+                    feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id) ON DELETE CASCADE,
+                    raw_service_id TEXT NOT NULL,
+                    service_date TEXT NOT NULL,
+                    exception_type INTEGER NOT NULL,
+                    PRIMARY KEY(feed_id,raw_service_id,service_date),
+                    FOREIGN KEY(feed_id,raw_service_id)
+                      REFERENCES gtfs_services(feed_id,raw_service_id) ON DELETE CASCADE,
+                    CHECK(exception_type IN (1,2))
+                );
+                CREATE TABLE IF NOT EXISTS gtfs_patterns (
+                    feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id) ON DELETE CASCADE,
+                    pattern_id TEXT NOT NULL,
+                    raw_route_id TEXT NOT NULL,
+                    graph_city_code TEXT NOT NULL,
+                    graph_route_id TEXT NOT NULL,
+                    pattern_sha256 TEXT NOT NULL,
+                    direction_id INTEGER,
+                    stop_count INTEGER NOT NULL,
+                    representative_trip_id TEXT NOT NULL,
+                    sequence_id TEXT NOT NULL REFERENCES route_sequence_versions(sequence_id),
+                    PRIMARY KEY(feed_id,pattern_id),
+                    UNIQUE(feed_id,graph_city_code,graph_route_id),
+                    FOREIGN KEY(feed_id,raw_route_id)
+                      REFERENCES gtfs_routes(feed_id,raw_route_id) ON DELETE CASCADE,
+                    CHECK(direction_id IS NULL OR direction_id IN (0,1)),
+                    CHECK(stop_count >= 2)
+                );
+                CREATE TABLE IF NOT EXISTS gtfs_trips (
+                    feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id) ON DELETE CASCADE,
+                    raw_trip_id TEXT NOT NULL,
+                    trip_namespace_id TEXT NOT NULL,
+                    raw_route_id TEXT NOT NULL,
+                    raw_service_id TEXT NOT NULL,
+                    pattern_id TEXT,
+                    direction_id INTEGER,
+                    trip_headsign TEXT NOT NULL,
+                    PRIMARY KEY(feed_id,raw_trip_id),
+                    UNIQUE(feed_id,trip_namespace_id),
+                    FOREIGN KEY(feed_id,raw_route_id)
+                      REFERENCES gtfs_routes(feed_id,raw_route_id) ON DELETE CASCADE,
+                    FOREIGN KEY(feed_id,raw_service_id)
+                      REFERENCES gtfs_services(feed_id,raw_service_id) ON DELETE CASCADE,
+                    FOREIGN KEY(feed_id,pattern_id)
+                      REFERENCES gtfs_patterns(feed_id,pattern_id) ON DELETE CASCADE,
+                    CHECK(direction_id IS NULL OR direction_id IN (0,1))
+                );
+                CREATE TABLE IF NOT EXISTS gtfs_stop_times (
+                    feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id) ON DELETE CASCADE,
+                    raw_trip_id TEXT NOT NULL,
+                    stop_sequence INTEGER NOT NULL,
+                    raw_stop_id TEXT NOT NULL,
+                    arrival_time TEXT,
+                    arrival_seconds INTEGER,
+                    departure_time TEXT,
+                    departure_seconds INTEGER,
+                    pickup_type INTEGER,
+                    drop_off_type INTEGER,
+                    PRIMARY KEY(feed_id,raw_trip_id,stop_sequence),
+                    FOREIGN KEY(feed_id,raw_trip_id)
+                      REFERENCES gtfs_trips(feed_id,raw_trip_id) ON DELETE CASCADE,
+                    FOREIGN KEY(feed_id,raw_stop_id)
+                      REFERENCES gtfs_stops(feed_id,raw_stop_id) ON DELETE CASCADE,
+                    CHECK(stop_sequence >= 0),
+                    CHECK(arrival_seconds IS NULL OR arrival_seconds BETWEEN 0 AND 172799),
+                    CHECK(departure_seconds IS NULL OR departure_seconds BETWEEN 0 AND 172799),
+                    CHECK(pickup_type IS NULL OR pickup_type BETWEEN 0 AND 3),
+                    CHECK(drop_off_type IS NULL OR drop_off_type BETWEEN 0 AND 3)
+                );
+                CREATE INDEX IF NOT EXISTS idx_gtfs_trips_pattern
+                    ON gtfs_trips(feed_id,pattern_id,raw_trip_id);
+                CREATE INDEX IF NOT EXISTS idx_gtfs_stop_times_stop
+                    ON gtfs_stop_times(feed_id,raw_stop_id,raw_trip_id);
                 CREATE TABLE IF NOT EXISTS topology_targets (
                     provider TEXT NOT NULL,
                     city_code TEXT NOT NULL,
@@ -895,6 +1074,711 @@ class NetworkCatalog:
                 (city, route),
             ).fetchone()
         return dict(row) if row else None
+
+    def activate_gtfs_staged_feed(
+        self,
+        *,
+        stage_path: Path,
+        provider: str,
+        source_url: str,
+        source_date: str,
+        feed_sha256: str,
+        member_manifest: Iterable[Mapping[str, Any]],
+        table_provenance: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Atomically activate a fully validated, disk-backed GTFS stage."""
+        provider_id = _safe_code(provider, "provider")
+        if len(provider_id) > 24:
+            raise CatalogLimitError("provider exceeds 24 characters for GTFS namespacing")
+        url = _source_url(source_url)
+        dated = _source_date(source_date)
+        digest = _sha256(feed_sha256, "feed_sha256")
+        identity = hashlib.sha256(
+            _canonical(["GTFS", provider_id, url, dated, digest]).encode("utf-8")
+        ).hexdigest()
+        feed_id = "gtfs_" + identity[:24]
+        graph_city_code = f"GTFS-{provider_id}"
+        captured_at = f"{dated}T00:00:00Z"
+        sequence_source = f"GTFS:{provider_id}:{feed_id}"
+        path = Path(stage_path).resolve()
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise CatalogValidationError("GTFS staging path must be a non-empty file")
+        if path.stat().st_size > MAX_GTFS_STAGE_BYTES:
+            raise CatalogLimitError(f"GTFS staging database exceeds {MAX_GTFS_STAGE_BYTES} bytes")
+        if path == self.path.resolve():
+            raise CatalogValidationError("GTFS staging database must differ from the catalog DB")
+
+        manifest: list[dict[str, Any]] = []
+        seen_members: set[str] = set()
+        for index, raw in enumerate(member_manifest):
+            if index >= 128 or not isinstance(raw, Mapping):
+                raise CatalogLimitError("member_manifest exceeds 128 valid entries")
+            name = _safe_text(raw.get("name"), "member name", required=True, maximum=512)
+            parts = name.split("/")
+            if (
+                not 1 <= len(parts) <= 8
+                or any(
+                    part in {"", ".", ".."}
+                    or part != part.strip()
+                    or len(part) > 128
+                    or ":" in part
+                    or "\\" in part
+                    for part in parts
+                )
+                or name.casefold() in seen_members
+            ):
+                raise CatalogValidationError("member_manifest contains an unsafe or duplicate name")
+            seen_members.add(name.casefold())
+            try:
+                byte_count = int(raw.get("byte_count"))
+                compressed_bytes = int(raw.get("compressed_bytes"))
+            except (TypeError, ValueError) as exc:
+                raise CatalogValidationError("member sizes must be integers") from exc
+            if byte_count < 0 or compressed_bytes < 0:
+                raise CatalogValidationError("member sizes cannot be negative")
+            manifest.append(
+                {"name": name, "byte_count": byte_count, "compressed_bytes": compressed_bytes}
+            )
+        if not manifest:
+            raise CatalogValidationError("member_manifest is required")
+        manifest_json = _canonical(sorted(manifest, key=lambda item: item["name"]))
+        if len(manifest_json) > 128 * 1024:
+            raise CatalogLimitError("member_manifest is too large")
+
+        required_files = {
+            "stops.txt", "routes.txt", "trips.txt", "stop_times.txt", "calendar.txt"
+        }
+        allowed_files = required_files | {"calendar_dates.txt"}
+        if not required_files.issubset(table_provenance):
+            missing = ", ".join(sorted(required_files - set(table_provenance)))
+            raise CatalogValidationError(f"GTFS table provenance is missing: {missing}")
+        if set(table_provenance) - allowed_files:
+            raise CatalogValidationError("GTFS table provenance contains an unsupported file")
+        tables: list[dict[str, Any]] = []
+        for name in sorted(table_provenance):
+            raw = table_provenance[name]
+            if not isinstance(raw, Mapping):
+                raise CatalogValidationError("table provenance entries must be objects")
+            try:
+                byte_count = int(raw.get("byte_count"))
+                row_count = int(raw.get("row_count"))
+            except (TypeError, ValueError) as exc:
+                raise CatalogValidationError("GTFS table counts must be integers") from exc
+            if byte_count < 0 or row_count < 0:
+                raise CatalogValidationError("GTFS table counts cannot be negative")
+            tables.append(
+                {
+                    "file_name": name,
+                    "sha256": _sha256(raw.get("sha256"), f"{name} sha256"),
+                    "byte_count": byte_count,
+                    "row_count": row_count,
+                }
+            )
+
+        imported_at = self.clock().astimezone(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        created = False
+        activated = False
+        revision = 0
+        counts: dict[str, int] = {}
+        required_stage_tables = {
+            "stage_meta", "stops", "routes", "services", "calendar_dates",
+            "trips", "stop_times", "patterns", "pattern_stops",
+        }
+        stage_count_map = {
+            "stops.txt": "stops",
+            "routes.txt": "routes",
+            "calendar.txt": "services",
+            "calendar_dates.txt": "calendar_dates",
+            "trips.txt": "trips",
+            "stop_times.txt": "stop_times",
+        }
+        try:
+            with self.connect() as connection:
+                connection.execute("PRAGMA temp_store=MEMORY")
+                connection.execute("ATTACH DATABASE ? AS gtfs_stage", (str(path),))
+                try:
+                    stage_tables = {
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT name FROM gtfs_stage.sqlite_master WHERE type='table'"
+                        ).fetchall()
+                    }
+                    if not required_stage_tables.issubset(stage_tables):
+                        raise CatalogValidationError("GTFS staging schema is incomplete")
+                    meta = {
+                        row["key"]: row["value"]
+                        for row in connection.execute(
+                            "SELECT key,value FROM gtfs_stage.stage_meta"
+                        ).fetchall()
+                    }
+                    if meta.get("complete") != "1" or meta.get("provider") != provider_id:
+                        raise CatalogValidationError("GTFS staging completion marker is invalid")
+                    integrity = connection.execute(
+                        "PRAGMA gtfs_stage.integrity_check"
+                    ).fetchone()[0]
+                    if integrity != "ok":
+                        raise CatalogValidationError("GTFS staging database failed integrity_check")
+                    declared_counts = {
+                        item["file_name"]: item["row_count"] for item in tables
+                    }
+                    for file_name, stage_table in stage_count_map.items():
+                        stage_count = int(
+                            connection.execute(
+                                f"SELECT COUNT(*) FROM gtfs_stage.{stage_table}"
+                            ).fetchone()[0]
+                        )
+                        if file_name in declared_counts:
+                            if stage_count != declared_counts[file_name]:
+                                raise CatalogValidationError(
+                                    "GTFS staging counts do not match table provenance"
+                                )
+                        elif stage_count:
+                            raise CatalogValidationError(
+                                "GTFS staging contains undeclared optional rows"
+                            )
+                        counts[stage_table] = stage_count
+                    counts["bus_patterns"] = int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM gtfs_stage.patterns"
+                        ).fetchone()[0]
+                    )
+                    if not 0 <= counts["bus_patterns"] <= MAX_GTFS_PATTERNS:
+                        raise CatalogLimitError(
+                            f"GTFS bus patterns cannot exceed {MAX_GTFS_PATTERNS} rows"
+                        )
+                    try:
+                        staged_meta_counts = json.loads(meta.get("counts_json", "{}"))
+                    except json.JSONDecodeError as exc:
+                        raise CatalogValidationError("GTFS staging counts marker is invalid") from exc
+                    for file_name, value in declared_counts.items():
+                        if staged_meta_counts.get(file_name) != value:
+                            raise CatalogValidationError("GTFS staging counts marker is stale")
+                    if staged_meta_counts.get("bus_patterns") != counts["bus_patterns"]:
+                        raise CatalogValidationError("GTFS staging pattern count is stale")
+
+                    connection.execute(
+                        "CREATE TEMP TABLE gtfs_sequence_map("
+                        "pattern_id TEXT PRIMARY KEY,sequence_id TEXT NOT NULL,"
+                        "sequence_sha256 TEXT NOT NULL,stop_count INTEGER NOT NULL)"
+                    )
+                    ordered_pattern_sql = (
+                        "SELECT p.pattern_id,p.raw_route_id,p.graph_city_code,p.graph_route_id,"
+                        "p.pattern_sha256,p.direction_mask,p.stop_count,"
+                        "ps.node_order,ps.raw_stop_id,ps.node_id,ps.node_name,"
+                        "ps.latitude,ps.longitude,ps.direction "
+                        "FROM gtfs_stage.pattern_stops ps "
+                        "JOIN gtfs_stage.patterns p ON p.pattern_id=ps.pattern_id "
+                        "ORDER BY ps.pattern_id,ps.node_order"
+                    )
+                    query_plan = " ".join(
+                        str(row[3])
+                        for row in connection.execute(
+                            "EXPLAIN QUERY PLAN " + ordered_pattern_sql
+                        ).fetchall()
+                    ).upper()
+                    if "USE TEMP B-TREE" in query_plan:
+                        raise CatalogValidationError(
+                            "GTFS sequence derivation would require an unbounded temp sort"
+                        )
+                    current_pattern: dict[str, Any] | None = None
+                    pattern_stops: list[Mapping[str, Any]] = []
+                    raw_stop_ids: list[str] = []
+                    sequence_batch: list[tuple[Any, ...]] = []
+
+                    def finish_pattern() -> None:
+                        nonlocal current_pattern, pattern_stops, raw_stop_ids
+                        if current_pattern is None:
+                            return
+                        expected_count = int(current_pattern["stop_count"])
+                        if len(pattern_stops) != expected_count:
+                            raise CatalogValidationError("GTFS staged pattern stops are incomplete")
+                        pattern_sha = hashlib.sha256(
+                            _canonical(
+                                ["GTFS_BUS_PATTERN", provider_id,
+                                 current_pattern["raw_route_id"], raw_stop_ids]
+                            ).encode("utf-8")
+                        ).hexdigest()
+                        route_sha = hashlib.sha256(
+                            _canonical(
+                                [provider_id, current_pattern["raw_route_id"]]
+                            ).encode("utf-8")
+                        ).hexdigest()
+                        expected_pattern_id = "gpat_" + pattern_sha
+                        expected_graph_route = (
+                            f"GTFS:{provider_id}:R{route_sha[:20]}:P{pattern_sha[:40]}"
+                        )
+                        if (
+                            current_pattern["pattern_id"] != expected_pattern_id
+                            or current_pattern["pattern_sha256"] != pattern_sha
+                            or current_pattern["graph_city_code"] != graph_city_code
+                            or current_pattern["graph_route_id"] != expected_graph_route
+                        ):
+                            raise CatalogValidationError("GTFS staged pattern namespace is invalid")
+                        route_id = _safe_transport_identifier(
+                            current_pattern["graph_route_id"], "graph_route_id"
+                        )
+                        route_records = self._route_stop_records(
+                            graph_city_code, route_id, pattern_stops
+                        )
+                        sequence_sha = hashlib.sha256(
+                            _canonical([asdict(item) for item in route_records]).encode("utf-8")
+                        ).hexdigest()
+                        sequence_identity = hashlib.sha256(
+                            _canonical(
+                                [graph_city_code, route_id, sequence_source,
+                                 captured_at, sequence_sha]
+                            ).encode("utf-8")
+                        ).hexdigest()
+                        sequence_batch.append(
+                            (
+                                current_pattern["pattern_id"],
+                                "seq_" + sequence_identity[:24],
+                                sequence_sha,
+                                expected_count,
+                            )
+                        )
+                        if len(sequence_batch) >= 2_000:
+                            connection.executemany(
+                                "INSERT INTO temp.gtfs_sequence_map VALUES(?,?,?,?)",
+                                sequence_batch,
+                            )
+                            sequence_batch.clear()
+                        current_pattern = None
+                        pattern_stops = []
+                        raw_stop_ids = []
+
+                    for row in connection.execute(ordered_pattern_sql):
+                        if current_pattern is None or row["pattern_id"] != current_pattern["pattern_id"]:
+                            finish_pattern()
+                            current_pattern = {
+                                key: row[key]
+                                for key in (
+                                    "pattern_id", "raw_route_id", "graph_city_code",
+                                    "graph_route_id", "pattern_sha256", "direction_mask",
+                                    "stop_count",
+                                )
+                            }
+                        raw_stop_id = _raw_gtfs_id(row["raw_stop_id"], "raw_stop_id")
+                        expected_node_id = _gtfs_namespaced_id(
+                            provider_id, "STOP", raw_stop_id
+                        )
+                        direction_mask = int(current_pattern["direction_mask"])
+                        expected_direction = (
+                            "GTFS:0" if direction_mask == 1
+                            else "GTFS:1" if direction_mask == 2 else "GTFS"
+                        )
+                        if row["node_id"] != expected_node_id or row["direction"] != expected_direction:
+                            raise CatalogValidationError("GTFS staged stop namespace is invalid")
+                        pattern_stops.append(
+                            {
+                                "node_id": row["node_id"],
+                                "node_name": row["node_name"],
+                                "node_order": row["node_order"],
+                                "latitude": row["latitude"],
+                                "longitude": row["longitude"],
+                                "direction": row["direction"],
+                            }
+                        )
+                        raw_stop_ids.append(raw_stop_id)
+                    finish_pattern()
+                    if sequence_batch:
+                        connection.executemany(
+                            "INSERT INTO temp.gtfs_sequence_map VALUES(?,?,?,?)",
+                            sequence_batch,
+                        )
+                    mapped_count = int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM temp.gtfs_sequence_map"
+                        ).fetchone()[0]
+                    )
+                    if mapped_count != counts["bus_patterns"]:
+                        raise CatalogValidationError("GTFS sequence map is incomplete")
+
+                    connection.commit()
+                    connection.execute("BEGIN IMMEDIATE")
+                    existing = connection.execute(
+                        "SELECT * FROM gtfs_feed_versions WHERE feed_id=?", (feed_id,)
+                    ).fetchone()
+                    if existing is None:
+                        created = True
+                        connection.execute(
+                            "INSERT INTO gtfs_feed_versions VALUES(?,?,?,?,?,?,?)",
+                            (feed_id, provider_id, url, dated, digest, imported_at, manifest_json),
+                        )
+                        connection.executemany(
+                            "INSERT INTO gtfs_feed_tables VALUES(?,?,?,?,?)",
+                            [
+                                (feed_id, item["file_name"], item["sha256"],
+                                 item["byte_count"], item["row_count"])
+                                for item in tables
+                            ],
+                        )
+                        connection.execute(
+                            "INSERT INTO gtfs_stops "
+                            "SELECT ?,raw_stop_id,node_id,stop_name,latitude,longitude FROM gtfs_stage.stops",
+                            (feed_id,),
+                        )
+                        connection.execute(
+                            "INSERT INTO gtfs_routes "
+                            "SELECT ?,raw_route_id,route_namespace_id,route_short_name,route_long_name,route_type FROM gtfs_stage.routes",
+                            (feed_id,),
+                        )
+                        connection.execute(
+                            "INSERT INTO gtfs_services "
+                            "SELECT ?,raw_service_id,service_namespace_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date FROM gtfs_stage.services",
+                            (feed_id,),
+                        )
+                        connection.execute(
+                            "INSERT INTO gtfs_calendar_dates "
+                            "SELECT ?,raw_service_id,service_date,exception_type FROM gtfs_stage.calendar_dates",
+                            (feed_id,),
+                        )
+                        connection.execute(
+                            "INSERT OR IGNORE INTO route_sequence_versions "
+                            "SELECT m.sequence_id,p.graph_city_code,p.graph_route_id,?,?,"
+                            "m.sequence_sha256,m.stop_count,? "
+                            "FROM gtfs_stage.patterns p JOIN temp.gtfs_sequence_map m ON m.pattern_id=p.pattern_id",
+                            (sequence_source, captured_at, imported_at),
+                        )
+                        collision = connection.execute(
+                            "SELECT 1 FROM gtfs_stage.patterns p "
+                            "JOIN temp.gtfs_sequence_map m ON m.pattern_id=p.pattern_id "
+                            "JOIN route_sequence_versions v ON v.sequence_id=m.sequence_id "
+                            "WHERE v.city_code<>p.graph_city_code OR v.route_id<>p.graph_route_id "
+                            "OR v.source<>? OR v.captured_at<>? OR v.sha256<>m.sequence_sha256 "
+                            "OR v.stop_count<>m.stop_count LIMIT 1",
+                            (sequence_source, captured_at),
+                        ).fetchone()
+                        if collision is not None:
+                            raise CatalogValidationError("GTFS route sequence identity conflicts")
+                        connection.execute(
+                            "INSERT OR IGNORE INTO route_sequence_stops "
+                            "SELECT m.sequence_id,ps.node_order,ps.node_id,ps.node_name,"
+                            "ps.latitude,ps.longitude,ps.direction "
+                            "FROM gtfs_stage.pattern_stops ps "
+                            "JOIN temp.gtfs_sequence_map m ON m.pattern_id=ps.pattern_id"
+                        )
+                        missing_sequence_stops = connection.execute(
+                            "SELECT 1 FROM temp.gtfs_sequence_map m WHERE "
+                            "(SELECT COUNT(*) FROM route_sequence_stops s WHERE s.sequence_id=m.sequence_id)<>m.stop_count LIMIT 1"
+                        ).fetchone()
+                        if missing_sequence_stops is not None:
+                            raise CatalogValidationError("GTFS route sequence stops are incomplete")
+                        connection.execute(
+                            "INSERT INTO gtfs_patterns "
+                            "SELECT ?,p.pattern_id,p.raw_route_id,p.graph_city_code,p.graph_route_id,"
+                            "p.pattern_sha256,CASE p.direction_mask WHEN 1 THEN 0 WHEN 2 THEN 1 ELSE NULL END,"
+                            "p.stop_count,p.representative_trip_id,m.sequence_id "
+                            "FROM gtfs_stage.patterns p JOIN temp.gtfs_sequence_map m ON m.pattern_id=p.pattern_id",
+                            (feed_id,),
+                        )
+                        connection.execute(
+                            "INSERT INTO gtfs_trips "
+                            "SELECT ?,raw_trip_id,trip_namespace_id,raw_route_id,raw_service_id,"
+                            "pattern_id,direction_id,trip_headsign FROM gtfs_stage.trips",
+                            (feed_id,),
+                        )
+                        connection.execute(
+                            "INSERT INTO gtfs_stop_times "
+                            "SELECT ?,raw_trip_id,stop_sequence,raw_stop_id,arrival_time,arrival_seconds,"
+                            "departure_time,departure_seconds,pickup_type,drop_off_type FROM gtfs_stage.stop_times",
+                            (feed_id,),
+                        )
+                        for entity_type, table_name, raw_column, namespace_column in (
+                            ("STOP", "stops", "raw_stop_id", "node_id"),
+                            ("ROUTE", "routes", "raw_route_id", "route_namespace_id"),
+                            ("TRIP", "trips", "raw_trip_id", "trip_namespace_id"),
+                            ("SERVICE", "services", "raw_service_id", "service_namespace_id"),
+                        ):
+                            connection.execute(
+                                f"INSERT INTO gtfs_id_aliases "
+                                f"SELECT ?,?,{raw_column},{namespace_column} FROM gtfs_stage.{table_name}",
+                                (feed_id, entity_type),
+                            )
+                    else:
+                        if (
+                            existing["provider"] != provider_id
+                            or existing["source_url"] != url
+                            or existing["source_date"] != dated
+                            or existing["sha256"] != digest
+                            or existing["member_manifest_json"] != manifest_json
+                        ):
+                            raise CatalogValidationError("existing GTFS feed identity conflicts")
+                        existing_tables = {
+                            row["file_name"]: (
+                                row["sha256"], row["byte_count"], row["row_count"]
+                            )
+                            for row in connection.execute(
+                                "SELECT file_name,sha256,byte_count,row_count "
+                                "FROM gtfs_feed_tables WHERE feed_id=?",
+                                (feed_id,),
+                            ).fetchall()
+                        }
+                        expected_tables = {
+                            item["file_name"]: (
+                                item["sha256"], item["byte_count"], item["row_count"]
+                            )
+                            for item in tables
+                        }
+                        if existing_tables != expected_tables:
+                            raise CatalogValidationError("existing GTFS provenance conflicts")
+                        final_count_map = {
+                            "stops": "gtfs_stops", "routes": "gtfs_routes",
+                            "services": "gtfs_services", "calendar_dates": "gtfs_calendar_dates",
+                            "trips": "gtfs_trips", "stop_times": "gtfs_stop_times",
+                            "bus_patterns": "gtfs_patterns",
+                        }
+                        for count_key, final_table in final_count_map.items():
+                            final_count = int(
+                                connection.execute(
+                                    f"SELECT COUNT(*) FROM {final_table} WHERE feed_id=?",
+                                    (feed_id,),
+                                ).fetchone()[0]
+                            )
+                            if final_count != counts[count_key]:
+                                raise CatalogValidationError("existing GTFS feed rows are incomplete")
+
+                    previous = connection.execute(
+                        "SELECT feed_id FROM active_gtfs_feeds WHERE provider=?",
+                        (provider_id,),
+                    ).fetchone()
+                    previous_feed_id = previous["feed_id"] if previous else None
+                    if previous_feed_id and previous_feed_id != feed_id:
+                        for old in connection.execute(
+                            "SELECT graph_city_code,graph_route_id FROM gtfs_patterns WHERE feed_id=?",
+                            (previous_feed_id,),
+                        ):
+                            deleted = connection.execute(
+                                "DELETE FROM active_route_sequences WHERE city_code=? AND route_id=?",
+                                (old["graph_city_code"], old["graph_route_id"]),
+                            ).rowcount
+                            activated = activated or bool(deleted)
+                    for pattern in connection.execute(
+                        "SELECT p.graph_city_code,p.graph_route_id,m.sequence_id "
+                        "FROM gtfs_stage.patterns p JOIN temp.gtfs_sequence_map m ON m.pattern_id=p.pattern_id"
+                    ):
+                        active = connection.execute(
+                            "SELECT sequence_id FROM active_route_sequences WHERE city_code=? AND route_id=?",
+                            (pattern["graph_city_code"], pattern["graph_route_id"]),
+                        ).fetchone()
+                        if active is None or active["sequence_id"] != pattern["sequence_id"]:
+                            connection.execute(
+                                "INSERT INTO active_route_sequences VALUES(?,?,?) "
+                                "ON CONFLICT(city_code,route_id) DO UPDATE SET sequence_id=excluded.sequence_id",
+                                (pattern["graph_city_code"], pattern["graph_route_id"], pattern["sequence_id"]),
+                            )
+                            activated = True
+                    if previous_feed_id != feed_id:
+                        connection.execute(
+                            "INSERT INTO active_gtfs_feeds VALUES(?,?) "
+                            "ON CONFLICT(provider) DO UPDATE SET feed_id=excluded.feed_id",
+                            (provider_id, feed_id),
+                        )
+                        activated = True
+                    if activated:
+                        revision = self._bump_revision(connection)
+                    else:
+                        row = connection.execute(
+                            "SELECT value FROM catalog_meta WHERE key='revision'"
+                        ).fetchone()
+                        revision = int(row[0] if row else 0)
+                    connection.commit()
+                except Exception:
+                    if connection.in_transaction:
+                        connection.rollback()
+                    raise
+                finally:
+                    connection.execute("DETACH DATABASE gtfs_stage")
+        except sqlite3.IntegrityError as exc:
+            raise CatalogValidationError(
+                "GTFS staged feed contains duplicate or conflicting identifiers"
+            ) from exc
+        if activated:
+            self._invalidate_cache()
+        return {
+            "feed_id": feed_id,
+            "provider": provider_id,
+            "source_url": url,
+            "source_date": dated,
+            "sha256": digest,
+            "created": created,
+            "activated": activated,
+            "revision": revision,
+            "counts": counts,
+            "graph_namespace": graph_city_code,
+            "schedule_evidence_only": True,
+            "eligible_for_success_rate": False,
+        }
+
+    def gtfs_feed_evidence(self, *, provider: str) -> dict[str, Any]:
+        """Return provenance for the active feed, never a validated success model."""
+        provider_id = _safe_code(provider, "provider")
+        with self.connect() as connection:
+            feed = connection.execute(
+                "SELECT f.* FROM active_gtfs_feeds a "
+                "JOIN gtfs_feed_versions f ON f.feed_id=a.feed_id WHERE a.provider=?",
+                (provider_id,),
+            ).fetchone()
+            if feed is None:
+                return {
+                    "provider": provider_id,
+                    "data_gap": True,
+                    "reason": "ACTIVE_GTFS_FEED_REQUIRED",
+                    "eligible_for_success_rate": False,
+                }
+            tables = connection.execute(
+                "SELECT file_name,sha256,byte_count,row_count FROM gtfs_feed_tables "
+                "WHERE feed_id=? ORDER BY file_name",
+                (feed["feed_id"],),
+            ).fetchall()
+        return {
+            "provider": provider_id,
+            "data_gap": False,
+            "feed": {
+                "feed_id": feed["feed_id"],
+                "source_url": feed["source_url"],
+                "source_date": feed["source_date"],
+                "sha256": feed["sha256"],
+                "imported_at": feed["imported_at"],
+                "members": json.loads(feed["member_manifest_json"]),
+                "tables": [dict(row) for row in tables],
+            },
+            "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE",
+            "eligible_for_success_rate": False,
+            "validation_required": [
+                "service_calendar_and_exceptions",
+                "publisher_timetable_semantics",
+                "multi_day_observed_passage_history",
+            ],
+        }
+
+    def gtfs_schedule_evidence(
+        self,
+        *,
+        provider: str,
+        graph_route_id: str,
+        service_date: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Read active GTFS trip/calendar rows as evidence only.
+
+        This deliberately does not return a probability or claim that a listed
+        static time operated.  Product replay must independently validate the
+        publisher semantics and combine them with observed passage history.
+        """
+        provider_id = _safe_code(provider, "provider")
+        route_id = _safe_transport_identifier(graph_route_id, "graph_route_id")
+        bounded = max(1, min(int(limit), MAX_GTFS_EVIDENCE_TRIPS))
+        day = _source_date(service_date) if service_date is not None else None
+        feed_evidence = self.gtfs_feed_evidence(provider=provider_id)
+        if feed_evidence.get("data_gap"):
+            return {
+                **feed_evidence,
+                "graph_route_id": route_id,
+                "service_date": day,
+                "trips": [],
+            }
+        feed_id = feed_evidence["feed"]["feed_id"]
+        with self.connect() as connection:
+            pattern = connection.execute(
+                "SELECT p.pattern_id,p.raw_route_id,p.graph_city_code,p.graph_route_id,"
+                "p.pattern_sha256,p.direction_id,p.stop_count,p.sequence_id,"
+                "r.route_namespace_id,r.route_short_name,r.route_long_name,r.route_type "
+                "FROM gtfs_patterns p JOIN gtfs_routes r "
+                "ON r.feed_id=p.feed_id AND r.raw_route_id=p.raw_route_id "
+                "WHERE p.feed_id=? AND p.graph_route_id=?",
+                (feed_id, route_id),
+            ).fetchone()
+            if pattern is None:
+                return {
+                    **feed_evidence,
+                    "data_gap": True,
+                    "reason": "ACTIVE_GTFS_ROUTE_PATTERN_REQUIRED",
+                    "graph_route_id": route_id,
+                    "service_date": day,
+                    "trips": [],
+                }
+            trip_rows = connection.execute(
+                "SELECT t.raw_trip_id,t.trip_namespace_id,t.raw_service_id,t.direction_id,t.trip_headsign,"
+                "s.service_namespace_id,s.monday,s.tuesday,s.wednesday,s.thursday,s.friday,s.saturday,s.sunday,"
+                "s.start_date,s.end_date "
+                "FROM gtfs_trips t JOIN gtfs_services s "
+                "ON s.feed_id=t.feed_id AND s.raw_service_id=t.raw_service_id "
+                "WHERE t.feed_id=? AND t.pattern_id=? ORDER BY t.raw_trip_id LIMIT ?",
+                (feed_id, pattern["pattern_id"], bounded),
+            ).fetchall()
+            trips_result: list[dict[str, Any]] = []
+            remaining_stop_times = MAX_GTFS_EVIDENCE_STOP_TIMES
+            weekday_names = (
+                "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
+            )
+            for trip_row in trip_rows:
+                operates: bool | None = None
+                exception_type: int | None = None
+                if day is not None:
+                    calendar_day = date.fromisoformat(day)
+                    operates = (
+                        trip_row["start_date"] <= day <= trip_row["end_date"]
+                        and int(trip_row[weekday_names[calendar_day.weekday()]]) == 1
+                    )
+                    exception = connection.execute(
+                        "SELECT exception_type FROM gtfs_calendar_dates "
+                        "WHERE feed_id=? AND raw_service_id=? AND service_date=?",
+                        (feed_id, trip_row["raw_service_id"], day),
+                    ).fetchone()
+                    if exception is not None:
+                        exception_type = int(exception["exception_type"])
+                        operates = exception_type == 1
+                if remaining_stop_times <= 0:
+                    stop_rows = []
+                else:
+                    stop_rows = connection.execute(
+                        "SELECT st.stop_sequence,st.arrival_time,st.arrival_seconds,"
+                        "st.departure_time,st.departure_seconds,st.pickup_type,st.drop_off_type,"
+                        "st.raw_stop_id,s.node_id,s.stop_name,s.latitude,s.longitude "
+                        "FROM gtfs_stop_times st JOIN gtfs_stops s "
+                        "ON s.feed_id=st.feed_id AND s.raw_stop_id=st.raw_stop_id "
+                        "WHERE st.feed_id=? AND st.raw_trip_id=? "
+                        "ORDER BY st.stop_sequence LIMIT ?",
+                        (feed_id, trip_row["raw_trip_id"], remaining_stop_times),
+                    ).fetchall()
+                remaining_stop_times -= len(stop_rows)
+                trips_result.append(
+                    {
+                        "raw_trip_id": trip_row["raw_trip_id"],
+                        "trip_namespace_id": trip_row["trip_namespace_id"],
+                        "raw_service_id": trip_row["raw_service_id"],
+                        "service_namespace_id": trip_row["service_namespace_id"],
+                        "direction_id": trip_row["direction_id"],
+                        "trip_headsign": trip_row["trip_headsign"],
+                        "calendar": {
+                            "start_date": trip_row["start_date"],
+                            "end_date": trip_row["end_date"],
+                            "weekdays": {
+                                name: bool(trip_row[name]) for name in weekday_names
+                            },
+                            "service_date": day,
+                            "exception_type": exception_type,
+                            "operates_on_date": operates,
+                        },
+                        "stop_times": [dict(row) for row in stop_rows],
+                    }
+                )
+        pattern_result = dict(pattern)
+        return {
+            **feed_evidence,
+            "data_gap": False,
+            "graph_route_id": route_id,
+            "service_date": day,
+            "pattern": pattern_result,
+            "trips": trips_result,
+            "truncated": len(trip_rows) >= bounded or remaining_stop_times <= 0,
+            "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE",
+            "eligible_for_success_rate": False,
+            "success_probability": None,
+        }
 
     def create_topology_run(
         self,

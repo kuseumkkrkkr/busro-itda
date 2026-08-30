@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 
 
 SERVICE_DIR = Path(__file__).resolve().parent
@@ -33,6 +34,8 @@ DEFAULT_DEV_ORIGINS = (
     "http://localhost:8791",
 )
 
+OPERATOR_TOKEN_RE = re.compile(r"^[\x21-\x7e]{16,256}$")
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -41,6 +44,10 @@ class Settings:
     fixture_mode: bool = False
     tago_service_key: str | None = None
     tago_timeout_seconds: float = 6.0
+    tago_max_concurrent_calls: int = 8
+    tago_admission_timeout_seconds: float = 0.25
+    tago_daily_call_budget: int = 9_000
+    operator_token: str | None = None
     cache_ttl_seconds: int = 30
     catalog_cache_ttl_seconds: int = 86_400
     max_body_bytes: int = 65_536
@@ -61,6 +68,22 @@ class Settings:
             fixture_mode = fixture_override
 
         timeout = min(max(float(os.getenv("TAGO_TIMEOUT_SECONDS", "6")), 1.0), 15.0)
+        max_tago_calls = min(
+            max(int(os.getenv("BUSRO_TAGO_MAX_CONCURRENT_CALLS", "8")), 1), 32
+        )
+        admission_timeout = min(
+            max(float(os.getenv("BUSRO_TAGO_ADMISSION_TIMEOUT_SECONDS", "0.25")), 0.01),
+            2.0,
+        )
+        daily_call_budget = min(
+            max(int(os.getenv("BUSRO_TAGO_DAILY_CALL_BUDGET", "9000")), 1),
+            100_000,
+        )
+        operator_token = os.getenv("BUSRO_OPERATOR_TOKEN") or None
+        if operator_token is not None and not OPERATOR_TOKEN_RE.fullmatch(operator_token):
+            raise ValueError(
+                "BUSRO_OPERATOR_TOKEN must contain 16-256 printable ASCII characters"
+            )
         cache_ttl = min(max(int(os.getenv("BUSRO_CACHE_TTL_SECONDS", "30")), 1), 300)
         catalog_cache_ttl = min(
             max(int(os.getenv("BUSRO_CATALOG_CACHE_TTL_SECONDS", "86400")), 60), 86_400
@@ -81,6 +104,10 @@ class Settings:
             fixture_mode=fixture_mode,
             tago_service_key=os.getenv("TAGO_SERVICE_KEY") or None,
             tago_timeout_seconds=timeout,
+            tago_max_concurrent_calls=max_tago_calls,
+            tago_admission_timeout_seconds=admission_timeout,
+            tago_daily_call_budget=daily_call_budget,
+            operator_token=operator_token,
             cache_ttl_seconds=cache_ttl,
             catalog_cache_ttl_seconds=catalog_cache_ttl,
             max_body_bytes=max_body,

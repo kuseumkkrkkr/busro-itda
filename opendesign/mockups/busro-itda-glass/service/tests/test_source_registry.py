@@ -42,6 +42,15 @@ class SourceRegistryCase(unittest.TestCase):
         self.assertEqual(supplementary["development_daily_quota"], 1000)
         self.assertEqual(supplementary["refresh"]["policy"], "SUPPLEMENTARY_NOT_NATIONWIDE")
 
+        ktdb = registry.search("KTDB", limit=1)[0]
+        self.assertEqual(ktdb["id"], "ktdb-gtfs-2024")
+        self.assertEqual(ktdb["status"], "VERIFIED_SCHEDULE_ORIGIN")
+        self.assertEqual(ktdb["refresh"]["basis_date"], "2024-03")
+        self.assertEqual(
+            ktdb["refresh"]["id_namespace"],
+            "KTDB_NONSTANDARD_NEVER_JOIN_BY_NAME",
+        )
+
         yeongdong = registry.search("영동군", limit=1)[0]
         self.assertEqual(yeongdong["status"], "VERIFIED_SCHEDULE_ORIGIN")
         self.assertEqual(yeongdong["refresh"]["effective_date"], "2026-04-01")

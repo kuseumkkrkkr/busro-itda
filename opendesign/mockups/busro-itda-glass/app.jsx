@@ -70,6 +70,12 @@ function deriveJourneyLegs(journey) {
     const evidenceBlock = replayRow.time_evidence || lastRide?.time_evidence || lastRide?.timetable || lastRide?.replay || {};
     const timeEvidenceSource = cleanIdentifier(replayRow.time_evidence_source || evidenceBlock.source || "");
     const timeEvidenceVerified = replayRow.time_evidence_verified === true || evidenceBlock.verified === true;
+    const timeEvidenceTripId = cleanIdentifier(replayRow.time_evidence_trip_id || evidenceBlock.trip_id || "");
+    const nextRouteId = cleanIdentifier(replayRow.next_route_id || evidenceBlock.next_route_id || "");
+    const nextNodeId = cleanIdentifier(replayRow.next_node_id || evidenceBlock.next_node_id || "");
+    const nextNodeOrderValue = replayRow.next_node_order ?? evidenceBlock.next_node_order;
+    const nextNodeOrder = Number.isInteger(Number(nextNodeOrderValue)) ? Number(nextNodeOrderValue) : null;
+    const nextTimeEvidenceTripId = cleanIdentifier(replayRow.next_time_evidence_trip_id || evidenceBlock.next_trip_id || "");
     const parsedMinimumTransfer = minimumTransfer !== null && minimumTransfer !== undefined && String(minimumTransfer).trim() !== "" && Number.isInteger(Number(minimumTransfer)) ? Number(minimumTransfer) : null;
     let buffer = null;
     if (timeEvidenceVerified && timeEvidenceSource && isClockTime(scheduledArrival) && isClockTime(nextDeparture) && parsedMinimumTransfer !== null) {
@@ -99,6 +105,11 @@ function deriveJourneyLegs(journey) {
       buffer,
       timeEvidenceSource,
       timeEvidenceVerified,
+      timeEvidenceTripId,
+      nextRouteId,
+      nextNodeId,
+      nextNodeOrder,
+      nextTimeEvidenceTripId,
     };
   });
 }
@@ -196,6 +207,11 @@ function App() {
   const replayReady = useMemo(() => effectiveLegs.length > 0 && effectiveLegs.every((item) => (
     item.timeEvidenceVerified
     && item.timeEvidenceSource
+    && item.timeEvidenceTripId
+    && item.nextRouteId
+    && item.nextNodeId
+    && Number.isInteger(item.nextNodeOrder)
+    && item.nextTimeEvidenceTripId
     && isClockTime(item.scheduledArrival)
     && isClockTime(item.nextDeparture)
     && Number.isInteger(item.minimumTransfer)

@@ -79,6 +79,33 @@
       "development_daily_quota": 1000
     },
     {
+      "id": "ktdb-gtfs-2024",
+      "name": "KTDB 대중교통 GTFS 2024년 기준",
+      "municipality": "전국",
+      "priority_tier": 2,
+      "status": "VERIFIED_SCHEDULE_ORIGIN",
+      "urls": [
+        {
+          "role": "official_notice",
+          "url": "https://www.ktdb.go.kr/www/selectBbsNttView.do?bbsNo=2&key=45&nttNo=3785",
+          "robots": "APPLICATION_DOWNLOAD"
+        },
+        {
+          "role": "official_data_application",
+          "url": "https://www.ktdb.go.kr/www/selectPbldataChargerWebList.do?key=12&searchClStepCode=106",
+          "robots": "LOGIN_REQUIRED"
+        }
+      ],
+      "formats": ["GTFS_ZIP"],
+      "license": "SOURCE_ATTRIBUTION_REQUIRED",
+      "refresh": {
+        "policy": "APPLICATION_DOWNLOAD_EXPECTED_SHA256",
+        "basis_date": "2024-03",
+        "listing_updated": "2025-11-28",
+        "id_namespace": "KTDB_NONSTANDARD_NEVER_JOIN_BY_NAME"
+      }
+    },
+    {
       "id": "yeongdong-timetable",
       "name": "영동군 버스 시간표",
       "municipality": "영동군",

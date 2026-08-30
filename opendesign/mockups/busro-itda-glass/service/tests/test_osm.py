@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+import threading
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs
@@ -20,6 +21,30 @@ STOPS = [
     {"node_id": "B", "latitude": 36.585, "longitude": 127.305},
     {"node_id": "C", "latitude": 36.565, "longitude": 127.315},
 ]
+LONG_STOPS = [
+    {"node_id": f"S{index}", "latitude": 36.5 + index * 0.0001, "longitude": 127.2 + index * 0.0001}
+    for index in range(78)
+]
+
+
+def road_payload(index: int = 0) -> dict:
+    offset = index * 0.001
+    return {
+        "code": "Ok",
+        "routes": [
+            {
+                "distance": 1000.0,
+                "duration": 120.0,
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [
+                        [127.2 + offset, 36.5 + offset],
+                        [127.201 + offset, 36.501 + offset],
+                    ],
+                },
+            }
+        ],
+    }
 
 
 class FakeResponse:
@@ -96,6 +121,55 @@ class OSMCase(unittest.TestCase):
         self.assertEqual(result["precision"], "ordered_stops_road_estimate")
         self.assertIn("estimate", result["data_gap"])
         self.assertFalse(result["verified_operator_shape"])
+
+    def test_module_global_admission_rejects_when_capacity_is_full(self) -> None:
+        occupied_gate = threading.BoundedSemaphore(1)
+        self.assertTrue(occupied_gate.acquire(blocking=False))
+        try:
+            with (
+                patch("osm._GEOMETRY_ADMISSION", occupied_gate),
+                patch("osm.GEOMETRY_ADMISSION_WAIT_SECONDS", 0.0),
+                patch("osm.fetch_bus_relation") as fetch_relation,
+            ):
+                with self.assertRaises(OSMError) as raised:
+                    resolve_route_geometry(route_ref="601", stops=STOPS)
+            self.assertEqual(raised.exception.code, "OSM_BUSY")
+            self.assertEqual(raised.exception.status, 429)
+            fetch_relation.assert_not_called()
+        finally:
+            occupied_gate.release()
+
+    @patch("osm._read_json")
+    def test_78_stop_route_stays_within_bounded_osrm_chunks(self, read_json) -> None:
+        read_json.side_effect = [{"elements": []}, *(road_payload(index) for index in range(5))]
+        result = resolve_route_geometry(route_ref="601", stops=LONG_STOPS)
+        self.assertEqual(result["geometry_source"], "osm_road_route_estimate")
+        self.assertEqual(result["precision"], "ordered_stops_road_estimate")
+        self.assertEqual(read_json.call_count, 6)  # one Overpass call and five overlapping OSRM chunks
+
+    def test_total_deadline_stops_cumulative_osrm_chunks(self) -> None:
+        clock = {"now": 100.0}
+        observed_timeouts: list[float] = []
+        requests: list[str] = []
+
+        def monotonic() -> float:
+            return clock["now"]
+
+        def read_json(request, *, timeout_seconds: float, _deadline: float | None = None) -> dict:
+            requests.append(request.full_url)
+            observed_timeouts.append(timeout_seconds)
+            clock["now"] += 0.3
+            if "overpass-api.de" in request.full_url:
+                return {"elements": []}
+            return road_payload(len(requests))
+
+        with patch("osm.time.monotonic", side_effect=monotonic), patch("osm._read_json", side_effect=read_json):
+            with self.assertRaises(OSMError) as raised:
+                resolve_route_geometry(route_ref="601", stops=LONG_STOPS, timeout_seconds=0.75)
+        self.assertEqual(raised.exception.code, "OSM_DEADLINE_EXCEEDED")
+        self.assertEqual(raised.exception.status, 504)
+        self.assertEqual(len(requests), 3)  # one Overpass call and only two of five OSRM chunks
+        self.assertGreater(observed_timeouts[0], observed_timeouts[-1])
 
     def test_route_ref_injection_is_rejected(self) -> None:
         with self.assertRaises(OSMError) as raised:

@@ -82,7 +82,10 @@
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const error = new Error(payload.message || payload.error || `API ${response.status}`);
+        const apiError = payload && typeof payload.error === "object" ? payload.error : null;
+        const message = payload.message || apiError?.message || apiError?.code ||
+          (typeof payload.error === "string" ? payload.error : "") || `API ${response.status}`;
+        const error = new Error(message);
         error.status = response.status;
         error.payload = payload;
         throw error;
@@ -256,6 +259,12 @@
             scheduled_arrival: clockTime(leg.scheduledArrival),
             next_departure: clockTime(leg.nextDeparture),
             minimum_transfer_minutes: Number(leg.minimumTransfer),
+            time_evidence_source: String(leg.timeEvidenceSource),
+            time_evidence_trip_id: String(leg.timeEvidenceTripId),
+            next_route_id: String(leg.nextRouteId),
+            next_node_id: String(leg.nextNodeId),
+            next_node_order: Number(leg.nextNodeOrder),
+            next_time_evidence_trip_id: String(leg.nextTimeEvidenceTripId),
           };
         }),
       } });

@@ -118,6 +118,29 @@ python -B municipal_topology_ingest.py `
 
 파일 크기·행·노선·노선별 정류장 수, 정확한 헤더, CP949/UTF-8, 한국 좌표 범위, 노선별 1부터 연속된 정류장 순서를 모두 검사한 뒤 전체 파일을 한 트랜잭션으로 활성화합니다. 지자체 원시 정류장 ID는 그대로 보존하며 `CCB` 같은 타 제공자 접두사를 추측해 결합하지 않습니다. 같은 파일 재실행은 새 버전을 만들지 않습니다.
 
+### KTDB 공식 GTFS ZIP 적재 준비
+
+[KTDB 대중교통 GTFS 공식 배포 페이지](https://www.ktdb.go.kr/www/selectBbsNttView.do?bbsNo=2&key=45&nttNo=3785)에서 승인받아 내려받은 ZIP은 `gtfs_ingest.py`로 오프라인 적재할 수 있습니다. 원본 ZIP과 압축 해제 파일은 `work` 등 Git 제외 경로에 두고, 다운로드 시점에 별도로 기록한 SHA-256을 반드시 전달합니다. 실제 원본이나 예제 GTFS 데이터는 저장소에 넣지 않습니다.
+
+```powershell
+python -B gtfs_ingest.py `
+  --catalog-db ..\..\..\..\work\network_catalog.runtime.sqlite3 `
+  --zip ..\..\..\..\work\official-sources\ktdb-gtfs.zip `
+  --expected-sha256 PUT_RECORDED_64_HEX_SHA256_HERE `
+  --source-url "https://www.ktdb.go.kr/www/selectBbsNttView.do?bbsNo=2&key=45&nttNo=3785" `
+  --source-date YYYY-MM-DD `
+  --provider KTDB
+```
+
+- `stops.txt`, `routes.txt`, `trips.txt`, `stop_times.txt`, `calendar.txt`가 모두 있어야 하며 `calendar_dates.txt`가 있으면 예외일도 함께 저장합니다.
+- 입력은 UTF-8만 허용합니다. ZIP 경로 탈출·심볼릭 링크·암호화·중복 파일·과도한 압축률을 거부하고, 압축/해제 크기·파일 수·행·열·셀 상한을 적용합니다. ZIP은 하나의 열린 파일 descriptor에서 SHA-256 검증과 해제를 수행하고 활성화 직전 다시 검증하며, 각 표는 한 번의 해제 스트림에서 SHA-256 계산과 CSV 적재를 함께 합니다.
+- 전체 파일과 참조 무결성을 먼저 검증한 뒤 GTFS 원문, 파일별 SHA-256, 기준일, 원본 ID alias, trip 시간과 달력, 방향성 정류장 패턴, 활성 포인터를 한 SQLite 트랜잭션으로 기록합니다. 같은 ZIP 재실행은 revision과 버전을 늘리지 않습니다.
+- 그래프 ID는 `GTFS:KTDB:...` namespace에서 원본 ID를 해시해 만듭니다. 원본 ID는 alias로 그대로 보존하되 이름·거리·노선번호로 TAGO ID와 결합하지 않습니다.
+- 같은 노선이라도 정류장 순서가 반대면 별도 방향 패턴으로 생성합니다. `route_type=3`과 GTFS 확장 버스 유형 `700..799`만 버스 여행 그래프에 활성화합니다.
+- `pickup_type` 또는 `drop_off_type`이 일반 승하차(`0`/빈 값)가 아닌 trip은 원문 시간표 근거에는 보존하지만, 시간표 인지 승하차 필터가 없는 일반 여행 그래프에는 활성화하지 않습니다. 해당 trip만 있는 feed는 활성 근거로 적재되되 일반 그래프 경로를 생성하지 않습니다.
+- `24:xx:xx`부터 `47:59:59`까지는 원문과 초 단위 값을 함께 보존합니다. `NetworkCatalog.gtfs_schedule_evidence(...)`는 활성 원본·달력·예외일·trip·stop time 근거만 반환하며 `eligible_for_success_rate=false`, `success_probability=null`을 고정합니다. 배포자 시간표 의미 검증과 다일 실제 통과 이력이 없으면 제품 성공률 근거로 사용할 수 없습니다.
+- importer는 원본 행을 메모리에 모으지 않고 카탈로그와 같은 드라이브의 임시 SQLite에 스트리밍합니다. 기본 상한은 `stop_times.txt` 2,500만 행·전체 3,000만 행으로, 확인된 KTDB 2024 전체 `stop_times` 21,889,865행을 거부하지 않습니다. 전체 행 상한은 각 표 스트림 안에서 즉시 적용합니다. stage에는 `max_page_count`를 적재 전에 설정하고, 카탈로그 DB 성장·WAL·512 MiB 여유를 포함한 같은 드라이브 가용공간을 사전 검사합니다. 방향 패턴 쿼리는 임시 정렬이 필요한 실행계획을 거부하고 SQLite temp 저장소는 메모리로 고정해 C: 임시공간을 사용하지 않습니다. 검증 완료 뒤에만 카탈로그 본 DB로 한 트랜잭션 복사·활성화하며 stage는 삭제합니다. 실제 승인 ZIP의 end-to-end 소요시간·최종 DB 크기는 파일 수령 후 별도 검증해야 합니다. `frequencies.txt`, `shapes.txt`, `transfers.txt`는 이번 적재 근거에 포함하지 않습니다.
+
 주기 수집은 명시적으로 별도 실행합니다. 숨은 백그라운드 호출은 하지 않습니다.
 
 ```powershell
@@ -185,26 +208,31 @@ python -B multi_collector.py `
 
 fixture 시뮬레이션은 UI·계약 시험용이며 실제 운행 성공률로 표현하면 안 됩니다. 실제 후보는 아래 `/api/replay`처럼 자체 적재한 통과 시간창만 사용합니다.
 
-실제 통과 이력 재생 예시:
+실제 통과 이력 재생 계약 예시입니다. 아래 ID는 형식 설명용이며, 실제 요청에서는 활성 GTFS 조회 결과의 ID로 교체해야 합니다.
 
 ```json
 {
   "route": {"id": "B", "name": "실제 ID 매핑 경로"},
   "legs": [
     {
-      "id": "daejeon-transfer",
-      "route_id": "DJB30300052",
-      "node_id": "DJB8005622",
+      "id": "verified-transfer",
+      "route_id": "GTFS:KTDB:R000000000000000000000000:P0000000000000000000000000000000000000000",
+      "node_id": "GTFS:KTDB:S000000000000000000000000",
       "node_order": 2,
-      "scheduled_arrival": "12:01",
-      "next_departure": "12:10",
-      "minimum_transfer_minutes": 5
+      "time_evidence_source": "ktdb-gtfs-2024",
+      "time_evidence_trip_id": "GTFS:KTDB:T000000000000000000000000",
+      "next_route_id": "GTFS:KTDB:R111111111111111111111111:P1111111111111111111111111111111111111111",
+      "next_node_id": "GTFS:KTDB:S111111111111111111111111",
+      "next_node_order": 1,
+      "next_time_evidence_trip_id": "GTFS:KTDB:T111111111111111111111111"
     }
   ],
   "dates": {"from": "2026-08-31", "to": "2026-09-06"},
   "match_window_minutes": 180
 }
 ```
+
+LIVE에서는 요청의 `scheduled_arrival`·`next_departure`·`minimum_transfer_minutes` 값을 신뢰하지 않습니다. 서버가 같은 활성 GTFS feed와 서비스일에서 도착 trip/정류장 레코드와 다음 출발 trip/정류장 레코드를 각각 유일하게 결합한 경우에만 저장된 `arrival_seconds`·`departure_seconds`를 사용합니다. 최소 환승 여유는 GTFS 공식 값이 아니라 서버 안전 정책으로 고정한 5분이며, 응답의 `minimum_transfer_source=server_safety_policy`와 `minimum_transfer_minutes=5`로 구분합니다. ID가 없거나 모호하거나 feed가 다르면 `422 OFFICIAL_SCHEDULE_RECORD_REQUIRED`입니다.
 
 `summary.eligible_days = success_days + failure_days`이며 `gap_days`는 분모에 들어가지 않습니다. `success_rate`는 증거가 있는 날짜가 없으면 `null`입니다.
 
@@ -216,6 +244,9 @@ fixture 시뮬레이션은 UI·계약 시험용이며 실제 운행 성공률로
 - 외부 호출 타임아웃은 기본 6초입니다. 실시간 응답 캐시는 30초, 노선·정류장 카탈로그 공유 캐시는 TAGO 쿼터 보호를 위해 24시간입니다.
 - 동일 정류장 cache miss와 동일 5분 collect는 per-key singleflight로 한 번만 호출합니다. 실패도 1초간 합쳐 재시도 폭증을 막습니다.
 - 동일 노선 위치 조회와 동일 position collect도 per-key singleflight로 합칩니다.
+- 실제 TAGO upstream 호출은 프로세스 전체 동시 8개, 입장 대기 0.25초, KST 일일 9,000회가 기본 상한입니다. 캐시 hit와 singleflight follower는 세지 않으며 실제 실패 호출은 쿼터에 포함합니다.
+- 비-loopback 클라이언트의 수집·위치 수집·매핑 검증·노선 적재 운영 API는 `BUSRO_OPERATOR_TOKEN` bearer 또는 `X-Busro-Operator-Token`이 필요합니다. 토큰을 설정한 운영 환경에서는 reverse proxy의 loopback 연결에도 항상 요구하며, 전달 프록시 헤더를 로컬 주소로 신뢰하지 않습니다.
+- OSM/OSRM 형상 조회는 전체 동시 3개와 절대 20초 deadline을 적용합니다. 느린 응답 reader도 별도 3개 상한을 유지하고, 포화 시 `OSM_BUSY` 429로 빠르게 거절합니다.
 - 저장 collect는 조회 캐시를 우회해 새 TAGO 응답만 영속화합니다. SQLite 쓰기는 프로세스 내 직렬화하며 서로 다른 collect 200건의 lock 회귀 테스트를 포함합니다.
 - HTTP accept queue는 256, 동시 활성 처리기는 최대 200, 요청 소켓 대기는 10초입니다. 연결이 끊긴 클라이언트의 응답 쓰기는 안전하게 종료합니다.
 - JSON 64 KiB, fixture 정규화 500대, replay `dates × legs` 300 및 사건 스캔 100,000건 상한이 있습니다.
