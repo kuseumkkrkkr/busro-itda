@@ -206,7 +206,7 @@ function GraphCoverage({ networkStatus, result }) {
     <span className="graph-pulse" aria-hidden="true" />
     <p><strong>{primaryStatus}</strong><small>{catalogSummary} · {topologySummary}</small></p>
     <span className="graph-method">단방향 Dijkstra</span>
-    {graphReady && !nationwideComplete && <small className="coverage-query">공식 지자체 자료 {formatCount(activeCities)}개 지역부터 실제 방향으로 검색합니다. 전국 확대 중입니다.</small>}
+    {graphReady && !nationwideComplete && <small className="coverage-query">공식 경유 순서가 연결된 {formatCount(activeCities)}개 지역부터 실제 방향으로 검색합니다. 전국 확대 중입니다.</small>}
     {!graphReady && <small className="coverage-gap">TAGO 노선별 경유 순서의 전국 적재가 끝나지 않아, 확인된 구간만 검색합니다.</small>}
     {graph && <small className={topologyReady ? "coverage-query" : "coverage-gap"}>이번 검색: {formatCount(graph.nodes)}개 상태 · {formatCount(graph.edges)}개 승차 간선 · {graph.algorithm || "directed_dijkstra"}</small>}
     {graph && !topologyReady && <small className="coverage-gap">DATA_GAP · 검색 가능한 검증 노선 순서가 없습니다.</small>}
