@@ -9,6 +9,8 @@ ordered list validates.  No URL, query string, or service key is logged.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import getpass
@@ -17,8 +19,9 @@ import json
 from pathlib import Path
 import socket
 import sys
+import threading
 import time
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -97,6 +100,85 @@ class RequestBudgetExhausted(RuntimeError):
     pass
 
 
+class IngestStopped(RuntimeError):
+    def __init__(self, status: str):
+        super().__init__("topology ingest stopped")
+        self.status = status
+
+
+class TopologyProcessLocked(RuntimeError):
+    pass
+
+
+@contextmanager
+def _catalog_process_lock(catalog_path: Path) -> Iterator[None]:
+    """Hold a crash-released OS lock for one catalog ingest CLI process."""
+    path = Path(catalog_path)
+    lock_path = path.with_name(path.name + ".topology.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    acquired = False
+    unlock: Callable[[], None] | None = None
+    try:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                unlock = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                unlock = lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            raise TopologyProcessLocked(
+                "another topology ingest CLI process already owns this catalog"
+            ) from None
+        acquired = True
+        yield
+    finally:
+        if acquired and unlock is not None:
+            try:
+                handle.seek(0)
+                unlock()
+            except OSError:
+                pass
+        handle.close()
+
+
+_STATUS_PRIORITY = {
+    "COMPLETE": 0,
+    "PARTIAL": 1,
+    "BUDGET_EXHAUSTED": 2,
+    "DATA_GAP": 3,
+    "FAILED": 4,
+}
+
+
+def _stronger_status(current: str, candidate: str) -> str:
+    return (
+        candidate
+        if _STATUS_PRIORITY[candidate] > _STATUS_PRIORITY[current]
+        else current
+    )
+
+
+def _safe_local_error_code(value: Any) -> str:
+    candidate = str(value or "LOCAL_API_ERROR")
+    if not 1 <= len(candidate) <= 64 or any(
+        character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+        for character in candidate
+    ):
+        return "LOCAL_API_ERROR"
+    return candidate
+
+
 class _RejectRedirects(HTTPRedirectHandler):
     """Keep every proxy request on its originally validated loopback URL."""
 
@@ -168,9 +250,33 @@ class LocalLiveApiFetcher:
         if not 0.5 <= timeout_seconds <= 30:
             raise ValueError("timeout_seconds must be 0.5..30")
         self.timeout_seconds = timeout_seconds
-        self._open_url = open_url or build_opener(
-            ProxyHandler({}), _RejectRedirects()
-        ).open
+        self._open_url_override = open_url
+        self._opener_local = threading.local()
+
+    def _open_url(self, request: Request, *, timeout: float):
+        if self._open_url_override is not None:
+            return self._open_url_override(request, timeout=timeout)
+        opener = getattr(self._opener_local, "opener", None)
+        if opener is None:
+            opener = build_opener(ProxyHandler({}), _RejectRedirects())
+            self._opener_local.opener = opener
+        return opener.open(request, timeout=timeout)
+
+    @staticmethod
+    def _http_error_code(error: HTTPError) -> str:
+        try:
+            raw = error.read(MAX_LOCAL_API_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_LOCAL_API_RESPONSE_BYTES:
+                return "LOCAL_API_HTTP_ERROR"
+            payload = json.loads(raw)
+        except (AttributeError, OSError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+            return "LOCAL_API_HTTP_ERROR"
+        if not isinstance(payload, dict):
+            return "LOCAL_API_HTTP_ERROR"
+        details = payload.get("error")
+        if not isinstance(details, dict):
+            return "LOCAL_API_HTTP_ERROR"
+        return _safe_local_error_code(details.get("code"))
 
     def _json_get(self, path: str, query: Mapping[str, str] | None = None) -> dict[str, Any]:
         if path not in LOCAL_API_PATHS:
@@ -225,9 +331,10 @@ class LocalLiveApiFetcher:
                 raise RequestBudgetExhausted(
                     "local Busro API request budget exhausted"
                 ) from None
+            code = self._http_error_code(exc)
             raise TagoError(
-                "LOCAL_API_HTTP_ERROR", "Local Busro API request failed", status=502
-            ) from exc
+                code, "Local Busro API request failed", status=502
+            ) from None
         except (TimeoutError, socket.timeout) as exc:
             raise TagoError(
                 "LOCAL_API_TIMEOUT", "Local Busro API request timed out", status=504
@@ -261,11 +368,7 @@ class LocalLiveApiFetcher:
         if payload.get("ok") is not True:
             error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
             candidate = error.get("code") if isinstance(error, dict) else None
-            code = str(candidate or "LOCAL_API_ERROR")
-            if not 1 <= len(code) <= 64 or any(
-                character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for character in code
-            ):
-                code = "LOCAL_API_ERROR"
+            code = _safe_local_error_code(candidate)
             raise TagoError(code, "Local Busro API request failed", status=502)
         return payload
 
@@ -370,6 +473,7 @@ class IngestConfig:
     target_source: str = "tago"
     trust_catalog_identifiers: bool = False
     refresh_complete: bool = False
+    workers: int = 1
 
     def validate(self) -> None:
         if not 1 <= self.request_budget <= 100_000:
@@ -390,6 +494,8 @@ class IngestConfig:
             raise ValueError(
                 "catalog mode requires --trust-catalog-identifiers after provider-namespace verification"
             )
+        if not 1 <= self.workers <= 8:
+            raise ValueError("workers must be 1..8")
 
 
 class TopologyIngestor:
@@ -414,6 +520,27 @@ class TopologyIngestor:
         self.requests_used = 0
         self.discovery_failures = 0
         self._last_request_started: float | None = None
+        self._request_start_lock = threading.Lock()
+        self._stop_lock = threading.RLock()
+        self._stop_event = threading.Event()
+        self._stop_status: str | None = None
+
+    def _set_stop(self, status: str) -> None:
+        if status not in {"BUDGET_EXHAUSTED", "DATA_GAP", "FAILED"}:
+            raise ValueError("invalid terminal ingest status")
+        with self._stop_lock:
+            if self._stop_status is None:
+                self._stop_status = status
+            else:
+                self._stop_status = _stronger_status(self._stop_status, status)
+            self._stop_event.set()
+
+    def _stopped_status(self) -> str | None:
+        with self._stop_lock:
+            return self._stop_status
+
+    def _on_request_started(self, started_at: float) -> None:
+        """Test/observability hook invoked inside the global request gate."""
 
     def _request(
         self,
@@ -422,23 +549,59 @@ class TopologyIngestor:
         *,
         target: tuple[str, str] | None = None,
     ) -> dict[str, Any]:
-        if self.requests_used >= self.config.request_budget:
-            raise RequestBudgetExhausted("request budget exhausted")
-        if self.config.requests_per_second > 0 and self._last_request_started is not None:
-            interval = 1.0 / self.config.requests_per_second
-            remaining = interval - (self.monotonic() - self._last_request_started)
-            if remaining > 0:
-                self.sleeper(remaining)
-        self._last_request_started = self.monotonic()
+        # One start gate owns the global rate slot and exact request budget.
+        # Network I/O remains outside the gate so up to `workers` calls can
+        # overlap without producing a start burst.
+        with self._request_start_lock:
+            stopped = self._stopped_status()
+            if stopped is not None:
+                raise IngestStopped(stopped)
+            if self.config.requests_per_second > 0 and self._last_request_started is not None:
+                interval = 1.0 / self.config.requests_per_second
+                remaining = interval - (self.monotonic() - self._last_request_started)
+                if remaining > 0:
+                    self.sleeper(remaining)
+            # The second stop check and admission are atomic with fatal stop
+            # publication. Lock order is always request-start -> stop.
+            with self._stop_lock:
+                stopped = self._stop_status
+                if stopped is not None:
+                    raise IngestStopped(stopped)
+                if self.requests_used >= self.config.request_budget:
+                    self._set_stop("BUDGET_EXHAUSTED")
+                    raise RequestBudgetExhausted("request budget exhausted")
+                # This admission is the request start. Keep all blocking
+                # database work after the network call so a fatal peer cannot
+                # leave a waiter between stop-check and admission.
+                self.requests_used += 1
+                self._last_request_started = self.monotonic()
+                started_at = self._last_request_started
+            self._on_request_started(started_at)
         try:
-            return self.fetcher(operation, parameters)
+            try:
+                return self.fetcher(operation, parameters)
+            except RequestBudgetExhausted:
+                self._set_stop("BUDGET_EXHAUSTED")
+                raise
+            except TagoError as exc:
+                if exc.code in FATAL_ACCESS_CODES:
+                    self._set_stop("DATA_GAP")
+                raise
+            except Exception:
+                self._set_stop("FAILED")
+                raise
         finally:
-            # Attempted upstream calls consume quota even when they fail.
-            self.requests_used += 1
-            self.catalog.update_topology_run(self.run_id, requests_used=1)
-            if target is not None:
-                self.catalog.record_topology_target_request(
-                    provider=PROVIDER, city_code=target[0], route_id=target[1]
+            if target is None:
+                self.catalog.record_topology_request_attempt(
+                    run_id=self.run_id,
+                    provider=PROVIDER,
+                )
+            else:
+                self.catalog.record_topology_request_attempt(
+                    run_id=self.run_id,
+                    provider=PROVIDER,
+                    city_code=target[0],
+                    route_id=target[1],
                 )
 
     def _discover_tago_targets(self) -> None:
@@ -709,6 +872,156 @@ class TopologyIngestor:
         )
         return "COMPLETE"
 
+    def _process_target(self, target: Mapping[str, Any]) -> str:
+        try:
+            outcome = self._ingest_target(target)
+            counters = {
+                "targets_processed": 1,
+                "unchanged" if outcome == "UNCHANGED" else "succeeded": 1,
+            }
+            self.catalog.update_topology_run(self.run_id, **counters)
+            return "COMPLETE"
+        except IngestStopped as exc:
+            budget_stop = exc.status == "BUDGET_EXHAUSTED"
+            self.catalog.defer_or_fail_topology_target(
+                provider=PROVIDER,
+                city_code=target["city_code"],
+                route_id=target["route_id"],
+                deferred=True,
+                error_code=(
+                    "REQUEST_BUDGET_EXHAUSTED" if budget_stop else "INGEST_STOPPED"
+                ),
+                error_message=(
+                    "Request budget exhausted; rerun resumes from staged page"
+                    if budget_stop
+                    else "Ingest stopped; rerun resumes from staged page"
+                ),
+            )
+            self.catalog.update_topology_run(
+                self.run_id, targets_processed=1, deferred=1
+            )
+            return exc.status
+        except RequestBudgetExhausted:
+            self._set_stop("BUDGET_EXHAUSTED")
+            self.catalog.defer_or_fail_topology_target(
+                provider=PROVIDER,
+                city_code=target["city_code"],
+                route_id=target["route_id"],
+                deferred=True,
+                error_code="REQUEST_BUDGET_EXHAUSTED",
+                error_message="Request budget exhausted; rerun resumes from staged page",
+            )
+            self.catalog.update_topology_run(
+                self.run_id, targets_processed=1, deferred=1
+            )
+            return "BUDGET_EXHAUSTED"
+        except TagoError as exc:
+            status = "DATA_GAP" if exc.code in FATAL_ACCESS_CODES else "PARTIAL"
+            if status == "DATA_GAP":
+                self._set_stop(status)
+            self.catalog.defer_or_fail_topology_target(
+                provider=PROVIDER,
+                city_code=target["city_code"],
+                route_id=target["route_id"],
+                deferred=False,
+                error_code=exc.code,
+                error_message=_public_tago_message(exc.code),
+            )
+            self.catalog.update_topology_run(
+                self.run_id, targets_processed=1, failed=1
+            )
+            return status
+        except CatalogError as exc:
+            self.catalog.defer_or_fail_topology_target(
+                provider=PROVIDER,
+                city_code=target["city_code"],
+                route_id=target["route_id"],
+                deferred=False,
+                error_code="INVALID_ROUTE_TOPOLOGY",
+                error_message=_safe_error_message(exc),
+            )
+            self.catalog.update_topology_run(
+                self.run_id, targets_processed=1, failed=1
+            )
+            return "PARTIAL"
+        except Exception:
+            # Unknown exception text may contain implementation or transport
+            # details. Stop new starts immediately and persist a fixed marker.
+            self._set_stop("FAILED")
+            self.catalog.defer_or_fail_topology_target(
+                provider=PROVIDER,
+                city_code=target["city_code"],
+                route_id=target["route_id"],
+                deferred=False,
+                error_code="UNEXPECTED_COLLECTOR_ERROR",
+                error_message="Unexpected collector failure",
+            )
+            self.catalog.update_topology_run(
+                self.run_id, targets_processed=1, failed=1
+            )
+            return "FAILED"
+
+    def _run_targets_sequential(self) -> str:
+        final_status = "COMPLETE"
+        claimed = 0
+        while self.config.target_limit is None or claimed < self.config.target_limit:
+            if self._stop_event.is_set():
+                break
+            target = self.catalog.claim_topology_target(
+                provider=PROVIDER, run_id=self.run_id
+            )
+            if target is None:
+                break
+            claimed += 1
+            outcome = self._process_target(target)
+            final_status = _stronger_status(final_status, outcome)
+            if self._stop_event.is_set():
+                break
+        return final_status
+
+    def _run_targets_parallel(self) -> str:
+        final_status = "COMPLETE"
+        claimed = 0
+        exhausted = False
+        futures: dict[Any, Mapping[str, Any]] = {}
+        with ThreadPoolExecutor(
+            max_workers=self.config.workers,
+            thread_name_prefix="busro-topology",
+        ) as executor:
+            try:
+                while True:
+                    while (
+                        not exhausted
+                        and not self._stop_event.is_set()
+                        and len(futures) < self.config.workers
+                        and (
+                            self.config.target_limit is None
+                            or claimed < self.config.target_limit
+                        )
+                    ):
+                        target = self.catalog.claim_topology_target(
+                            provider=PROVIDER, run_id=self.run_id
+                        )
+                        if target is None:
+                            exhausted = True
+                            break
+                        claimed += 1
+                        futures[executor.submit(self._process_target, target)] = target
+                    if not futures:
+                        break
+                    done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        futures.pop(future, None)
+                        outcome = future.result()
+                        final_status = _stronger_status(final_status, outcome)
+                    if self._stop_event.is_set() and not futures:
+                        break
+            except KeyboardInterrupt:
+                self._set_stop("FAILED")
+                raise
+        stopped = self._stopped_status()
+        return _stronger_status(final_status, stopped) if stopped else final_status
+
     def run(self) -> dict[str, Any]:
         self.catalog.create_topology_run(
             run_id=self.run_id,
@@ -718,7 +1031,6 @@ class TopologyIngestor:
             target_limit=self.config.target_limit,
         )
         final_status = "COMPLETE"
-        processed = 0
         try:
             if self.config.target_source == "tago":
                 self._discover_tago_targets()
@@ -731,87 +1043,34 @@ class TopologyIngestor:
                 )
             if self.config.refresh_complete:
                 self.catalog.queue_topology_refresh(provider=PROVIDER)
-            while self.config.target_limit is None or processed < self.config.target_limit:
-                target = self.catalog.claim_topology_target(
-                    provider=PROVIDER, run_id=self.run_id
-                )
-                if target is None:
-                    break
-                processed += 1
-                try:
-                    outcome = self._ingest_target(target)
-                    counters = {
-                        "targets_processed": 1,
-                        "unchanged" if outcome == "UNCHANGED" else "succeeded": 1,
-                    }
-                    self.catalog.update_topology_run(self.run_id, **counters)
-                except RequestBudgetExhausted:
-                    self.catalog.defer_or_fail_topology_target(
-                        provider=PROVIDER,
-                        city_code=target["city_code"],
-                        route_id=target["route_id"],
-                        deferred=True,
-                        error_code="REQUEST_BUDGET_EXHAUSTED",
-                        error_message="Request budget exhausted; rerun resumes from staged page",
-                    )
-                    self.catalog.update_topology_run(
-                        self.run_id, targets_processed=1, deferred=1
-                    )
-                    final_status = "BUDGET_EXHAUSTED"
-                    break
-                except TagoError as exc:
-                    self.catalog.defer_or_fail_topology_target(
-                        provider=PROVIDER,
-                        city_code=target["city_code"],
-                        route_id=target["route_id"],
-                        deferred=False,
-                        error_code=exc.code,
-                        error_message=_public_tago_message(exc.code),
-                    )
-                    self.catalog.update_topology_run(
-                        self.run_id, targets_processed=1, failed=1
-                    )
-                    if exc.code in FATAL_ACCESS_CODES:
-                        final_status = "DATA_GAP"
-                        break
-                    final_status = "PARTIAL"
-                except CatalogError as exc:
-                    self.catalog.defer_or_fail_topology_target(
-                        provider=PROVIDER,
-                        city_code=target["city_code"],
-                        route_id=target["route_id"],
-                        deferred=False,
-                        error_code="INVALID_ROUTE_TOPOLOGY",
-                        error_message=_safe_error_message(exc),
-                    )
-                    self.catalog.update_topology_run(
-                        self.run_id, targets_processed=1, failed=1
-                    )
-                    final_status = "PARTIAL"
-                except Exception:
-                    # Unknown exception text may contain implementation or
-                    # transport details, so persist only a fixed safe marker.
-                    self.catalog.defer_or_fail_topology_target(
-                        provider=PROVIDER,
-                        city_code=target["city_code"],
-                        route_id=target["route_id"],
-                        deferred=False,
-                        error_code="UNEXPECTED_COLLECTOR_ERROR",
-                        error_message="Unexpected collector failure",
-                    )
-                    self.catalog.update_topology_run(
-                        self.run_id, targets_processed=1, failed=1
-                    )
-                    final_status = "FAILED"
-                    break
+            target_status = (
+                self._run_targets_sequential()
+                if self.config.workers == 1
+                else self._run_targets_parallel()
+            )
+            final_status = _stronger_status(final_status, target_status)
+        except IngestStopped as exc:
+            final_status = _stronger_status(final_status, exc.status)
+        except KeyboardInterrupt:
+            self._set_stop("FAILED")
+            final_status = "FAILED"
         except RequestBudgetExhausted:
-            final_status = "BUDGET_EXHAUSTED"
+            self._set_stop("BUDGET_EXHAUSTED")
+            final_status = _stronger_status(final_status, "BUDGET_EXHAUSTED")
         except TagoError as exc:
-            final_status = "DATA_GAP" if exc.code in FATAL_ACCESS_CODES else "FAILED"
+            status = "DATA_GAP" if exc.code in FATAL_ACCESS_CODES else "FAILED"
+            if status == "DATA_GAP":
+                self._set_stop(status)
+            final_status = _stronger_status(final_status, status)
         except CatalogError:
+            self._set_stop("FAILED")
             final_status = "FAILED"
         except Exception:
+            self._set_stop("FAILED")
             final_status = "FAILED"
+        stopped = self._stopped_status()
+        if stopped is not None:
+            final_status = _stronger_status(final_status, stopped)
         coverage = self.catalog.topology_coverage(provider=PROVIDER)
         if final_status == "COMPLETE" and coverage["complete"] < coverage["targets"]:
             final_status = "PARTIAL"
@@ -850,6 +1109,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-limit", type=int)
     parser.add_argument("--target-source", choices=("tago", "catalog"), default="tago")
     parser.add_argument("--trust-catalog-identifiers", action="store_true")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="parallel route workers inside this one CLI process (1..8)",
+    )
     parser.add_argument(
         "--refresh-complete",
         action="store_true",
@@ -897,12 +1162,16 @@ def main(argv: list[str] | None = None) -> int:
         target_source=args.target_source,
         trust_catalog_identifiers=args.trust_catalog_identifiers,
         refresh_complete=args.refresh_complete,
+        workers=args.workers,
     )
-    catalog = NetworkCatalog(args.catalog_db)
-
-    result = TopologyIngestor(
-        catalog=catalog, fetcher=live_fetch, config=config
-    ).run()
+    try:
+        with _catalog_process_lock(args.catalog_db):
+            catalog = NetworkCatalog(args.catalog_db)
+            result = TopologyIngestor(
+                catalog=catalog, fetcher=live_fetch, config=config
+            ).run()
+    except TopologyProcessLocked as exc:
+        raise SystemExit(str(exc)) from None
     # The summary contains counters/status only; no key, URL, or query values.
     json.dump(result, sys.stdout, ensure_ascii=False, sort_keys=True)
     sys.stdout.write("\n")

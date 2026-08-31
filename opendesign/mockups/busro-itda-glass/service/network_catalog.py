@@ -3039,6 +3039,50 @@ class NetworkCatalog:
             )
             connection.commit()
 
+    def record_topology_request_attempt(
+        self,
+        *,
+        run_id: str,
+        provider: str,
+        city_code: str | None = None,
+        route_id: str | None = None,
+    ) -> None:
+        """Atomically reserve one run request and its optional target request."""
+        run = _safe_code(run_id, "run_id")
+        provider_id = _safe_code(provider, "provider")
+        if (city_code is None) != (route_id is None):
+            raise CatalogValidationError(
+                "city_code and route_id must both be supplied for a target request"
+            )
+        city = _safe_code(city_code, "city_code") if city_code is not None else None
+        route = (
+            _safe_transport_identifier(route_id, "route_id")
+            if route_id is not None
+            else None
+        )
+        now = self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                "UPDATE topology_runs SET requests_used=requests_used+1,updated_at=? "
+                "WHERE run_id=? AND provider=? AND status='RUNNING'",
+                (now, run, provider_id),
+            ).rowcount
+            if changed != 1:
+                raise CatalogValidationError("topology run is not active")
+            if city is not None and route is not None:
+                changed = connection.execute(
+                    "UPDATE topology_progress SET requests_used=requests_used+1,updated_at=? "
+                    "WHERE provider=? AND city_code=? AND route_id=? "
+                    "AND status='IN_PROGRESS' AND last_run_id=?",
+                    (now, provider_id, city, route, run),
+                ).rowcount
+                if changed != 1:
+                    raise CatalogValidationError(
+                        "topology target is not owned by the active run"
+                    )
+            connection.commit()
+
     def staged_topology_route(self, *, provider: str, city_code: str, route_id: str) -> list[dict[str, Any]]:
         provider_id = _safe_code(provider, "provider")
         city = _safe_code(city_code, "city_code")
