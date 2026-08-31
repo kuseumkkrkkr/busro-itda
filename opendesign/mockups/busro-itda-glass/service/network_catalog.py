@@ -2952,6 +2952,7 @@ class NetworkCatalog:
                 "JOIN topology_targets t USING(provider,city_code,route_id) "
                 "LEFT JOIN completed_by_city c ON c.city_code=p.city_code "
                 "WHERE p.provider=? AND p.status IN ('PENDING','FAILED','DEFERRED','IN_PROGRESS') "
+                "AND (p.status<>'FAILED' OR p.attempts<3) "
                 "AND (p.last_run_id IS NULL OR p.last_run_id<>?) "
                 "ORDER BY CASE p.status WHEN 'IN_PROGRESS' THEN 0 WHEN 'DEFERRED' THEN 1 WHEN 'FAILED' THEN 2 ELSE 3 END,"
                 "COALESCE(c.completed_count,0),p.city_code,p.route_id LIMIT 1",

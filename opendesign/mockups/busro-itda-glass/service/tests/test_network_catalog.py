@@ -239,6 +239,7 @@ class NetworkCatalogCase(unittest.TestCase):
             {"city_code": city, "route_id": route, "route_no": route}
             for city, route in (
                 ("10", "PENDING_ROUTE"),
+                ("15", "EXHAUSTED_FAILED_ROUTE"),
                 ("20", "FAILED_ROUTE"),
                 ("30", "DEFERRED_ROUTE"),
                 ("40", "RESUME_ROUTE"),
@@ -250,7 +251,11 @@ class NetworkCatalogCase(unittest.TestCase):
         )
         with self.catalog.connect() as connection:
             connection.execute(
-                "UPDATE topology_progress SET status='FAILED' WHERE route_id='FAILED_ROUTE'"
+                "UPDATE topology_progress SET status='FAILED',attempts=2 WHERE route_id='FAILED_ROUTE'"
+            )
+            connection.execute(
+                "UPDATE topology_progress SET status='FAILED',attempts=3 "
+                "WHERE route_id='EXHAUSTED_FAILED_ROUTE'"
             )
             connection.execute(
                 "UPDATE topology_progress SET status='DEFERRED' WHERE route_id='DEFERRED_ROUTE'"
@@ -275,6 +280,14 @@ class NetworkCatalogCase(unittest.TestCase):
         self.assertIsNone(
             self.catalog.claim_topology_target(provider="TAGO", run_id="resume-run")
         )
+        with self.catalog.connect() as connection:
+            attempts = dict(
+                connection.execute(
+                    "SELECT route_id,attempts FROM topology_progress "
+                    "WHERE route_id IN ('FAILED_ROUTE','EXHAUSTED_FAILED_ROUTE')"
+                ).fetchall()
+            )
+        self.assertEqual(attempts, {"FAILED_ROUTE": 3, "EXHAUSTED_FAILED_ROUTE": 3})
 
     def test_snapshot_and_cache_are_immutable(self):
         self.catalog.hydrate_route_sequence(
