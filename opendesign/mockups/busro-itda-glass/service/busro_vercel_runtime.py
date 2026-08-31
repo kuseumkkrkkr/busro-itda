@@ -507,7 +507,7 @@ def _status(service: BusroService) -> dict[str, Any]:
 
 
 def _cache_control(path: str) -> str:
-    if path in {"/api/network/status", "/api/network/cities", "/api/network/stops", "/api/network/routes", "/api/sources"}:
+    if path in {"/api/network/status", "/api/network/cities", "/api/network/stops", "/api/network/routes", "/api/sources", "/api/sources/discover"}:
         return "public, s-maxage=300, stale-while-revalidate=3600"
     if path in {"/api/cities", "/api/routes", "/api/routes/info", "/api/routes/stops", "/api/stops", "/api/stops/nearby", "/api/stops/routes"}:
         return "public, s-maxage=60, stale-while-revalidate=300"
@@ -560,6 +560,7 @@ def dispatch_request(
                 "/api/network/stops": lambda: service.network_stops(query_data),
                 "/api/network/routes": lambda: service.network_routes(query_data),
                 "/api/sources": lambda: service.sources(query_data),
+                "/api/sources/discover": lambda: service.municipal_discover(query_data),
                 "/api/passages": lambda: service.passage_history(query_data),
             }
         else:
