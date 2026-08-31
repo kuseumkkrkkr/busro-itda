@@ -12,11 +12,16 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import getpass
+import ipaddress
 import json
 from pathlib import Path
+import socket
 import sys
 import time
 from typing import Any, Callable, Mapping
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 import uuid
 
 from network_catalog import CatalogError, CatalogLimitError, CatalogValidationError, NetworkCatalog
@@ -24,6 +29,59 @@ from tago import TagoError, fetch_catalog, normalize_catalog
 
 
 PROVIDER = "TAGO"
+MAX_LOCAL_API_RESPONSE_BYTES = 2_000_000
+MIN_LOCAL_API_PORT = 1
+MAX_LOCAL_API_PORT = 65_535
+LOCAL_API_OPERATIONS = {
+    "cities": ("/api/cities", "cities", {}, frozenset()),
+    "routes": (
+        "/api/routes",
+        "routes",
+        {
+            "cityCode": "city_code",
+            "routeNo": "route_no",
+            "pageNo": "page",
+            "numOfRows": "limit",
+        },
+        frozenset({"cityCode"}),
+    ),
+    "route_stops": (
+        "/api/routes/stops",
+        "stops",
+        {
+            "cityCode": "city_code",
+            "routeId": "route_id",
+            "pageNo": "page",
+            "numOfRows": "limit",
+        },
+        frozenset({"cityCode", "routeId"}),
+    ),
+}
+LOCAL_API_PATHS = frozenset(
+    {"/api/status", *(spec[0] for spec in LOCAL_API_OPERATIONS.values())}
+)
+LOCAL_API_RAW_FIELDS = {
+    "cities": {"city_code": "citycode", "city_name": "cityname"},
+    "routes": {
+        "city_code": "citycode",
+        "route_id": "routeid",
+        "route_no": "routeno",
+        "route_type": "routetp",
+        "start_node_name": "startnodenm",
+        "end_node_name": "endnodenm",
+    },
+    "route_stops": {
+        "city_code": "citycode",
+        "route_id": "routeid",
+        "node_id": "nodeid",
+        "node_no": "nodeno",
+        "node_name": "nodenm",
+        "node_order": "nodeord",
+        "latitude": "gpslati",
+        "longitude": "gpslong",
+        "up_down_code": "updowncd",
+    },
+}
 FATAL_ACCESS_CODES = frozenset(
     {
         "30",
@@ -37,6 +95,250 @@ FATAL_ACCESS_CODES = frozenset(
 
 class RequestBudgetExhausted(RuntimeError):
     pass
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    """Keep every proxy request on its originally validated loopback URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+def _local_live_api_origin(value: str) -> str:
+    """Validate and canonicalize one literal loopback HTTP origin."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 200
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise argparse.ArgumentTypeError("local live API must be a loopback HTTP origin")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("local live API has an invalid host or port") from exc
+    if (
+        parsed.scheme != "http"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or "?" in value
+        or "#" in value
+    ):
+        raise argparse.ArgumentTypeError(
+            "local live API must be HTTP with no userinfo, path, query, or fragment"
+        )
+    hostname = parsed.hostname
+    if not hostname or "%" in hostname or port is None:
+        raise argparse.ArgumentTypeError(
+            "local live API must use a literal loopback address and explicit port"
+        )
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "local live API must use a literal loopback address"
+        ) from exc
+    mapped = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) else None
+    if not address.is_loopback and not (mapped is not None and mapped.is_loopback):
+        raise argparse.ArgumentTypeError("local live API address must be loopback")
+    if not MIN_LOCAL_API_PORT <= port <= MAX_LOCAL_API_PORT:
+        raise argparse.ArgumentTypeError(
+            f"local live API port must be {MIN_LOCAL_API_PORT}..{MAX_LOCAL_API_PORT}"
+        )
+    rendered_host = f"[{address.compressed}]" if address.version == 6 else address.compressed
+    return f"http://{rendered_host}:{port}"
+
+
+class LocalLiveApiFetcher:
+    """Fetch allow-listed catalog data from an already-running local service."""
+
+    def __init__(
+        self,
+        origin: str,
+        *,
+        timeout_seconds: float,
+        open_url: Callable[..., Any] | None = None,
+    ):
+        self.origin = _local_live_api_origin(origin)
+        if not 0.5 <= timeout_seconds <= 30:
+            raise ValueError("timeout_seconds must be 0.5..30")
+        self.timeout_seconds = timeout_seconds
+        self._open_url = open_url or build_opener(
+            ProxyHandler({}), _RejectRedirects()
+        ).open
+
+    def _json_get(self, path: str, query: Mapping[str, str] | None = None) -> dict[str, Any]:
+        if path not in LOCAL_API_PATHS:
+            raise TagoError(
+                "LOCAL_API_PATH_INVALID", "Unsupported local API endpoint", status=500
+            )
+        encoded_query = urlencode(dict(query or {}))
+        url = f"{self.origin}{path}" + (f"?{encoded_query}" if encoded_query else "")
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "Accept-Encoding": "identity",
+                "User-Agent": "busro-itda-topology-ingest/0.1",
+            },
+            method="GET",
+        )
+        try:
+            with self._open_url(request, timeout=self.timeout_seconds) as response:
+                status = getattr(response, "status", None)
+                if status is None and hasattr(response, "getcode"):
+                    status = response.getcode()
+                if status == 429:
+                    raise RequestBudgetExhausted("local Busro API request budget exhausted")
+                if status != 200:
+                    raise TagoError(
+                        "LOCAL_API_HTTP_ERROR", "Local Busro API request failed", status=502
+                    )
+                headers = getattr(response, "headers", {})
+                raw_length = headers.get("Content-Length") if hasattr(headers, "get") else None
+                if raw_length is not None:
+                    try:
+                        content_length = int(raw_length)
+                    except (TypeError, ValueError) as exc:
+                        raise TagoError(
+                            "LOCAL_API_INVALID_RESPONSE",
+                            "Local Busro API returned an invalid response",
+                        ) from exc
+                    if content_length < 0:
+                        raise TagoError(
+                            "LOCAL_API_INVALID_RESPONSE",
+                            "Local Busro API returned an invalid response",
+                        )
+                    if content_length > MAX_LOCAL_API_RESPONSE_BYTES:
+                        raise TagoError(
+                            "LOCAL_API_RESPONSE_TOO_LARGE",
+                            "Local Busro API response exceeded 2 MB",
+                        )
+                raw = response.read(MAX_LOCAL_API_RESPONSE_BYTES + 1)
+        except HTTPError as exc:
+            if exc.code == 429:
+                raise RequestBudgetExhausted(
+                    "local Busro API request budget exhausted"
+                ) from None
+            raise TagoError(
+                "LOCAL_API_HTTP_ERROR", "Local Busro API request failed", status=502
+            ) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise TagoError(
+                "LOCAL_API_TIMEOUT", "Local Busro API request timed out", status=504
+            ) from exc
+        except URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                raise TagoError(
+                    "LOCAL_API_TIMEOUT", "Local Busro API request timed out", status=504
+                ) from exc
+            raise TagoError(
+                "LOCAL_API_UNAVAILABLE", "Local Busro API is unavailable", status=502
+            ) from exc
+        except OSError as exc:
+            raise TagoError(
+                "LOCAL_API_UNAVAILABLE", "Local Busro API is unavailable", status=502
+            ) from exc
+        if len(raw) > MAX_LOCAL_API_RESPONSE_BYTES:
+            raise TagoError(
+                "LOCAL_API_RESPONSE_TOO_LARGE", "Local Busro API response exceeded 2 MB"
+            )
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise TagoError(
+                "LOCAL_API_INVALID_JSON", "Local Busro API returned invalid JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise TagoError(
+                "LOCAL_API_INVALID_RESPONSE", "Local Busro API returned an invalid response"
+            )
+        if payload.get("ok") is not True:
+            error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+            candidate = error.get("code") if isinstance(error, dict) else None
+            code = str(candidate or "LOCAL_API_ERROR")
+            if not 1 <= len(code) <= 64 or any(
+                character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for character in code
+            ):
+                code = "LOCAL_API_ERROR"
+            raise TagoError(code, "Local Busro API request failed", status=502)
+        return payload
+
+    def verify_ready(self) -> None:
+        status = self._json_get("/api/status")
+        tago = status.get("tago") if isinstance(status.get("tago"), dict) else {}
+        if not (
+            status.get("service") == "busro-itda-data-service"
+            and status.get("mode") == "live"
+            and tago.get("configured") is True
+            and tago.get("state") == "ready"
+            and tago.get("key_exposed") is False
+        ):
+            raise TagoError(
+                "LOCAL_API_NOT_READY",
+                "Local Busro API is not live and TAGO-ready",
+                status=503,
+            )
+
+    def __call__(self, operation: str, parameters: dict[str, str]) -> dict[str, Any]:
+        spec = LOCAL_API_OPERATIONS.get(operation)
+        if spec is None:
+            raise TagoError(
+                "CATALOG_OPERATION_INVALID", "Unsupported local catalog operation", status=500
+            )
+        path, output_key, parameter_names, required_parameters = spec
+        if (
+            not isinstance(parameters, dict)
+            or set(parameters) - set(parameter_names)
+            or required_parameters - set(parameters)
+            or any(
+                not isinstance(value, str)
+                or len(value) > 120
+                or any(ord(character) < 32 for character in value)
+                for value in parameters.values()
+            )
+        ):
+            raise TagoError(
+                "CATALOG_PARAMETER_INVALID", "Invalid local catalog parameters", status=500
+            )
+        query = {
+            public_name: parameters[upstream_name]
+            for upstream_name, public_name in parameter_names.items()
+            if upstream_name in parameters
+        }
+        payload = self._json_get(path, query)
+        if payload.get("mode") != "live":
+            raise TagoError(
+                "LOCAL_API_NOT_LIVE", "Local Busro API catalog response was not live", status=503
+            )
+        records = payload.get(output_key)
+        if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
+            raise TagoError(
+                "LOCAL_API_INVALID_RESPONSE", "Local Busro API returned an invalid catalog"
+            )
+        fields = LOCAL_API_RAW_FIELDS[operation]
+        raw_items = [
+            {raw_name: item.get(public_name) for public_name, raw_name in fields.items()}
+            for item in records
+        ]
+        upstream = payload.get("upstream")
+        upstream = upstream if isinstance(upstream, dict) else {}
+        return {
+            "response": {
+                "header": {"resultCode": "00", "resultMsg": "NORMAL SERVICE"},
+                "body": {
+                    "items": {"item": raw_items},
+                    "pageNo": upstream.get("page_no", query.get("page", 1)),
+                    "numOfRows": upstream.get("num_rows", query.get("limit", len(raw_items))),
+                    "totalCount": upstream.get("total_count", len(raw_items)),
+                },
+            }
+        }
 
 
 def _utc_now() -> datetime:
@@ -532,7 +834,14 @@ def _parser() -> argparse.ArgumentParser:
         description="Discover and ingest nationwide TAGO route-stop topology"
     )
     parser.add_argument("--catalog-db", type=Path, required=True)
-    parser.add_argument("--service-key-stdin", action="store_true", required=True)
+    access_mode = parser.add_mutually_exclusive_group(required=True)
+    access_mode.add_argument("--service-key-stdin", action="store_true")
+    access_mode.add_argument(
+        "--local-live-api",
+        type=_local_live_api_origin,
+        metavar="HTTP_LOOPBACK_ORIGIN",
+        help="reuse a live TAGO-ready Busro service on a literal loopback HTTP origin",
+    )
     parser.add_argument("--request-budget", type=int, default=9_000)
     parser.add_argument("--requests-per-second", type=float, default=2.0)
     parser.add_argument("--page-size", type=int, default=100)
@@ -554,9 +863,30 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if not 0.5 <= args.timeout_seconds <= 30:
         raise SystemExit("--timeout-seconds must be 0.5..30")
-    service_key = getpass.getpass("TAGO decoded service key: ")
-    if not service_key:
-        raise SystemExit("TAGO service key is required")
+    if args.service_key_stdin:
+        service_key = getpass.getpass("TAGO decoded service key: ")
+        if not service_key:
+            raise SystemExit("TAGO service key is required")
+
+        def live_fetch(operation: str, parameters: dict[str, str]) -> dict[str, Any]:
+            return fetch_catalog(
+                operation=operation,
+                parameters=parameters,
+                service_key=service_key,
+                timeout_seconds=args.timeout_seconds,
+                fixture_mode=False,
+                fixture_path=Path("unused"),
+            )
+
+    else:
+        local_fetch = LocalLiveApiFetcher(
+            args.local_live_api, timeout_seconds=args.timeout_seconds
+        )
+        try:
+            local_fetch.verify_ready()
+        except TagoError as exc:
+            raise SystemExit("Local Busro API is not live and TAGO-ready") from exc
+        live_fetch = local_fetch
     config = IngestConfig(
         request_budget=args.request_budget,
         requests_per_second=args.requests_per_second,
@@ -569,16 +899,6 @@ def main(argv: list[str] | None = None) -> int:
         refresh_complete=args.refresh_complete,
     )
     catalog = NetworkCatalog(args.catalog_db)
-
-    def live_fetch(operation: str, parameters: dict[str, str]) -> dict[str, Any]:
-        return fetch_catalog(
-            operation=operation,
-            parameters=parameters,
-            service_key=service_key,
-            timeout_seconds=args.timeout_seconds,
-            fixture_mode=False,
-            fixture_path=Path("unused"),
-        )
 
     result = TopologyIngestor(
         catalog=catalog, fetcher=live_fetch, config=config

@@ -95,6 +95,17 @@ python -B topology_ingest.py `
 
 디코딩 서비스키는 비표시 프롬프트에 입력합니다. 키·요청 URL·쿼리 문자열은 출력하거나 DB에 저장하지 않습니다. 기본 9,000회 상한은 일일 10,000회 쿼터에 여유를 둔 값이며, 실제 포털 쿼터가 다르면 더 낮춰야 합니다.
 
+이미 키를 메모리에만 보관한 live 서버가 실행 중이면 키를 다시 복사하지 않고 loopback 프록시로 적재할 수 있습니다. 아래 모드는 포트가 명시된 리터럴 loopback HTTP origin과 고정된 카탈로그 GET 경로만 허용하며 프록시·리디렉션·2MB 초과 응답을 거부합니다. `--service-key-stdin`과 동시에 사용할 수 없습니다.
+
+```powershell
+python -B topology_ingest.py `
+  --catalog-db ..\..\..\..\work\network_catalog.runtime.sqlite3 `
+  --local-live-api http://127.0.0.1:8791 `
+  --request-budget 900 `
+  --requests-per-second 2 `
+  --target-source tago
+```
+
 수집기는 노선별 최대 100개×10페이지로 제한하며 페이지 내용·다음 페이지·실패 코드·실행별 사용 요청 수·전체 커버리지를 SQLite에 기록합니다. 중단 또는 쿼터 소진 후 같은 명령을 다시 실행하면 저장된 다음 페이지부터 재개합니다. 이미 완료한 노선도 다시 확인하려면 `--refresh-complete`를 붙이며, 정류장열 SHA-256이 같으면 새 버전을 만들지 않습니다.
 
 `--target-source catalog`는 기본 거부됩니다. 특정 정적 카탈로그의 도시/노선 ID가 TAGO와 동일하다는 별도 검증을 마친 경우에만 `--trust-catalog-identifiers`를 함께 쓸 수 있습니다. 현재 번들 TS 노선 CSV에는 이 보장을 적용하지 않습니다.
