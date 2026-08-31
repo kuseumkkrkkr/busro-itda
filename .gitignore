@@ -5,6 +5,7 @@
 
 # Runtime data and temporary work copies
 work/
+tmp/
 **/service/data/busro_itda.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm

@@ -414,9 +414,19 @@ def fetch_catalog(
         if payload.lstrip().startswith(b"<"):
             raise _error_from_xml(payload) from exc
         raise TagoError("UPSTREAM_INVALID_JSON", "TAGO returned invalid JSON") from exc
-    header = data.get("response", {}).get("header", {}) if isinstance(data, dict) else {}
-    result_code = str(header.get("resultCode", ""))
-    if result_code and result_code not in {"00", "0000"}:
+    response = data.get("response") if isinstance(data, dict) else None
+    header = response.get("header") if isinstance(response, dict) else None
+    result_code = (
+        str(header.get("resultCode")).strip()
+        if isinstance(header, dict) and header.get("resultCode") is not None
+        else ""
+    )
+    if not result_code:
+        raise TagoError(
+            "UPSTREAM_MALFORMED_RESPONSE",
+            "TAGO catalog response did not include a result code",
+        )
+    if result_code not in {"00", "0000"}:
         raise TagoError(result_code, str(header.get("resultMsg") or "TAGO request failed"))
     return data
 

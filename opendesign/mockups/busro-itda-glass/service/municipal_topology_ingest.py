@@ -303,7 +303,10 @@ def import_municipal_topology_csv(
         }
         for route in routes
     ]
-    batch = catalog.hydrate_route_sequences_batch(sequences)
+    batch = catalog.hydrate_route_sequences_batch(
+        sequences,
+        activation_policy="preserve_newer",
+    )
     unique_stops = {
         stop["node_id"] for route in routes for stop in route["stops"]
     }
@@ -326,6 +329,7 @@ def import_municipal_topology_csv(
         "unique_stop_count": len(unique_stops),
         "created": batch["created"],
         "activated": batch["activated"],
+        "skipped_older": batch["skipped_older"],
         "unchanged": len(routes) - batch["activated"],
         "revision": batch["revision"],
     }

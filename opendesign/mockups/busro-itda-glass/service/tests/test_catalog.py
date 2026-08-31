@@ -23,6 +23,7 @@ from config import Settings  # noqa: E402
 from server import BusroHTTPServer, Handler  # noqa: E402
 from tago import (  # noqa: E402
     CATALOG_OPERATIONS,
+    TagoError,
     fetch_catalog,
     normalize_catalog,
 )
@@ -160,6 +161,164 @@ class CatalogCase(unittest.TestCase):
         self.assertIn("serviceKey=abc%2Bdef%2Fghi%3D", url)
         self.assertIn("routeNo=101", url)
         self.assertNotIn("abc+def/ghi=", url)
+
+    def test_catalog_rejects_http_200_envelope_without_result_code(self) -> None:
+        response_body = {
+            "response": {
+                "header": {"resultCode": "", "resultMsg": ""},
+                "body": {"items": "", "totalCount": 0},
+            }
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return json.dumps(response_body).encode("utf-8")
+
+        with patch("tago.urlopen", return_value=FakeResponse()):
+            with self.assertRaises(TagoError) as raised:
+                fetch_catalog(
+                    operation="routes",
+                    parameters={"cityCode": "25", "routeNo": "607"},
+                    service_key="decoded-key",
+                    timeout_seconds=3,
+                    fixture_mode=False,
+                    fixture_path=SERVICE_DIR / "fixtures" / "tago_catalog.json",
+                )
+        self.assertEqual(raised.exception.code, "UPSTREAM_MALFORMED_RESPONSE")
+
+    def _live_service(self, name: str) -> BusroService:
+        return BusroService(
+            replace(
+                self.settings,
+                fixture_mode=False,
+                tago_service_key="decoded-key",
+                db_path=Path(self.temp.name) / f"{name}.sqlite3",
+                network_catalog_path=Path(self.temp.name) / f"{name}-network.sqlite3",
+            ),
+            clock=lambda: FIXED_NOW,
+        )
+
+    @staticmethod
+    def _route_payload(*items: dict[str, str]) -> dict:
+        return {
+            "response": {
+                "header": {"resultCode": "00", "resultMsg": "NORMAL SERVICE."},
+                "body": {"items": {"item": list(items)}, "totalCount": len(items)},
+            }
+        }
+
+    def test_route_number_malformed_response_uses_one_exact_unfiltered_retry(self) -> None:
+        service = self._live_service("route-number-fallback")
+        fallback = self._route_payload(
+            {"citycode": "25", "routeid": "DJB_OTHER", "routeno": "607-1"},
+            {"citycode": "25", "routeid": "DJB_607", "routeno": "607"},
+        )
+        calls: list[dict] = []
+
+        def fake_fetch(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise TagoError(
+                    "UPSTREAM_MALFORMED_RESPONSE",
+                    "TAGO catalog response did not include a result code",
+                )
+            return fallback
+
+        with patch("app.fetch_catalog", side_effect=fake_fetch):
+            result = service.routes({"city_code": "25", "route_no": "607"})
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("routeNo", calls[0]["parameters"])
+        self.assertNotIn("routeNo", calls[1]["parameters"])
+        self.assertEqual([route["route_id"] for route in result["routes"]], ["DJB_607"])
+        fallback_meta = result["upstream"]["verification_fallback"]
+        self.assertEqual(fallback_meta["bounded_additional_calls"], 1)
+        self.assertEqual(fallback_meta["strategy"], "same_city_page_exact_route_no")
+        self.assertEqual(result["provenance"]["operation"], "routes")
+
+    def test_route_info_malformed_response_requires_exact_official_route_id(self) -> None:
+        service = self._live_service("route-info-fallback")
+        fallback = self._route_payload(
+            {"citycode": "26", "routeid": "USB_OTHER", "routeno": "114"},
+            {
+                "citycode": "26",
+                "routeid": "USB192000006",
+                "routeno": "115",
+                "startnodenm": "첫 정류장",
+                "endnodenm": "종점",
+            },
+        )
+        calls: list[dict] = []
+
+        def fake_fetch(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise TagoError(
+                    "UPSTREAM_MALFORMED_RESPONSE",
+                    "TAGO catalog response did not include a result code",
+                )
+            return fallback
+
+        with patch("app.fetch_catalog", side_effect=fake_fetch):
+            result = service.route_info(
+                {"city_code": "26", "route_id": "USB192000006"}
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["operation"], "route_info")
+        self.assertEqual(calls[1]["operation"], "routes")
+        self.assertEqual(calls[1]["parameters"]["numOfRows"], "100")
+        self.assertEqual(result["route"]["route_id"], "USB192000006")
+        self.assertEqual(result["route"]["route_no"], "115")
+        self.assertEqual(result["provenance"]["operation"], "route_info")
+        self.assertEqual(result["provenance"]["upstream_operation"], "routes")
+        self.assertEqual(
+            result["upstream"]["verification_fallback"]["strategy"],
+            "same_city_first_page_exact_route_id",
+        )
+
+    def test_bounded_fallback_does_not_claim_absence_without_exact_match(self) -> None:
+        service = self._live_service("route-fallback-no-match")
+        calls = 0
+
+        def fake_fetch(**_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TagoError("UPSTREAM_MALFORMED_RESPONSE", "missing result code")
+            return self._route_payload(
+                {"citycode": "25", "routeid": "DJB_607_1", "routeno": "607-1"}
+            )
+
+        with patch("app.fetch_catalog", side_effect=fake_fetch):
+            with self.assertRaises(AppError) as raised:
+                service.routes({"city_code": "25", "route_no": "607"})
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(raised.exception.code, "UPSTREAM_MALFORMED_RESPONSE")
+        self.assertEqual(service.store.counts()["catalog_snapshots"], 0)
+
+    def test_official_tago_error_is_not_retried_as_malformed(self) -> None:
+        service = self._live_service("route-no-error-retry")
+        calls = 0
+
+        def fake_fetch(**_kwargs):
+            nonlocal calls
+            calls += 1
+            raise TagoError("22", "LIMITED NUMBER OF SERVICE REQUESTS EXCEEDS ERROR")
+
+        with patch("app.fetch_catalog", side_effect=fake_fetch):
+            with self.assertRaises(AppError) as raised:
+                service.routes({"city_code": "25", "route_no": "607"})
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(raised.exception.code, "22")
 
     def test_malicious_and_unbounded_catalog_inputs_are_rejected(self) -> None:
         cases = (

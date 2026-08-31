@@ -440,6 +440,8 @@ class NetworkCatalog:
                 );
                 CREATE INDEX IF NOT EXISTS idx_catalog_stops_search
                     ON catalog_stops(city_code,node_name,node_id);
+                CREATE INDEX IF NOT EXISTS idx_catalog_stops_source_node
+                    ON catalog_stops(source_id,node_id,city_code);
                 CREATE TABLE IF NOT EXISTS catalog_routes (
                     source_id TEXT NOT NULL REFERENCES catalog_sources(source_id) ON DELETE CASCADE,
                     city_code TEXT NOT NULL,
@@ -1009,6 +1011,7 @@ class NetworkCatalog:
         ordered_stops: Iterable[Mapping[str, Any]],
         source: str,
         captured_at: str,
+        activation_policy: str = "replace",
     ) -> dict[str, Any]:
         result = self.hydrate_route_sequences_batch(
             [
@@ -1019,13 +1022,16 @@ class NetworkCatalog:
                     "source": source,
                     "captured_at": captured_at,
                 }
-            ]
+            ],
+            activation_policy=activation_policy,
         )
         return result["sequences"][0]
 
     def hydrate_route_sequences_batch(
         self,
         sequences: Iterable[Mapping[str, Any]],
+        *,
+        activation_policy: str = "replace",
     ) -> dict[str, Any]:
         """Validate and activate multiple authoritative routes atomically.
 
@@ -1034,6 +1040,16 @@ class NetworkCatalog:
         normalized before SQLite is opened for writes, and the catalog revision
         changes at most once for the whole batch.
         """
+        policy = _safe_text(
+            activation_policy,
+            "activation_policy",
+            required=True,
+            maximum=32,
+        )
+        if policy not in {"replace", "preserve_newer"}:
+            raise CatalogValidationError(
+                "activation_policy must be replace or preserve_newer"
+            )
         raw_sequences = list(sequences)
         if not 1 <= len(raw_sequences) <= MAX_SEQUENCE_BATCH:
             raise CatalogLimitError(
@@ -1139,10 +1155,31 @@ class NetworkCatalog:
                         ],
                     )
                 active = connection.execute(
-                    "SELECT sequence_id FROM active_route_sequences WHERE city_code=? AND route_id=?",
+                    "SELECT a.sequence_id,v.captured_at,v.sha256 "
+                    "FROM active_route_sequences a "
+                    "JOIN route_sequence_versions v ON v.sequence_id=a.sequence_id "
+                    "WHERE a.city_code=? AND a.route_id=?",
                     (sequence["city_code"], sequence["route_id"]),
                 ).fetchone()
-                activated = active is None or active["sequence_id"] != sequence_id
+                if (
+                    active is not None
+                    and policy == "preserve_newer"
+                    and sequence["captured_at"] == active["captured_at"]
+                    and sequence["sha256"] != active["sha256"]
+                ):
+                    raise CatalogValidationError(
+                        "same captured_at has a different active topology hash"
+                    )
+                skipped_older = bool(
+                    active is not None
+                    and policy == "preserve_newer"
+                    and sequence["captured_at"] < active["captured_at"]
+                )
+                activated = bool(
+                    not skipped_older
+                    and (active is None or active["sequence_id"] != sequence_id)
+                )
+                sequence["skipped_older"] = skipped_older
                 sequence["activated"] = activated
                 if activated:
                     connection.execute(
@@ -1172,6 +1209,7 @@ class NetworkCatalog:
                 "revision": revision,
                 "created": sequence["created"],
                 "activated": sequence["activated"],
+                "skipped_older": sequence["skipped_older"],
             }
             for sequence in normalized
         ]
@@ -1179,6 +1217,8 @@ class NetworkCatalog:
             "route_count": len(results),
             "created": sum(1 for result in results if result["created"]),
             "activated": sum(1 for result in results if result["activated"]),
+            "skipped_older": sum(1 for result in results if result["skipped_older"]),
+            "activation_policy": policy,
             "revision": revision,
             "sequences": results,
         }

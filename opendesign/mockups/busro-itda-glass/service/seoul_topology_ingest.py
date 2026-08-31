@@ -542,12 +542,16 @@ def import_seoul_topology_xlsx(
         }
         for route in parsed.routes
     ]
-    batch = catalog.hydrate_route_sequences_batch(sequences)
+    batch = catalog.hydrate_route_sequences_batch(
+        sequences,
+        activation_policy="preserve_newer",
+    )
     return {
         **parsed.summary(profile),
         "mode": "import",
         "created": batch["created"],
         "activated": batch["activated"],
+        "skipped_older": batch["skipped_older"],
         "unchanged": parsed.route_count - batch["activated"],
         "revision": batch["revision"],
     }

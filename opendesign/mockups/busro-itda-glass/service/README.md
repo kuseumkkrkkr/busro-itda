@@ -38,7 +38,39 @@
 
 [버스노선별 경유정류장](https://www.data.go.kr/data/15142031/openapi.do)은 시도·시군구·운행일자별 `sttn_seq`를 제공하는 별도 보조 출처입니다. 좌표와 운행회차 방향 식별자가 없으므로 전국 기본 그래프의 단독 대체재로 간주하지 않습니다.
 
-2026-08-31 현재 개발계정에서 버스노선정보·버스정류소정보·버스노선별 경유정류장 3종의 자동승인을 확인했습니다. 실제 키 값은 이 문서·명령줄·Git에 기록하지 않습니다.
+### 국토부 전국 노선별 정류장 순서 일괄 적재
+
+`15142031` 승인 후에는 현행 법정동 코드 ZIP을 기준으로 269개 시군구를 자동 순회할 수 있습니다. `rte_id`를 생략한 지역 배치 응답을 재시도 가능한 별도 stage DB에 저장하고, 모든 페이지가 끝난 뒤에만 정류장 원장과 정확히 조인합니다. 교차 지역에서 같은 `RTE_ID`가 반복되면 동일 순서는 1건으로 정규화하고, 순서·메타데이터가 다르면 충돌로 격리합니다. 좌표나 ID를 이름·거리로 추측하지 않으며 `preserve_newer` 정책으로 더 오래된 자료가 현재 버전을 덮지 않습니다.
+
+```powershell
+python -B molit_route_stop_ingest.py `
+  --collect `
+  --legal-dong-codes ..\..\..\..\work\official-data\legal_dong_codes_20260901.zip `
+  --opr-ymd 20260901 `
+  --page-size 1000 `
+  --request-budget 1000 `
+  --stage-db ..\..\..\..\work\molit-nationwide-stage.sqlite3 `
+  --catalog-db .\data\network_catalog.sqlite3 `
+  --activate `
+  --service-key-stdin
+```
+
+`--request-budget`은 재시도 물리 호출까지 포함합니다. 일일 쿼터에 맞춰 여러 번 같은 명령을 재실행하면 완료 지역은 건너뛰고 중단한 페이지부터 재개합니다. `BUDGET_EXHAUSTED`는 데이터 오류가 아니라 남은 지역을 다음 실행으로 넘겼다는 뜻이며, 최종 `COMPLETE` 전에는 전국 원장으로 표시하지 않습니다. 키는 프롬프트에만 입력하고 명령줄·stage·로그에 저장하지 않습니다.
+
+### TS-BIS 노선별 운행 요약 적재
+
+공식 TS-BIS 파일은 노선별 운행요일·일일 횟수·양방향 첫차/막차·배차간격 요약만 제공하므로 `gtfs_*`에 가짜 회차를 만들지 않고 별도 `route_service_summaries` 원장으로 저장합니다.
+
+```powershell
+python -B route_service_summary_ingest.py `
+  --csv ..\..\..\..\work\official-data\ts_bis_schedules_20260716.csv `
+  --catalog-db .\data\network_catalog.sqlite3 `
+  --apply
+```
+
+원문 값은 보정하지 않고 품질 플래그로 보존합니다. 이 스냅샷에는 최소 배차간격이 최대값보다 큰 공개 행 7건이 있으며, 이를 시간표 신뢰도나 정류장별 도착시각으로 해석하지 않습니다.
+
+2026-08-31 현재 개발계정에서 TAGO 버스노선정보·버스정류소정보의 자동승인을 확인했으며, `15142031` 경유정류장 API는 별도 활용신청·승인 후 호출합니다. 실제 키 값은 이 문서·명령줄·Git에 기록하지 않습니다.
 
 ## 실행
 

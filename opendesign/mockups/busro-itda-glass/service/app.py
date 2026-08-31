@@ -1187,22 +1187,12 @@ class BusroService:
                 existing["cached"] = True
                 return existing
             try:
-                upstream = self._tago_upstream_call(
-                    operation,
-                    lambda: fetch_catalog(
+                upstream, records, metadata, upstream_operation = (
+                    self._catalog_records_with_bounded_fallback(
                         operation=operation,
+                        normalized_query=normalized_query,
                         parameters=parameters,
-                        service_key=self.settings.tago_service_key,
-                        timeout_seconds=self.settings.tago_timeout_seconds,
-                        fixture_mode=self.settings.fixture_mode,
-                        fixture_path=self.settings.catalog_fixture_path,
-                    ),
-                )
-                records, metadata = normalize_catalog(
-                    upstream,
-                    operation=operation,
-                    fallback_city_code=str(normalized_query.get("city_code") or ""),
-                    fallback_route_id=str(normalized_query.get("route_id") or ""),
+                    )
                 )
             except (TagoError, OSError, json.JSONDecodeError) as exc:
                 if isinstance(exc, TagoError):
@@ -1219,7 +1209,7 @@ class BusroService:
             provenance = (
                 "TAGO_SCHEMA_FIXTURE_NOT_LIVE"
                 if self.settings.fixture_mode
-                else f"TAGO:{operation}"
+                else f"TAGO:{upstream_operation}"
             )
             snapshot_id = "cat_" + canonical_hash(
                 {"operation": operation, "request_hash": request_hash, "upstream_hash": upstream_hash}
@@ -1248,6 +1238,7 @@ class BusroService:
                 "provenance": {
                     "provider": "국토교통부 TAGO",
                     "operation": operation,
+                    "upstream_operation": upstream_operation,
                     "fixture": self.settings.fixture_mode,
                     "fixture_notice": "SCHEMA_ONLY_NOT_LIVE" if self.settings.fixture_mode else None,
                     "snapshot_id": snapshot["snapshot_id"],
@@ -1264,6 +1255,104 @@ class BusroService:
             result = dict(result)
             result["cached"] = True
         return result
+
+    def _catalog_records_with_bounded_fallback(
+        self,
+        *,
+        operation: str,
+        normalized_query: dict[str, Any],
+        parameters: dict[str, str],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any], str]:
+        """Fetch a catalog response, with one evidence-preserving route retry.
+
+        Some TAGO deployments return an HTTP-200 envelope whose result code is
+        empty for a filtered route lookup.  Such an envelope is not proof that
+        a route is absent.  For the two exact route lookups used by this app,
+        retry the official route-list operation once without the problematic
+        filter and accept it only when that response contains the exact route.
+        All other malformed/error responses remain failures.
+        """
+
+        def fetch_once(fetch_operation: str, fetch_parameters: dict[str, str]):
+            return self._tago_upstream_call(
+                fetch_operation,
+                lambda: fetch_catalog(
+                    operation=fetch_operation,
+                    parameters=fetch_parameters,
+                    service_key=self.settings.tago_service_key,
+                    timeout_seconds=self.settings.tago_timeout_seconds,
+                    fixture_mode=self.settings.fixture_mode,
+                    fixture_path=self.settings.catalog_fixture_path,
+                ),
+            )
+
+        try:
+            upstream = fetch_once(operation, parameters)
+        except TagoError as primary_error:
+            route_no = str(normalized_query.get("route_no") or "").strip()
+            route_id = str(normalized_query.get("route_id") or "").strip()
+            may_fallback = (
+                not self.settings.fixture_mode
+                and primary_error.code == "UPSTREAM_MALFORMED_RESPONSE"
+                and (
+                    (operation == "routes" and bool(route_no))
+                    or (operation == "route_info" and bool(route_id))
+                )
+            )
+            if not may_fallback:
+                raise
+
+            if operation == "routes":
+                fallback_parameters = {
+                    name: value for name, value in parameters.items() if name != "routeNo"
+                }
+                match_field, match_value = "route_no", route_no
+                strategy = "same_city_page_exact_route_no"
+            else:
+                fallback_parameters = {
+                    "cityCode": str(normalized_query["city_code"]),
+                    "pageNo": "1",
+                    "numOfRows": "100",
+                }
+                match_field, match_value = "route_id", route_id
+                strategy = "same_city_first_page_exact_route_id"
+
+            fallback_upstream = fetch_once("routes", fallback_parameters)
+            fallback_records, fallback_metadata = normalize_catalog(
+                fallback_upstream,
+                operation=operation,
+                fallback_city_code=str(normalized_query.get("city_code") or ""),
+                # An unfiltered list must carry its own route IDs. Injecting the
+                # requested ID would turn an unrelated item into false proof.
+                fallback_route_id="",
+            )
+            exact_records = [
+                record
+                for record in fallback_records
+                if str(record.get(match_field) or "").strip().casefold()
+                == match_value.casefold()
+            ]
+            if not exact_records:
+                raise primary_error
+
+            fallback_metadata = dict(fallback_metadata)
+            fallback_metadata["verification_fallback"] = {
+                "used": True,
+                "reason": primary_error.code,
+                "operation": "routes",
+                "strategy": strategy,
+                "bounded_additional_calls": 1,
+                "exact_match_count": len(exact_records),
+            }
+            return fallback_upstream, exact_records, fallback_metadata, "routes"
+
+        records, metadata = normalize_catalog(
+            upstream,
+            operation=operation,
+            fallback_city_code=str(normalized_query.get("city_code") or ""),
+            fallback_route_id=str(normalized_query.get("route_id") or ""),
+        )
+        return upstream, records, metadata, operation
 
     def arrivals(self, query: dict[str, str], *, bypass_cache: bool = False) -> dict[str, Any]:
         city_code, node_id = self._arrival_query(query)

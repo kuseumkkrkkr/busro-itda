@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 import hashlib
@@ -104,6 +104,20 @@ class NetworkCatalogCase(unittest.TestCase):
         provenance = self.catalog.provenance(limit=10)
         self.assertEqual({item["dataset_kind"] for item in provenance}, {"stops", "routes"})
         self.assertTrue(all(item["source_url"].startswith("https://") for item in provenance))
+
+    def test_stop_resolution_fallback_has_source_node_index(self):
+        with closing(sqlite3.connect(self.catalog.path)) as connection:
+            plan = " ".join(
+                row[3]
+                for row in connection.execute(
+                    "EXPLAIN QUERY PLAN "
+                    "SELECT city_code,node_id FROM catalog_stops "
+                    "WHERE source_id=? AND node_id=? "
+                    "ORDER BY city_code,node_id LIMIT 2",
+                    ("source", "node"),
+                )
+            )
+        self.assertIn("idx_catalog_stops_source_node", plan)
 
     def test_catalog_import_does_not_touch_existing_runtime_database(self):
         runtime_db = self.root / "busro_itda.sqlite3"
@@ -249,6 +263,96 @@ class NetworkCatalogCase(unittest.TestCase):
         self.assertEqual([item.node_order for item in sequence.stops], [1, 4, 9])
         self.assertEqual(sequence.source, "TAGO getRouteAcctoThrghSttnList")
         self.assertEqual(sequence.captured_at, "2026-08-31T00:00:00Z")
+
+    def test_preserve_newer_activation_policy_keeps_live_topology_active(self):
+        def stops(label: str) -> list[dict[str, object]]:
+            return [
+                {
+                    "node_id": f"{label}-A",
+                    "node_name": f"{label} A",
+                    "node_order": 1,
+                    "latitude": 36.5,
+                    "longitude": 127.3,
+                },
+                {
+                    "node_id": f"{label}-B",
+                    "node_name": f"{label} B",
+                    "node_order": 2,
+                    "latitude": 36.51,
+                    "longitude": 127.31,
+                },
+            ]
+
+        live = self.catalog.hydrate_route_sequence(
+            city_code="32010",
+            route_id="CCB250000100",
+            ordered_stops=stops("LIVE"),
+            source="TAGO_ROUTE_STOPS_LIVE_BATCH",
+            captured_at="2026-08-31T04:06:18Z",
+        )
+        revision_after_live = live["revision"]
+
+        older = self.catalog.hydrate_route_sequence(
+            city_code="32010",
+            route_id="CCB250000100",
+            ordered_stops=stops("BULK"),
+            source="CHUNCHEON_MUNICIPAL_FILE",
+            captured_at="2026-03-26T00:00:00Z",
+            activation_policy="preserve_newer",
+        )
+
+        active = self.catalog.active_route_sequence_info(
+            city_code="32010", route_id="CCB250000100"
+        )
+        self.assertTrue(older["created"])
+        self.assertFalse(older["activated"])
+        self.assertTrue(older["skipped_older"])
+        self.assertEqual(older["revision"], revision_after_live)
+        self.assertEqual(active["sequence_id"], live["sequence_id"])
+        self.assertEqual(active["captured_at"], "2026-08-31T04:06:18Z")
+
+        fresher = self.catalog.hydrate_route_sequence(
+            city_code="32010",
+            route_id="CCB250000100",
+            ordered_stops=stops("FRESH"),
+            source="TAGO_ROUTE_STOPS_LIVE_BATCH",
+            captured_at="2026-09-01T00:00:00Z",
+            activation_policy="preserve_newer",
+        )
+        active = self.catalog.active_route_sequence_info(
+            city_code="32010", route_id="CCB250000100"
+        )
+        self.assertTrue(fresher["activated"])
+        self.assertFalse(fresher["skipped_older"])
+        self.assertEqual(active["sequence_id"], fresher["sequence_id"])
+
+        with self.assertRaisesRegex(CatalogValidationError, "different active topology hash"):
+            self.catalog.hydrate_route_sequence(
+                city_code="32010",
+                route_id="CCB250000100",
+                ordered_stops=stops("SAME-DATE-CONFLICT"),
+                source="MOLIT_REGION_BATCH",
+                captured_at="2026-09-01T00:00:00Z",
+                activation_policy="preserve_newer",
+            )
+        active_after_conflict = self.catalog.active_route_sequence_info(
+            city_code="32010", route_id="CCB250000100"
+        )
+        self.assertEqual(active_after_conflict["sequence_id"], fresher["sequence_id"])
+
+        with self.assertRaisesRegex(CatalogValidationError, "activation_policy"):
+            self.catalog.hydrate_route_sequences_batch(
+                [
+                    {
+                        "city_code": "32010",
+                        "route_id": "R-INVALID-POLICY",
+                        "ordered_stops": stops("INVALID"),
+                        "source": "TEST",
+                        "captured_at": "2026-09-01T00:00:00Z",
+                    }
+                ],
+                activation_policy="guess",
+            )
 
     def test_transport_route_id_preserves_hangul_and_rejects_unsafe_characters(self):
         route_id = "GMB수점10"
