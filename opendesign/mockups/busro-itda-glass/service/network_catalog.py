@@ -138,6 +138,8 @@ class RouteStopRecord:
     latitude: float | None
     longitude: float | None
     direction: str
+    can_board: bool = True
+    can_alight: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +161,15 @@ class CatalogSnapshot:
     stops: tuple[StopRecord, ...]
     routes: tuple[RouteRecord, ...]
     route_sequences: tuple[RouteSequence, ...]
+
+
+def _route_stop_payload(stop: RouteStopRecord) -> dict[str, Any]:
+    """Keep legacy all-access sequence hashes stable while hashing restrictions."""
+    payload = asdict(stop)
+    if stop.can_board and stop.can_alight:
+        payload.pop("can_board")
+        payload.pop("can_alight")
+    return payload
 
 
 def _canonical(value: Any) -> str:
@@ -330,6 +341,23 @@ class NetworkCatalog:
                 raise CatalogValidationError(
                     "database path already contains a non-catalog schema; use a dedicated catalog DB"
                 )
+            if "active_gtfs_feeds" in existing_tables:
+                active_feed_columns = {
+                    row[1] for row in connection.execute(
+                        "PRAGMA table_info(active_gtfs_feeds)"
+                    ).fetchall()
+                }
+                if (
+                    "topology_role" not in active_feed_columns
+                    and connection.execute(
+                        "SELECT 1 FROM active_gtfs_feeds LIMIT 1"
+                    ).fetchone()
+                    is not None
+                ):
+                    raise CatalogValidationError(
+                        "legacy active GTFS feed roles are ambiguous; rebuild the "
+                        "catalog before migration"
+                    )
             connection.executescript(
                 """
                 PRAGMA journal_mode=WAL;
@@ -404,6 +432,8 @@ class NetworkCatalog:
                     latitude REAL,
                     longitude REAL,
                     direction TEXT NOT NULL,
+                    can_board INTEGER NOT NULL DEFAULT 1 CHECK(can_board IN (0,1)),
+                    can_alight INTEGER NOT NULL DEFAULT 1 CHECK(can_alight IN (0,1)),
                     PRIMARY KEY(sequence_id,node_order),
                     UNIQUE(sequence_id,node_id,node_order)
                 );
@@ -425,7 +455,9 @@ class NetworkCatalog:
                 );
                 CREATE TABLE IF NOT EXISTS active_gtfs_feeds (
                     provider TEXT PRIMARY KEY,
-                    feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id)
+                    feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id),
+                    topology_role TEXT NOT NULL DEFAULT 'historical_model'
+                        CHECK(topology_role IN ('historical_model','active_topology'))
                 );
                 CREATE TABLE IF NOT EXISTS gtfs_feed_tables (
                     feed_id TEXT NOT NULL REFERENCES gtfs_feed_versions(feed_id) ON DELETE CASCADE,
@@ -660,6 +692,43 @@ class NetworkCatalog:
                 );
                 """
             )
+            route_stop_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(route_sequence_stops)"
+                ).fetchall()
+            }
+            missing_access_columns = {
+                "can_board", "can_alight"
+            } - route_stop_columns
+            if missing_access_columns:
+                legacy_gtfs = connection.execute(
+                    "SELECT 1 FROM gtfs_patterns LIMIT 1"
+                ).fetchone()
+                if legacy_gtfs is not None:
+                    raise CatalogValidationError(
+                        "legacy GTFS catalog must be rebuilt before access-rule migration"
+                    )
+                if "can_board" in missing_access_columns:
+                    connection.execute(
+                        "ALTER TABLE route_sequence_stops ADD COLUMN "
+                        "can_board INTEGER NOT NULL DEFAULT 1 CHECK(can_board IN (0,1))"
+                    )
+                if "can_alight" in missing_access_columns:
+                    connection.execute(
+                        "ALTER TABLE route_sequence_stops ADD COLUMN "
+                        "can_alight INTEGER NOT NULL DEFAULT 1 CHECK(can_alight IN (0,1))"
+                    )
+            active_feed_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(active_gtfs_feeds)"
+                ).fetchall()
+            }
+            if "topology_role" not in active_feed_columns:
+                connection.execute(
+                    "ALTER TABLE active_gtfs_feeds ADD COLUMN topology_role TEXT "
+                    "NOT NULL DEFAULT 'historical_model' "
+                    "CHECK(topology_role IN ('historical_model','active_topology'))"
+                )
             connection.commit()
 
     def _read_source(self, source: Path | bytes | bytearray) -> bytes:
@@ -938,7 +1007,7 @@ class NetworkCatalog:
             )
             captured = _timestamp(item.get("captured_at"))
             stops = self._route_stop_records(city, route, item.get("ordered_stops") or ())
-            canonical_stops = [asdict(stop) for stop in stops]
+            canonical_stops = [_route_stop_payload(stop) for stop in stops]
             digest = hashlib.sha256(
                 _canonical(canonical_stops).encode("utf-8")
             ).hexdigest()
@@ -986,7 +1055,9 @@ class NetworkCatalog:
                         ),
                     )
                     connection.executemany(
-                        "INSERT INTO route_sequence_stops VALUES(?,?,?,?,?,?,?)",
+                        "INSERT INTO route_sequence_stops("
+                        "sequence_id,node_order,node_id,node_name,latitude,longitude,"
+                        "direction,can_board,can_alight) VALUES(?,?,?,?,?,?,?,?,?)",
                         [
                             (
                                 sequence_id,
@@ -996,6 +1067,8 @@ class NetworkCatalog:
                                 stop.latitude,
                                 stop.longitude,
                                 stop.direction,
+                                int(stop.can_board),
+                                int(stop.can_alight),
                             )
                             for stop in stops
                         ],
@@ -1068,6 +1141,20 @@ class NetworkCatalog:
             longitude = _optional_coordinate(item.get("longitude"), "longitude", -180.0, 180.0)
             if (latitude is None) != (longitude is None):
                 raise CatalogValidationError("latitude and longitude must be supplied together")
+            access: dict[str, bool] = {}
+            for field in ("can_board", "can_alight"):
+                if field not in item:
+                    access[field] = True
+                    continue
+                value = item.get(field)
+                if isinstance(value, bool):
+                    access[field] = value
+                elif value in (0, 1, "0", "1"):
+                    access[field] = bool(int(value))
+                else:
+                    raise CatalogValidationError(
+                        f"ordered_stops[{index}].{field} must be boolean"
+                    )
             stops.append(
                 RouteStopRecord(
                     city_code=city,
@@ -1078,6 +1165,8 @@ class NetworkCatalog:
                     latitude=latitude,
                     longitude=longitude,
                     direction=_safe_text(item.get("direction"), "direction", maximum=32),
+                    can_board=access["can_board"],
+                    can_alight=access["can_alight"],
                 )
             )
         return stops
@@ -1093,7 +1182,7 @@ class NetworkCatalog:
         route = _safe_transport_identifier(route_id, "route_id")
         stops = self._route_stop_records(city, route, ordered_stops)
         return hashlib.sha256(
-            _canonical([asdict(item) for item in stops]).encode("utf-8")
+            _canonical([_route_stop_payload(item) for item in stops]).encode("utf-8")
         ).hexdigest()
 
     def active_route_sequence_info(self, *, city_code: str, route_id: str) -> dict[str, Any] | None:
@@ -1118,6 +1207,7 @@ class NetworkCatalog:
         feed_sha256: str,
         member_manifest: Iterable[Mapping[str, Any]],
         table_provenance: Mapping[str, Mapping[str, Any]],
+        topology_role: str = "historical_model",
     ) -> dict[str, Any]:
         """Atomically activate a fully validated, disk-backed GTFS stage."""
         provider_id = _safe_code(provider, "provider")
@@ -1126,6 +1216,13 @@ class NetworkCatalog:
         url = _source_url(source_url)
         dated = _source_date(source_date)
         digest = _sha256(feed_sha256, "feed_sha256")
+        role = _safe_text(
+            topology_role, "topology_role", required=True, maximum=32
+        ).lower()
+        if role not in {"historical_model", "active_topology"}:
+            raise CatalogValidationError(
+                "topology_role must be historical_model or active_topology"
+            )
         identity = hashlib.sha256(
             _canonical(["GTFS", provider_id, url, dated, digest]).encode("utf-8")
         ).hexdigest()
@@ -1300,7 +1397,8 @@ class NetworkCatalog:
                         "SELECT p.pattern_id,p.raw_route_id,p.graph_city_code,p.graph_route_id,"
                         "p.pattern_sha256,p.direction_mask,p.stop_count,"
                         "ps.node_order,ps.raw_stop_id,ps.node_id,ps.node_name,"
-                        "ps.latitude,ps.longitude,ps.direction "
+                        "ps.latitude,ps.longitude,ps.direction,"
+                        "ps.pickup_type,ps.drop_off_type,ps.can_board,ps.can_alight "
                         "FROM gtfs_stage.pattern_stops ps "
                         "JOIN gtfs_stage.patterns p ON p.pattern_id=ps.pattern_id "
                         "ORDER BY ps.pattern_id,ps.node_order"
@@ -1317,11 +1415,11 @@ class NetworkCatalog:
                         )
                     current_pattern: dict[str, Any] | None = None
                     pattern_stops: list[Mapping[str, Any]] = []
-                    raw_stop_ids: list[str] = []
+                    access_vector: list[tuple[str, int, int]] = []
                     sequence_batch: list[tuple[Any, ...]] = []
 
                     def finish_pattern() -> None:
-                        nonlocal current_pattern, pattern_stops, raw_stop_ids
+                        nonlocal current_pattern, pattern_stops, access_vector
                         if current_pattern is None:
                             return
                         expected_count = int(current_pattern["stop_count"])
@@ -1330,7 +1428,7 @@ class NetworkCatalog:
                         pattern_sha = hashlib.sha256(
                             _canonical(
                                 ["GTFS_BUS_PATTERN", provider_id,
-                                 current_pattern["raw_route_id"], raw_stop_ids]
+                                 current_pattern["raw_route_id"], access_vector]
                             ).encode("utf-8")
                         ).hexdigest()
                         route_sha = hashlib.sha256(
@@ -1356,7 +1454,9 @@ class NetworkCatalog:
                             graph_city_code, route_id, pattern_stops
                         )
                         sequence_sha = hashlib.sha256(
-                            _canonical([asdict(item) for item in route_records]).encode("utf-8")
+                            _canonical(
+                                [_route_stop_payload(item) for item in route_records]
+                            ).encode("utf-8")
                         ).hexdigest()
                         sequence_identity = hashlib.sha256(
                             _canonical(
@@ -1380,7 +1480,7 @@ class NetworkCatalog:
                             sequence_batch.clear()
                         current_pattern = None
                         pattern_stops = []
-                        raw_stop_ids = []
+                        access_vector = []
 
                     for row in connection.execute(ordered_pattern_sql):
                         if current_pattern is None or row["pattern_id"] != current_pattern["pattern_id"]:
@@ -1412,9 +1512,17 @@ class NetworkCatalog:
                                 "latitude": row["latitude"],
                                 "longitude": row["longitude"],
                                 "direction": row["direction"],
+                                "can_board": row["can_board"],
+                                "can_alight": row["can_alight"],
                             }
                         )
-                        raw_stop_ids.append(raw_stop_id)
+                        access_vector.append(
+                            (
+                                raw_stop_id,
+                                int(row["pickup_type"]),
+                                int(row["drop_off_type"]),
+                            )
+                        )
                     finish_pattern()
                     if sequence_batch:
                         connection.executemany(
@@ -1487,9 +1595,12 @@ class NetworkCatalog:
                         if collision is not None:
                             raise CatalogValidationError("GTFS route sequence identity conflicts")
                         connection.execute(
-                            "INSERT OR IGNORE INTO route_sequence_stops "
+                            "INSERT OR IGNORE INTO route_sequence_stops("
+                            "sequence_id,node_order,node_id,node_name,latitude,longitude,"
+                            "direction,can_board,can_alight) "
                             "SELECT m.sequence_id,ps.node_order,ps.node_id,ps.node_name,"
-                            "ps.latitude,ps.longitude,ps.direction "
+                            "ps.latitude,ps.longitude,ps.direction,"
+                            "ps.can_board,ps.can_alight "
                             "FROM gtfs_stage.pattern_stops ps "
                             "JOIN temp.gtfs_sequence_map m ON m.pattern_id=ps.pattern_id"
                         )
@@ -1574,13 +1685,18 @@ class NetworkCatalog:
                                 raise CatalogValidationError("existing GTFS feed rows are incomplete")
 
                     previous = connection.execute(
-                        "SELECT feed_id FROM active_gtfs_feeds WHERE provider=?",
+                        "SELECT feed_id,topology_role FROM active_gtfs_feeds WHERE provider=?",
                         (provider_id,),
                     ).fetchone()
                     previous_feed_id = previous["feed_id"] if previous else None
-                    if previous_feed_id and previous_feed_id != feed_id:
+                    previous_role = previous["topology_role"] if previous else None
+                    if previous_feed_id and (
+                        previous_feed_id != feed_id
+                        or previous_role == "active_topology" and role != "active_topology"
+                    ):
                         for old in connection.execute(
-                            "SELECT graph_city_code,graph_route_id FROM gtfs_patterns WHERE feed_id=?",
+                            "SELECT graph_city_code,graph_route_id "
+                            "FROM gtfs_patterns WHERE feed_id=?",
                             (previous_feed_id,),
                         ):
                             deleted = connection.execute(
@@ -1588,26 +1704,29 @@ class NetworkCatalog:
                                 (old["graph_city_code"], old["graph_route_id"]),
                             ).rowcount
                             activated = activated or bool(deleted)
-                    for pattern in connection.execute(
-                        "SELECT p.graph_city_code,p.graph_route_id,m.sequence_id "
-                        "FROM gtfs_stage.patterns p JOIN temp.gtfs_sequence_map m ON m.pattern_id=p.pattern_id"
-                    ):
-                        active = connection.execute(
-                            "SELECT sequence_id FROM active_route_sequences WHERE city_code=? AND route_id=?",
-                            (pattern["graph_city_code"], pattern["graph_route_id"]),
-                        ).fetchone()
-                        if active is None or active["sequence_id"] != pattern["sequence_id"]:
-                            connection.execute(
-                                "INSERT INTO active_route_sequences VALUES(?,?,?) "
-                                "ON CONFLICT(city_code,route_id) DO UPDATE SET sequence_id=excluded.sequence_id",
-                                (pattern["graph_city_code"], pattern["graph_route_id"], pattern["sequence_id"]),
-                            )
-                            activated = True
-                    if previous_feed_id != feed_id:
+                    if role == "active_topology":
+                        for pattern in connection.execute(
+                            "SELECT p.graph_city_code,p.graph_route_id,m.sequence_id "
+                            "FROM gtfs_stage.patterns p JOIN temp.gtfs_sequence_map m "
+                            "ON m.pattern_id=p.pattern_id"
+                        ):
+                            active = connection.execute(
+                                "SELECT sequence_id FROM active_route_sequences WHERE city_code=? AND route_id=?",
+                                (pattern["graph_city_code"], pattern["graph_route_id"]),
+                            ).fetchone()
+                            if active is None or active["sequence_id"] != pattern["sequence_id"]:
+                                connection.execute(
+                                    "INSERT INTO active_route_sequences VALUES(?,?,?) "
+                                    "ON CONFLICT(city_code,route_id) DO UPDATE SET sequence_id=excluded.sequence_id",
+                                    (pattern["graph_city_code"], pattern["graph_route_id"], pattern["sequence_id"]),
+                                )
+                                activated = True
+                    if previous_feed_id != feed_id or previous_role != role:
                         connection.execute(
-                            "INSERT INTO active_gtfs_feeds VALUES(?,?) "
-                            "ON CONFLICT(provider) DO UPDATE SET feed_id=excluded.feed_id",
-                            (provider_id, feed_id),
+                            "INSERT INTO active_gtfs_feeds(provider,feed_id,topology_role) "
+                            "VALUES(?,?,?) ON CONFLICT(provider) DO UPDATE SET "
+                            "feed_id=excluded.feed_id,topology_role=excluded.topology_role",
+                            (provider_id, feed_id, role),
                         )
                         activated = True
                     if activated:
@@ -1633,6 +1752,7 @@ class NetworkCatalog:
         return {
             "feed_id": feed_id,
             "provider": provider_id,
+            "topology_role": role,
             "source_url": url,
             "source_date": dated,
             "sha256": digest,
@@ -1650,7 +1770,7 @@ class NetworkCatalog:
         provider_id = _safe_code(provider, "provider")
         with self.connect() as connection:
             feed = connection.execute(
-                "SELECT f.* FROM active_gtfs_feeds a "
+                "SELECT f.*,a.topology_role FROM active_gtfs_feeds a "
                 "JOIN gtfs_feed_versions f ON f.feed_id=a.feed_id WHERE a.provider=?",
                 (provider_id,),
             ).fetchone()
@@ -1666,6 +1786,7 @@ class NetworkCatalog:
                 "WHERE feed_id=? ORDER BY file_name",
                 (feed["feed_id"],),
             ).fetchall()
+        historical = feed["topology_role"] != "active_topology"
         return {
             "provider": provider_id,
             "data_gap": False,
@@ -1675,10 +1796,17 @@ class NetworkCatalog:
                 "source_date": feed["source_date"],
                 "sha256": feed["sha256"],
                 "imported_at": feed["imported_at"],
+                "topology_role": feed["topology_role"],
                 "members": json.loads(feed["member_manifest_json"]),
                 "tables": [dict(row) for row in tables],
             },
-            "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE",
+            "basis": (
+                "HISTORICAL_GTFS_PRIOR_ONLY"
+                if historical
+                else "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE"
+            ),
+            "projection_allowed": not historical,
+            "model_role": "historical_prior" if historical else None,
             "eligible_for_success_rate": False,
             "validation_required": [
                 "service_calendar_and_exceptions",
@@ -1712,6 +1840,20 @@ class NetworkCatalog:
                 "graph_route_id": route_id,
                 "service_date": day,
                 "trips": [],
+            }
+        if (
+            day is not None
+            and feed_evidence["feed"].get("topology_role") != "active_topology"
+        ):
+            return {
+                **feed_evidence,
+                "data_gap": True,
+                "reason": "HISTORICAL_GTFS_PRIOR_ONLY",
+                "projection_allowed": False,
+                "graph_route_id": route_id,
+                "service_date": day,
+                "trips": [],
+                "success_probability": None,
             }
         feed_id = feed_evidence["feed"]["feed_id"]
         with self.connect() as connection:
@@ -1808,7 +1950,8 @@ class NetworkCatalog:
             "pattern": pattern_result,
             "trips": trips_result,
             "truncated": len(trip_rows) >= bounded or remaining_stop_times <= 0,
-            "basis": "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE",
+            "basis": feed_evidence["basis"],
+            "projection_allowed": feed_evidence["projection_allowed"],
             "eligible_for_success_rate": False,
             "success_probability": None,
         }
@@ -1866,7 +2009,7 @@ class NetworkCatalog:
         with self.connect() as connection:
             connection.execute("BEGIN")
             active_feed = connection.execute(
-                "SELECT feed_id FROM active_gtfs_feeds WHERE provider=?",
+                "SELECT feed_id,topology_role FROM active_gtfs_feeds WHERE provider=?",
                 (provider_id,),
             ).fetchone()
             if active_feed is None:
@@ -1874,6 +2017,20 @@ class NetworkCatalog:
                     "data_gap": True,
                     "reason": "ACTIVE_GTFS_FEED_REQUIRED",
                     "provider": provider_id,
+                    "service_date": day,
+                    "graph_route_id": route_id,
+                    "node_id": stop_id,
+                    "node_order": sequence,
+                    "trip_id": trip_id,
+                }
+            if active_feed["topology_role"] != "active_topology":
+                return {
+                    "data_gap": True,
+                    "reason": "HISTORICAL_GTFS_PRIOR_ONLY",
+                    "provider": provider_id,
+                    "active_feed_id": active_feed["feed_id"],
+                    "topology_role": active_feed["topology_role"],
+                    "projection_allowed": False,
                     "service_date": day,
                     "graph_route_id": route_id,
                     "node_id": stop_id,
@@ -1977,7 +2134,7 @@ class NetworkCatalog:
                 "SELECT value FROM catalog_meta WHERE key='revision'"
             ).fetchone()
             active_row = connection.execute(
-                "SELECT feed_id FROM active_gtfs_feeds WHERE provider=?",
+                "SELECT feed_id,topology_role FROM active_gtfs_feeds WHERE provider=?",
                 (provider_id,),
             ).fetchone()
         cache_key = hashlib.sha256(
@@ -1985,7 +2142,8 @@ class NetworkCatalog:
                 [
                     str(self.path.resolve()),
                     int(revision_row[0] if revision_row else 0),
-                    active_row[0] if active_row else None,
+                    active_row["feed_id"] if active_row else None,
+                    active_row["topology_role"] if active_row else None,
                     provider_id, source_id, origin_id, destination_id, day, clock,
                 ]
             ).encode("utf-8")
@@ -2128,7 +2286,7 @@ class NetworkCatalog:
                 connection.set_progress_handler(abort_long_sql, 10_000)
                 connection.execute("BEGIN")
                 feed = connection.execute(
-                    "SELECT f.* FROM active_gtfs_feeds a "
+                    "SELECT f.*,a.topology_role FROM active_gtfs_feeds a "
                     "JOIN gtfs_feed_versions f ON f.feed_id=a.feed_id WHERE a.provider=?",
                     (provider_id,),
                 ).fetchone()
@@ -2139,6 +2297,28 @@ class NetworkCatalog:
                     )
                 feed_id = str(feed["feed_id"])
                 feed_id_for_gap = feed_id
+                if feed["topology_role"] != "active_topology":
+                    gap = self._gtfs_schedule_gap(
+                        provider_id,
+                        civil_day_text,
+                        departure_time,
+                        "HISTORICAL_GTFS_PRIOR_ONLY",
+                        feed_id=feed_id,
+                    )
+                    gap["schedule"].update(
+                        {
+                            "basis": "HISTORICAL_GTFS_PRIOR_ONLY",
+                            "topology_role": "historical_model",
+                            "projection_allowed": False,
+                            "success_probability": None,
+                        }
+                    )
+                    gap["schedule"]["limitations"] = [
+                        "NOT_A_CURRENT_TIMETABLE",
+                        "MUST_MATCH_CURRENT_TAGO_IDENTIFIERS_AND_ACTUAL_OBSERVATIONS",
+                        "CANNOT_INDEPENDENTLY_PRODUCE_RELIABILITY_PROBABILITY",
+                    ]
+                    return gap
                 endpoints = {}
                 for key, node_id in (("origin", origin_id), ("destination", destination_id)):
                     rows = connection.execute(
@@ -2462,6 +2642,8 @@ class NetworkCatalog:
                         "provider": provider_id,
                         "feed_id": feed_id,
                         "source_date": feed["source_date"],
+                        "topology_role": "active_topology",
+                        "projection_allowed": True,
                         "timezone": "Asia/Seoul",
                         "actual_operation_observed": False,
                         "limitations": [
@@ -3466,6 +3648,8 @@ class NetworkCatalog:
                             latitude=item["latitude"],
                             longitude=item["longitude"],
                             direction=item["direction"],
+                            can_board=bool(item["can_board"]),
+                            can_alight=bool(item["can_alight"]),
                         )
                         for item in stop_sequence
                     )
@@ -3545,6 +3729,8 @@ class NetworkCatalog:
                             latitude=item["latitude"],
                             longitude=item["longitude"],
                             direction=item["direction"],
+                            can_board=bool(item["can_board"]),
+                            can_alight=bool(item["can_alight"]),
                         )
                         for item in stop_rows
                     )

@@ -478,6 +478,10 @@ def _initialize_stage(path: Path, *, maximum_bytes: int) -> sqlite3.Connection:
             latitude REAL,
             longitude REAL,
             direction TEXT NOT NULL,
+            pickup_type INTEGER NOT NULL CHECK(pickup_type BETWEEN 0 AND 3),
+            drop_off_type INTEGER NOT NULL CHECK(drop_off_type BETWEEN 0 AND 3),
+            can_board INTEGER NOT NULL CHECK(can_board IN (0,1)),
+            can_alight INTEGER NOT NULL CHECK(can_alight IN (0,1)),
             PRIMARY KEY(pattern_id,node_order)
         ) WITHOUT ROWID;
         """
@@ -832,7 +836,7 @@ def _derive_patterns(stage: sqlite3.Connection, provider: str) -> int:
     current_route = ""
     current_direction: int | None = None
     current_is_bus = False
-    current_stops: list[str] = []
+    current_stops: list[tuple[str, int, int]] = []
     processed_trips = 0
 
     def flush_batches() -> None:
@@ -854,6 +858,9 @@ def _derive_patterns(stage: sqlite3.Connection, provider: str) -> int:
             raise GtfsImportError(f"trip {current_trip!r} must contain at least two stop_times")
         if not current_is_bus:
             return
+        # Access types are part of the route-state identity. This prevents two
+        # trips with the same stop order but different boarding/alighting rules
+        # from being collapsed into an unsafe representative pattern.
         pattern_sha = hashlib.sha256(
             _canonical(
                 ["GTFS_BUS_PATTERN", provider, current_route, current_stops]
@@ -892,7 +899,13 @@ def _derive_patterns(stage: sqlite3.Connection, provider: str) -> int:
                     raise CatalogLimitError(
                         f"trip {current_trip!r} exceeds {MAX_PATTERN_STOPS} stops"
                     )
-                current_stops.append(row["raw_stop_id"])
+                current_stops.append(
+                    (
+                        row["raw_stop_id"],
+                        int(row["pickup_type"] or 0),
+                        int(row["drop_off_type"] or 0),
+                    )
+                )
         finish_trip()
         flush_batches()
         total_trips = int(stage.execute("SELECT COUNT(*) FROM trips").fetchone()[0])
@@ -902,10 +915,13 @@ def _derive_patterns(stage: sqlite3.Connection, provider: str) -> int:
         if not 0 <= pattern_count <= MAX_PATTERNS:
             raise CatalogLimitError(f"GTFS bus patterns cannot exceed {MAX_PATTERNS} rows")
         stage.execute(
-            "INSERT INTO pattern_stops(pattern_id,node_order,raw_stop_id,node_id,node_name,latitude,longitude,direction) "
+            "INSERT INTO pattern_stops(pattern_id,node_order,raw_stop_id,node_id,node_name,latitude,longitude,direction,pickup_type,drop_off_type,can_board,can_alight) "
             "SELECT p.pattern_id,st.stop_sequence,"
             "st.raw_stop_id,s.node_id,s.stop_name,s.latitude,s.longitude,"
-            "CASE p.direction_mask WHEN 1 THEN 'GTFS:0' WHEN 2 THEN 'GTFS:1' ELSE 'GTFS' END "
+            "CASE p.direction_mask WHEN 1 THEN 'GTFS:0' WHEN 2 THEN 'GTFS:1' ELSE 'GTFS' END,"
+            "COALESCE(st.pickup_type,0),COALESCE(st.drop_off_type,0),"
+            "CASE WHEN COALESCE(st.pickup_type,0)=0 THEN 1 ELSE 0 END,"
+            "CASE WHEN COALESCE(st.drop_off_type,0)=0 THEN 1 ELSE 0 END "
             "FROM patterns p JOIN stop_times st ON st.raw_trip_id=p.representative_trip_id "
             "JOIN stops s ON s.raw_stop_id=st.raw_stop_id"
         )
@@ -996,9 +1012,10 @@ def import_gtfs_zip(
     source_url: str,
     source_date: str,
     provider: str,
+    topology_role: str = "historical_model",
     limits: GtfsImportLimits | None = None,
 ) -> dict[str, Any]:
-    """Stream, validate, and atomically activate one official GTFS ZIP."""
+    """Stream and atomically store GTFS, historical-model-only by default."""
     selected_limits = limits or GtfsImportLimits()
     selected_limits.validate()
     provider_id = _provider(provider)
@@ -1048,6 +1065,7 @@ def import_gtfs_zip(
                     feed_sha256=actual_sha256,
                     member_manifest=manifest,
                     table_provenance=provenance,
+                    topology_role=topology_role,
                 )
     return {
         **result,
@@ -1070,6 +1088,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-url", required=True)
     parser.add_argument("--source-date", required=True)
     parser.add_argument("--provider", required=True)
+    parser.add_argument(
+        "--topology-role",
+        choices=("historical_model", "active_topology"),
+        default="historical_model",
+        help="historical_model stores model evidence without activating current routes",
+    )
     return parser
 
 
@@ -1080,6 +1104,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             NetworkCatalog(args.catalog_db), zip_path=args.zip_path,
             expected_sha256=args.expected_sha256, source_url=args.source_url,
             source_date=args.source_date, provider=args.provider,
+            topology_role=args.topology_role,
         )
     except (CatalogError, GtfsImportError, OSError, sqlite3.Error) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)

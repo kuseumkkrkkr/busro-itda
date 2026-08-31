@@ -691,12 +691,12 @@ class Store:
                     passage_count = int(row["passage_count"] or 0)
                     passage[route_id] = {
                         "sample_count": sample_count,
-                        "success_probability": passage_count / sample_count,
+                        "observed_passage_ratio": passage_count / sample_count,
                         "passage_count": passage_count,
                         "data_gap_count": int(row["data_gap_count"] or 0),
                         "regression_count": int(row["regression_count"] or 0),
                         "service_date_count": int(row["service_date_count"] or 0),
-                        "basis": "persisted_live_tago_passage_outcomes",
+                        "basis": "persisted_live_tago_passage_reconstruction",
                         "metric": "observed_consecutive_passage_ratio",
                         "probability_scope": "observation_reconstruction_not_timetable_or_transfer_success",
                         "precision": "polling_window",

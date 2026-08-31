@@ -18,6 +18,19 @@ function isClockTime(value) {
   return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(value || ""));
 }
 
+function journeyUsesCurrentTimetable(journey) {
+  const schedule = journey?.schedule && typeof journey.schedule === "object" ? journey.schedule : {};
+  const topologyRole = String(schedule.topology_role || "");
+  const basis = String(schedule.basis || "");
+  const reason = String(schedule.reason || "");
+  const provider = String(schedule.provider || "");
+  const feedId = String(schedule.feed_id || "");
+  if (schedule.projection_allowed === false || /HISTORICAL_MODEL/i.test(topologyRole) || /HISTORICAL|PRIOR_ONLY|VERIFIED_PRIOR_ONLY/i.test(`${basis} ${reason}`)) return false;
+  const gtfsLike = /GTFS|KTDB/i.test(`${provider} ${basis} ${feedId}`);
+  if (gtfsLike && !(schedule.projection_allowed === true && /ACTIVE_TOPOLOGY/i.test(topologyRole))) return false;
+  return journey?.scheduled === true;
+}
+
 function buildDataGapSimulation(days, code = "JOURNEY_REQUIRED", reason = "전국 여행 후보를 먼저 선택하세요.") {
   const end = new Date();
   const perDay = Array.from({ length: Math.max(1, Number(days) || 7) }, (_, index) => {
@@ -38,6 +51,7 @@ function replayValue(step, key) {
 
 function deriveJourneyLegs(journey, { replayOnly = false } = {}) {
   const steps = Array.isArray(journey?.steps) ? journey.steps : [];
+  const currentTimetableAllowed = journeyUsesCurrentTimetable(journey);
   const groups = [];
   let current = null;
   steps.forEach((step) => {
@@ -87,7 +101,7 @@ function deriveJourneyLegs(journey, { replayOnly = false } = {}) {
     const minimumTransfer = replayRow.minimum_transfer_minutes ?? replayValue(lastRide, "minimum_transfer_minutes");
     const evidenceBlock = replayRow.time_evidence || lastRide?.time_evidence || lastRide?.timetable || lastRide?.replay || {};
     const timeEvidenceSource = cleanIdentifier(replayRow.time_evidence_source || evidenceBlock.source || "");
-    const timeEvidenceVerified = replayRow.time_evidence_verified === true || evidenceBlock.verified === true;
+    const timeEvidenceVerified = currentTimetableAllowed && (replayRow.time_evidence_verified === true || evidenceBlock.verified === true);
     const timeEvidenceTripId = cleanIdentifier(replayRow.time_evidence_trip_id || evidenceBlock.trip_id || "");
     const timeEvidenceFeedId = cleanIdentifier(replayRow.time_evidence_feed_id || evidenceBlock.feed_id || "");
     const nextRouteId = cleanIdentifier(replayRow.next_route_id || evidenceBlock.next_route_id || "");
@@ -256,7 +270,7 @@ function App() {
   )), [effectiveReplayCheckpoints]);
   const replayApplicability = useMemo(() => {
     if (!activeJourney) return "journey_required";
-    if (activeJourney.scheduled === true && Number(activeJourney.transfers) === 0) return "not_applicable";
+    if (journeyUsesCurrentTimetable(activeJourney) && Number(activeJourney.transfers) === 0) return "not_applicable";
     return replayReady ? "ready" : "data_gap";
   }, [activeJourney, replayReady]);
 
@@ -399,7 +413,7 @@ function App() {
       setSimLoading(false); return;
     }
     if (!replayReady) {
-      setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "실제 시간표의 환승 시각 근거가 필요합니다."));
+      setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "검증된 현재 시간표의 환승 시각 근거가 필요합니다."));
       setSimLoading(false); return;
     }
     if (connection.mode !== "live") {
@@ -452,7 +466,7 @@ function App() {
   useEffect(() => {
     if (!activeJourney) setSimulation(buildDataGapSimulation(days));
     else if (replayApplicability === "not_applicable") setSimulation(buildDataGapSimulation(days, "NO_TRANSFER_CONNECTIONS", "직통 경로는 환승 연결 성공·실패 시뮬레이션 대상이 아닙니다."));
-    else if (!replayReady) setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "실제 시간표의 환승 시각 근거가 필요합니다."));
+    else if (!replayReady) setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "검증된 현재 시간표의 환승 시각 근거가 필요합니다."));
     else setSimulation(buildDataGapSimulation(days, "REPLAY_NOT_RUN", "선택 기간의 실제 통과 이력을 재생하세요."));
   }, [days, activeJourney, replayApplicability, replayReady]);
 
@@ -468,9 +482,9 @@ function App() {
     setArrivals([]); setHistory([]); setLiveError(""); setLiveNotice("");
     setLegCoverage({ ...EMPTY_PASSAGE_COVERAGE, code: nextLiveLegs.length ? "PASSAGE_HISTORY_UNAVAILABLE" : "JOURNEY_RIDE_LEGS_REQUIRED" });
     setPassageCoverage({ ...EMPTY_PASSAGE_COVERAGE, code: nextReplayCheckpoints.length ? "PASSAGE_HISTORY_UNAVAILABLE" : "VERIFIED_TRANSFER_CHECKPOINTS_REQUIRED" });
-    setSimulation(candidate.scheduled === true && Number(candidate.transfers) === 0
+    setSimulation(journeyUsesCurrentTimetable(candidate) && Number(candidate.transfers) === 0
       ? buildDataGapSimulation(days, "NO_TRANSFER_CONNECTIONS", "직통 경로는 환승 연결 성공·실패 시뮬레이션 대상이 아닙니다.")
-      : buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "실제 시간표의 환승 시각 근거가 필요합니다."));
+      : buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "검증된 현재 시간표의 환승 시각 근거가 필요합니다."));
     checkConnection(nextMappings, nextOperationalLegs);
     changeTab("journey");
   }
@@ -513,7 +527,7 @@ function App() {
           {tab === "explore" && <NationwideScreen connection={connection} onChooseJourney={openJourney} />}
           {tab === "live" && <LiveScreen journey={activeJourney} connection={connection} legs={effectiveLiveLegs} selectedLeg={selectedLeg} setSelectedLeg={setSelectedLeg} arrivals={arrivals} history={history} passageCoverage={legCoverage} mappingSummary={liveMappingSummary} loading={liveLoading} error={liveError} notice={liveNotice} onRefresh={() => loadLive(leg)} onCollect={collectSnapshot} onExplore={() => changeTab("explore")} />}
           {tab === "simulation" && <SimulationScreen journey={activeJourney} replayReady={replayReady} replayApplicability={replayApplicability} connection={connection} simulation={simulation} days={days} setDays={setDays} passageCoverage={passageCoverage} mappingSummary={replayMappingSummary} loading={simLoading} onRun={runSimulation} onExplore={() => changeTab("explore")} />}
-          {tab === "journey" && <JourneyScreen journey={activeJourney} onExplore={() => changeTab("explore")} />}
+          {tab === "journey" && <JourneyScreen journey={activeJourney} connection={connection} onExplore={() => changeTab("explore")} />}
         </div>
         <BottomDock tab={tab} onChange={changeTab} />
         <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} apiBase={apiBase} setApiBase={setApiBase} connection={connection} journey={activeJourney} mappings={mappings} legs={effectiveOperationalLegs} mappingSummary={operationalMappingSummary} settingsError={settingsError} onMappingChange={updateMapping} onVerifyMapping={verifyMapping} onReconnect={saveConnection} />

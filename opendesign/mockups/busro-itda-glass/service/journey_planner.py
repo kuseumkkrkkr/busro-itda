@@ -1,8 +1,9 @@
 """Deterministic, evidence-aware journey alternatives over hydrated topology.
 
 The planner creates structural candidates only. It never assumes that a route
-operates at a requested time, and it never emits a success probability without
-both explicit service evidence and sufficient passage history.
+operates at a requested time. Reconstructed passages remain coverage evidence;
+success probability stays empty until a separately validated current-timetable,
+actual-outcome, and historical-prior model exists.
 """
 
 from __future__ import annotations
@@ -62,6 +63,8 @@ class GraphNode:
     longitude: float | None
     source: str
     captured_at: str
+    can_board: bool
+    can_alight: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +198,8 @@ class JourneyPlanner:
                     longitude=stop.longitude,
                     source=sequence.source,
                     captured_at=sequence.captured_at,
+                    can_board=stop.can_board,
+                    can_alight=stop.can_alight,
                 )
                 nodes.append(node)
                 indexes.append(index)
@@ -345,16 +350,25 @@ class JourneyPlanner:
             raise PlannerValidationError("preference is not supported")
 
         graph = self.build_graph(catalog, transfer_radius_m=transfer_radius_m)
-        starts = tuple(
+        origin_indexes = tuple(
             index for index in graph.node_id_indexes.get(origin, ())
             if not origin_city_code or graph.nodes[index].city_code == origin_city_code
         )
-        goals = frozenset(
+        destination_indexes = tuple(
             index for index in graph.node_id_indexes.get(destination, ())
-            if not destination_city_code or graph.nodes[index].city_code == destination_city_code
+            if (
+                not destination_city_code
+                or graph.nodes[index].city_code == destination_city_code
+            )
+        )
+        if not origin_indexes or not destination_indexes:
+            return self._gap_result(graph, "STOP_NOT_IN_HYDRATED_SEQUENCE")
+        starts = tuple(index for index in origin_indexes if graph.nodes[index].can_board)
+        goals = frozenset(
+            index for index in destination_indexes if graph.nodes[index].can_alight
         )
         if not starts or not goals:
-            return self._gap_result(graph, "STOP_NOT_IN_HYDRATED_SEQUENCE")
+            return self._gap_result(graph, "STOP_ACCESS_RESTRICTED")
 
         criteria_by_preference = {
             "diverse": ("minimum_transfers", "generalized_cost", "explorer"),
@@ -481,6 +495,8 @@ class JourneyPlanner:
 
     def _transfer_edges(self, graph: GraphSnapshot, node_index: int) -> tuple[GraphEdge, ...]:
         source = graph.nodes[node_index]
+        if not source.can_alight:
+            return ()
         source_route = (source.city_code, source.route_id)
         group_index = graph.state_stop_groups[node_index]
         targets: dict[int, tuple[float, str]] = {}
@@ -489,7 +505,11 @@ class JourneyPlanner:
         # validated per-stop route-state bound).
         for target_index in graph.stop_group_states[group_index]:
             target = graph.nodes[target_index]
-            if target_index != node_index and (target.city_code, target.route_id) != source_route:
+            if (
+                target.can_board
+                and target_index != node_index
+                and (target.city_code, target.route_id) != source_route
+            ):
                 targets[target_index] = (0.0, "shared_node_id")
 
         coordinate = graph.stop_group_coordinates[group_index]
@@ -516,7 +536,10 @@ class JourneyPlanner:
             )[:MAX_WALK_TARGET_STOPS]:
                 for target_index in graph.stop_group_states[target_group]:
                     target = graph.nodes[target_index]
-                    if (target.city_code, target.route_id) != source_route:
+                    if (
+                        target.can_board
+                        and (target.city_code, target.route_id) != source_route
+                    ):
                         targets.setdefault(target_index, (distance, "geodesic_proximity"))
 
         return tuple(
@@ -610,18 +633,21 @@ class JourneyPlanner:
             route for route in route_ids
             if self._has_service_observation(service_evidence.get(route))
         ]
-        passage_covered = [route for route in route_ids if self._passage_probability(passage_history.get(route)) is not None]
+        passage_covered = [
+            route
+            for route in route_ids
+            if self._observed_passage_ratio(passage_history.get(route)) is not None
+        ]
         reasons: list[str] = []
         if len(service_verified) != len(route_ids):
             reasons.append("VERIFIED_TIMETABLE_REQUIRED")
         if len(passage_covered) != len(route_ids):
             reasons.append("PASSAGE_HISTORY_REQUIRED")
+        # Reconstructed consecutive vehicle passages are an observation
+        # coverage metric. They are not early/late, transfer, or whole-journey
+        # outcomes and must never be relabelled as a success probability.
+        reasons.append("VALIDATED_JOURNEY_SUCCESS_MODEL_REQUIRED")
         success_probability: float | None = None
-        if not reasons and route_ids:
-            probability = 1.0
-            for route in route_ids:
-                probability *= self._passage_probability(passage_history.get(route)) or 0.0
-            success_probability = round(probability, 4)
 
         steps = []
         for edge in path:
@@ -657,13 +683,27 @@ class JourneyPlanner:
             "status": "DATA_GAP" if reasons else "READY",
             "reasons": reasons,
             "success_probability": success_probability,
-            "probability_basis": (
-                "persisted_observed_passage_outcome_ratio" if success_probability is not None else None
-            ),
-            "probability_scope": (
-                "observation_reconstruction_not_timetable_or_transfer_success"
-                if success_probability is not None else None
-            ),
+            "probability_basis": None,
+            "probability_scope": None,
+            "reliability": {
+                "status": "DATA_GAP",
+                "success_probability": None,
+                "historical_gtfs_prior": {
+                    "role": "model_weight_only",
+                    "matched_to_current_route": False,
+                    "value": None,
+                    "projection_allowed": False,
+                },
+                "trust_assumption": {
+                    "code": "USUALLY_ON_TIME",
+                    "empirical_probability": False,
+                },
+                "requirements": [
+                    "CURRENT_OFFICIAL_TIMETABLE",
+                    "MATCHED_ACTUAL_EARLY_LATE_OUTCOMES",
+                    "MATCHED_HISTORICAL_GTFS_PRIOR",
+                ],
+            },
             "estimated_minutes": None,
             "operating_assumption": False,
             "transfers": len(transfer_edges),
@@ -714,17 +754,17 @@ class JourneyPlanner:
         except (TypeError, ValueError):
             return False
 
-    def _passage_probability(self, value: Any) -> float | None:
+    def _observed_passage_ratio(self, value: Any) -> float | None:
         if not isinstance(value, Mapping):
             return None
         try:
             samples = int(value.get("sample_count", 0))
-            probability = float(value.get("success_probability"))
+            ratio = float(value.get("observed_passage_ratio"))
         except (TypeError, ValueError):
             return None
-        if samples < self.min_passage_samples or not 0.0 <= probability <= 1.0:
+        if samples < self.min_passage_samples or not 0.0 <= ratio <= 1.0:
             return None
-        return probability
+        return ratio
 
     @staticmethod
     def _evidence_summary(value: Any) -> dict[str, Any] | None:
@@ -733,6 +773,7 @@ class JourneyPlanner:
         allowed = {
             "verified", "basis", "source", "captured_at", "evidence_scope", "metric",
             "probability_scope", "precision",
+            "observed_passage_ratio",
             "observation_count", "arrival_observation_count", "position_observation_count",
             "snapshot_count", "sample_count", "passage_count", "data_gap_count",
             "regression_count", "service_date_count", "first_observed_at", "last_observed_at",

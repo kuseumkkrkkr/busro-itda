@@ -126,7 +126,10 @@ function RouteBrowser({ connection, onUseStop }) {
       setLoading(false);
     }
   }
-  return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(OSMRouteMap, { geometry: geometryPayload?.geometry, stops, positions, loading }), /* @__PURE__ */ React.createElement(GlassCard, { className: "nation-search-card" }, /* @__PURE__ */ React.createElement("div", { className: "nation-mode-title" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "DATA ADMIN \xB7 ROUTE INSPECTOR"), /* @__PURE__ */ React.createElement("h1", null, "\uAC1C\uBCC4 \uB178\uC120", /* @__PURE__ */ React.createElement("br", null), /* @__PURE__ */ React.createElement("em", null, "\uB370\uC774\uD130 \uAC80\uC99D"))), /* @__PURE__ */ React.createElement(SourceBadge, { mode: connection.mode, label: connection.label })), /* @__PURE__ */ React.createElement("form", { className: "route-search-form", onSubmit: search }, /* @__PURE__ */ React.createElement("label", null, /* @__PURE__ */ React.createElement("span", null, "\uC9C0\uC5ED"), /* @__PURE__ */ React.createElement("select", { value: cityCode, onChange: (event) => setCityCode(event.target.value), "aria-label": "\uBC84\uC2A4 \uC9C0\uC5ED \uC120\uD0DD" }, /* @__PURE__ */ React.createElement("option", { value: "" }, "\uC9C0\uC5ED \uC120\uD0DD"), cities.map((city) => /* @__PURE__ */ React.createElement("option", { key: city.code, value: city.code }, city.name)))), /* @__PURE__ */ React.createElement("label", null, /* @__PURE__ */ React.createElement("span", null, "\uB178\uC120\uBC88\uD638"), /* @__PURE__ */ React.createElement("input", { value: routeQuery, onChange: (event) => setRouteQuery(event.target.value), placeholder: "\uC608: 601", maxLength: "24" })), /* @__PURE__ */ React.createElement("button", { type: "submit", disabled: !cityCode || loading }, /* @__PURE__ */ React.createElement(Icon, { name: "magnifying-glass" }), loading ? "\uC870\uD68C \uC911" : "\uB178\uC120 \uCC3E\uAE30")), /* @__PURE__ */ React.createElement("p", { className: "source-note" }, /* @__PURE__ */ React.createElement(Icon, { name: "database" }), " \uC9C0\uC5ED\xB7\uB178\uC120\xB7\uC815\uB958\uC7A5\uC740 TAGO \uACF5\uC2DD \uC2DD\uBCC4\uC790\uB85C \uC870\uD68C\uD569\uB2C8\uB2E4. \uC11C\uBE44\uC2A4 \uD0A4\uB294 \uBE0C\uB77C\uC6B0\uC800\uC5D0 \uC800\uC7A5\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.")), error && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: "DATA_GAP" }, error), hydrationGap && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "database", title: "\uADF8\uB798\uD504 DATA_GAP" }, hydrationGap, " \uB178\uC120 \uC9C0\uB3C4\uC640 \uC815\uB958\uC7A5 \uBCF4\uAE30\uB294 \uACC4\uC18D \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."), routes.length > 0 && /* @__PURE__ */ React.createElement("section", { className: "route-catalog" }, /* @__PURE__ */ React.createElement("div", { className: "catalog-heading" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "ROUTES"), /* @__PURE__ */ React.createElement("h2", null, cities.find((item) => item.code === cityCode)?.name || "\uC120\uD0DD \uC9C0\uC5ED", " \uB178\uC120")), /* @__PURE__ */ React.createElement("span", null, routes.length, "\uAC1C")), /* @__PURE__ */ React.createElement("div", { className: "route-result-list" }, routes.map((route) => /* @__PURE__ */ React.createElement("button", { type: "button", key: route.routeId, className: selected?.routeId === route.routeId ? "active" : "", onClick: () => openRoute(route) }, /* @__PURE__ */ React.createElement("span", { className: "route-number" }, route.routeNo || "\u2014"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("strong", null, route.startName, " \u2192 ", route.endName), /* @__PURE__ */ React.createElement("small", null, route.routeType, " \xB7 ID ", route.routeId)), /* @__PURE__ */ React.createElement(Icon, { name: "caret-right" }))))), selected && /* @__PURE__ */ React.createElement(GlassCard, { className: "selected-route-card" }, /* @__PURE__ */ React.createElement("div", { className: "selected-route-head" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "SELECTED LINE"), /* @__PURE__ */ React.createElement("h2", null, /* @__PURE__ */ React.createElement("span", null, selected.routeNo), routeInfo?.routeType || selected.routeType)), /* @__PURE__ */ React.createElement(PrecisionBadge, { geometryPayload })), /* @__PURE__ */ React.createElement("div", { className: "route-terminal-row" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("small", null, "\uAE30\uC810"), /* @__PURE__ */ React.createElement("strong", null, routeInfo?.startName || selected.startName), /* @__PURE__ */ React.createElement("span", null, routeInfo?.first_vehicle_time || "\uC2DC\uAC04\uD45C \uCD9C\uCC98 \uD655\uC778 \uD544\uC694")), /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" }), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("small", null, "\uC885\uC810"), /* @__PURE__ */ React.createElement("strong", null, routeInfo?.endName || selected.endName), /* @__PURE__ */ React.createElement("span", null, routeInfo?.last_vehicle_time || "\uC2DC\uAC04\uD45C \uCD9C\uCC98 \uD655\uC778 \uD544\uC694"))), /* @__PURE__ */ React.createElement("div", { className: "route-evidence-row" }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "map-pin" }), " \uACBD\uC720 ", stops.length, "\uAC1C"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "bus" }), " \uD604\uC7AC \uCC28\uB7C9 ", positions.length, "\uB300"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), " \uD3C9\uC77C \uBC30\uCC28 ", routeInfo?.weekday_interval_minutes || "\u2014", "\uBD84")), geometryPayload?.data_gap && /* @__PURE__ */ React.createElement("p", { className: "geometry-caveat" }, geometryPayload.data_gap), /* @__PURE__ */ React.createElement("div", { className: "stop-preview-list" }, stops.slice(0, 8).map((stop, index) => /* @__PURE__ */ React.createElement("button", { type: "button", key: `${stop.node_id}-${index}`, onClick: () => onUseStop(stop) }, /* @__PURE__ */ React.createElement("span", null, stop.node_order || index + 1), /* @__PURE__ */ React.createElement("strong", null, stop.node_name), /* @__PURE__ */ React.createElement("small", null, stop.node_id)))), stops.length > 8 && /* @__PURE__ */ React.createElement("p", { className: "more-stops" }, "\uC678 ", stops.length - 8, "\uAC1C \uC815\uB958\uC7A5 \xB7 \uC9C0\uB3C4\uC5D0\uC11C \uC804\uCCB4 \uD655\uC778")));
+  const selectedFirstTime = validRouteClock(routeInfo?.first_vehicle_time);
+  const selectedLastTime = validRouteClock(routeInfo?.last_vehicle_time);
+  const selectedWeekdayHeadway = validHeadway(routeInfo?.weekday_interval_minutes);
+  return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(OSMRouteMap, { geometry: geometryPayload?.geometry, stops, positions, loading }), /* @__PURE__ */ React.createElement(GlassCard, { className: "nation-search-card" }, /* @__PURE__ */ React.createElement("div", { className: "nation-mode-title" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "DATA ADMIN \xB7 ROUTE INSPECTOR"), /* @__PURE__ */ React.createElement("h1", null, "\uAC1C\uBCC4 \uB178\uC120", /* @__PURE__ */ React.createElement("br", null), /* @__PURE__ */ React.createElement("em", null, "\uB370\uC774\uD130 \uAC80\uC99D"))), /* @__PURE__ */ React.createElement(SourceBadge, { mode: connection.mode, label: connection.label })), /* @__PURE__ */ React.createElement("form", { className: "route-search-form", onSubmit: search }, /* @__PURE__ */ React.createElement("label", null, /* @__PURE__ */ React.createElement("span", null, "\uC9C0\uC5ED"), /* @__PURE__ */ React.createElement("select", { value: cityCode, onChange: (event) => setCityCode(event.target.value), "aria-label": "\uBC84\uC2A4 \uC9C0\uC5ED \uC120\uD0DD" }, /* @__PURE__ */ React.createElement("option", { value: "" }, "\uC9C0\uC5ED \uC120\uD0DD"), cities.map((city) => /* @__PURE__ */ React.createElement("option", { key: city.code, value: city.code }, city.name)))), /* @__PURE__ */ React.createElement("label", null, /* @__PURE__ */ React.createElement("span", null, "\uB178\uC120\uBC88\uD638"), /* @__PURE__ */ React.createElement("input", { value: routeQuery, onChange: (event) => setRouteQuery(event.target.value), placeholder: "\uC608: 601", maxLength: "24" })), /* @__PURE__ */ React.createElement("button", { type: "submit", disabled: !cityCode || loading }, /* @__PURE__ */ React.createElement(Icon, { name: "magnifying-glass" }), loading ? "\uC870\uD68C \uC911" : "\uB178\uC120 \uCC3E\uAE30")), /* @__PURE__ */ React.createElement("p", { className: "source-note" }, /* @__PURE__ */ React.createElement(Icon, { name: "database" }), " \uC9C0\uC5ED\xB7\uB178\uC120\xB7\uC815\uB958\uC7A5\uC740 TAGO \uACF5\uC2DD \uC2DD\uBCC4\uC790\uB85C \uC870\uD68C\uD569\uB2C8\uB2E4. \uC11C\uBE44\uC2A4 \uD0A4\uB294 \uBE0C\uB77C\uC6B0\uC800\uC5D0 \uC800\uC7A5\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.")), error && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: "DATA_GAP" }, error), hydrationGap && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "database", title: "\uADF8\uB798\uD504 DATA_GAP" }, hydrationGap, " \uB178\uC120 \uC9C0\uB3C4\uC640 \uC815\uB958\uC7A5 \uBCF4\uAE30\uB294 \uACC4\uC18D \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."), routes.length > 0 && /* @__PURE__ */ React.createElement("section", { className: "route-catalog" }, /* @__PURE__ */ React.createElement("div", { className: "catalog-heading" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "ROUTES"), /* @__PURE__ */ React.createElement("h2", null, cities.find((item) => item.code === cityCode)?.name || "\uC120\uD0DD \uC9C0\uC5ED", " \uB178\uC120")), /* @__PURE__ */ React.createElement("span", null, routes.length, "\uAC1C")), /* @__PURE__ */ React.createElement("div", { className: "route-result-list" }, routes.map((route) => /* @__PURE__ */ React.createElement("button", { type: "button", key: route.routeId, className: selected?.routeId === route.routeId ? "active" : "", onClick: () => openRoute(route) }, /* @__PURE__ */ React.createElement("span", { className: "route-number" }, route.routeNo || "\u2014"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("strong", null, route.startName, " \u2192 ", route.endName), /* @__PURE__ */ React.createElement("small", null, route.routeType, " \xB7 ID ", route.routeId)), /* @__PURE__ */ React.createElement(Icon, { name: "caret-right" }))))), selected && /* @__PURE__ */ React.createElement(GlassCard, { className: "selected-route-card" }, /* @__PURE__ */ React.createElement("div", { className: "selected-route-head" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "SELECTED LINE"), /* @__PURE__ */ React.createElement("h2", null, /* @__PURE__ */ React.createElement("span", null, selected.routeNo), routeInfo?.routeType || selected.routeType)), /* @__PURE__ */ React.createElement(PrecisionBadge, { geometryPayload })), /* @__PURE__ */ React.createElement("div", { className: "route-terminal-row" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("small", null, "\uAE30\uC810"), /* @__PURE__ */ React.createElement("strong", null, routeInfo?.startName || selected.startName), /* @__PURE__ */ React.createElement("span", null, selectedFirstTime ? `\uCCAB\uCC28 ${selectedFirstTime}` : "\uCCAB\uCC28 \uC815\uBCF4 \uBBF8\uD655\uBCF4")), /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" }), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("small", null, "\uC885\uC810"), /* @__PURE__ */ React.createElement("strong", null, routeInfo?.endName || selected.endName), /* @__PURE__ */ React.createElement("span", null, selectedLastTime ? `\uB9C9\uCC28 ${selectedLastTime}` : "\uB9C9\uCC28 \uC815\uBCF4 \uBBF8\uD655\uBCF4"))), /* @__PURE__ */ React.createElement("div", { className: "route-evidence-row" }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "map-pin" }), " \uACBD\uC720 ", stops.length, "\uAC1C"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "bus" }), " \uD604\uC7AC \uCC28\uB7C9 ", positions.length, "\uB300"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), " \uD3C9\uC77C \uBC30\uCC28 ", selectedWeekdayHeadway ?? "\u2014", selectedWeekdayHeadway ? "\uBD84" : "")), /* @__PURE__ */ React.createElement("p", { className: "route-window-note" }, /* @__PURE__ */ React.createElement(Icon, { name: "info" }), " \uCCAB\uCC28\xB7\uB9C9\uCC28\xB7\uBC30\uCC28\uB294 TAGO \uB178\uC120 \uC6B4\uD589\uCC3D\uC785\uB2C8\uB2E4. \uC815\uB958\uC7A5\uBCC4 \uCD9C\uBC1C\uC2DC\uAC01\uC73C\uB85C \uBC14\uAFB8\uC5B4 \uACC4\uC0B0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."), geometryPayload?.data_gap && /* @__PURE__ */ React.createElement("p", { className: "geometry-caveat" }, geometryPayload.data_gap), /* @__PURE__ */ React.createElement("div", { className: "stop-preview-list" }, stops.slice(0, 8).map((stop, index) => /* @__PURE__ */ React.createElement("button", { type: "button", key: `${stop.node_id}-${index}`, onClick: () => onUseStop(stop) }, /* @__PURE__ */ React.createElement("span", null, stop.node_order || index + 1), /* @__PURE__ */ React.createElement("strong", null, stop.node_name), /* @__PURE__ */ React.createElement("small", null, stop.node_id)))), stops.length > 8 && /* @__PURE__ */ React.createElement("p", { className: "more-stops" }, "\uC678 ", stops.length - 8, "\uAC1C \uC815\uB958\uC7A5 \xB7 \uC9C0\uB3C4\uC5D0\uC11C \uC804\uCCB4 \uD655\uC778")));
 }
 function StopLookup({ label, value, onChange, selected, onSelect, cityCode }) {
   const [results, setResults] = useState([]);
@@ -198,19 +201,49 @@ function replayClock(value, minutesValue) {
   const minuteOfDay = Math.floor(minutes) % 1440;
   return `${String(Math.floor(minuteOfDay / 60)).padStart(2, "0")}:${String(minuteOfDay % 60).padStart(2, "0")}`;
 }
+function evidenceObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function evidenceText(value) {
+  return String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 160);
+}
+function evidenceBoolean(...values) {
+  return values.find((value) => typeof value === "boolean");
+}
+function isGtfsEvidence({ provider = "", basis = "", feedId = "" } = {}) {
+  return /GTFS|KTDB/i.test(`${provider} ${basis} ${feedId}`);
+}
+function isHistoricalEvidence({ topologyRole = "", basis = "", reason = "", projectionAllowed, provider = "", feedId = "" } = {}) {
+  if (projectionAllowed === false) return true;
+  if (/HISTORICAL_MODEL/i.test(topologyRole)) return true;
+  if (/HISTORICAL|PRIOR_ONLY|VERIFIED_PRIOR_ONLY/i.test(`${basis} ${reason}`)) return true;
+  return isGtfsEvidence({ provider, basis, feedId }) && !(projectionAllowed === true && /ACTIVE_TOPOLOGY/i.test(topologyRole));
+}
 function normalizeSchedule(result) {
   const schedule = result?.schedule && typeof result.schedule === "object" ? result.schedule : {};
   const status = String(schedule.status || result?.schedule_status || "DATA_GAP").toUpperCase();
-  const ready = ["READY", "AVAILABLE", "SCHEDULE_READY", "OK"].includes(status);
+  const basis = evidenceText(schedule.basis || result?.schedule_basis);
+  const provider = evidenceText(schedule.provider || result?.schedule_provider);
+  const feedId = evidenceText(schedule.feed_id || result?.schedule_feed_id);
+  const topologyRole = evidenceText(schedule.topology_role || result?.topology_role);
+  const projectionAllowed = evidenceBoolean(schedule.projection_allowed, result?.projection_allowed);
+  const reason = evidenceText(schedule.reason || result?.schedule_reason || result?.reason || "SCHEDULE_DATA_GAP");
+  const historical = isHistoricalEvidence({ topologyRole, basis, reason, projectionAllowed, provider, feedId });
+  const ready = ["READY", "AVAILABLE", "SCHEDULE_READY", "OK"].includes(status) && !historical;
   return {
     ready,
     status: ready ? "READY" : "DATA_GAP",
-    reason: schedule.reason || result?.schedule_reason || result?.reason || "SCHEDULE_DATA_GAP",
+    reason,
     serviceDate: schedule.service_date || result?.service_date || "",
     departureTime: schedule.departure_time || result?.departure_time || "",
-    basis: schedule.basis || result?.schedule_basis || "",
-    provider: schedule.provider || result?.schedule_provider || "",
-    feedId: schedule.feed_id || result?.schedule_feed_id || ""
+    basis,
+    provider,
+    feedId,
+    topologyRole,
+    projectionAllowed,
+    historical,
+    limitations: Array.isArray(schedule.limitations) ? schedule.limitations.map(evidenceText).filter(Boolean) : [],
+    historicalPrior: evidenceObject(schedule.historical_prior || result?.historical_gtfs_prior || result?.reliability?.historical_prior)
   };
 }
 function scheduleEvidence(resultSchedule, candidate) {
@@ -222,12 +255,247 @@ function scheduleEvidence(resultSchedule, candidate) {
   const provider = String(providerRaw).toLowerCase() === "ktdb" ? "KTDB" : String(providerRaw);
   const basis = provenance.basis || candidateEvidence.basis || resultSchedule.basis || source.basis || "";
   const feedId = provenance.feed_id || candidateEvidence.feed_id || candidateEvidence.source_id || resultSchedule.feedId || source.source_id || (typeof replaySource === "string" ? replaySource : "");
+  const topologyRole = provenance.topology_role || candidateEvidence.topology_role || resultSchedule.topologyRole || source.topology_role || "";
+  const projectionAllowed = evidenceBoolean(provenance.projection_allowed, candidateEvidence.projection_allowed, resultSchedule.projectionAllowed, source.projection_allowed);
+  const historical = isHistoricalEvidence({ topologyRole, basis, reason: resultSchedule.reason, projectionAllowed, provider, feedId });
   const official = /OFFICIAL/i.test(String(basis));
-  const basisLabel = basis === "OFFICIAL_STATIC_GTFS_RAW_EVIDENCE" ? "\uACF5\uC2DD \uC815\uC801 GTFS \uC6D0\uBCF8 \uADFC\uAC70" : String(basis || "").replaceAll("_", " ");
+  const basisLabel = String(basis || "").replaceAll("_", " ");
   return {
-    ready: Boolean(provider || feedId || basis),
-    label: [provider ? `${provider}${official ? " \uACF5\uC2DD GTFS" : " GTFS"}` : "", feedId, basisLabel].filter(Boolean).join(" \xB7 ")
+    ready: !historical && Boolean(provider || feedId || basis),
+    historical,
+    provider,
+    feedId,
+    projectionAllowed,
+    label: [provider ? `${provider}${official && !isGtfsEvidence({ provider, basis, feedId }) ? " \uACF5\uC2DD" : ""}` : "", feedId, basisLabel].filter(Boolean).join(" \xB7 ")
   };
+}
+const candidateRouteWindowCache = /* @__PURE__ */ new Map();
+const candidateRouteWindowPending = /* @__PURE__ */ new Map();
+const CANDIDATE_ROUTE_WINDOW_CACHE_LIMIT = 96;
+const CANDIDATE_ROUTE_WINDOW_CACHE_TTL_MS = 5 * 60 * 1e3;
+let activeCandidateRouteWindowBase = "";
+let candidateRouteWindowBaseEpoch = 0;
+function normalizeCandidateRouteWindowBase(value = BusroApi.getBase()) {
+  const raw = String(value || "").trim();
+  try {
+    const parsed = new URL(raw, window.location.href);
+    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.href.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+function activateCandidateRouteWindowBase(apiBase) {
+  if (activeCandidateRouteWindowBase !== apiBase) {
+    activeCandidateRouteWindowBase = apiBase;
+    candidateRouteWindowBaseEpoch += 1;
+  }
+  return candidateRouteWindowBaseEpoch;
+}
+function candidateRouteWindowKey(apiBase, request) {
+  return `${apiBase}|${request.cityCode}|${request.routeId}`;
+}
+function rememberCandidateRouteWindow(key, value) {
+  if (candidateRouteWindowCache.has(key)) candidateRouteWindowCache.delete(key);
+  candidateRouteWindowCache.set(key, value);
+  while (candidateRouteWindowCache.size > CANDIDATE_ROUTE_WINDOW_CACHE_LIMIT) candidateRouteWindowCache.delete(candidateRouteWindowCache.keys().next().value);
+}
+function cachedCandidateRouteWindow(key, now = Date.now()) {
+  const entry = candidateRouteWindowCache.get(key);
+  if (!entry || !Number.isFinite(entry.expiresAt) || entry.expiresAt <= now) {
+    candidateRouteWindowCache.delete(key);
+    return null;
+  }
+  return entry;
+}
+function candidateRouteRequests(candidates) {
+  const rows = [];
+  for (const candidate of candidates) {
+    const routes = Array.isArray(candidate?.routes) ? candidate.routes : [];
+    for (const route of routes) {
+      const cityCode = evidenceText(route?.city_code || route?.cityCode);
+      const routeId = evidenceText(route?.route_id || route?.routeId);
+      if (cityCode && routeId) rows.push({ cityCode, routeId });
+    }
+  }
+  return [...new Map(rows.map((row) => [`${row.cityCode}|${row.routeId}`, row])).values()].slice(0, 12);
+}
+function routeWindowResponseEvidence(payload) {
+  const provenance = evidenceObject(payload?.provenance);
+  const mode = evidenceText(payload?.mode).toLowerCase();
+  const fixtureNotice = evidenceText(payload?.fixture_notice || provenance.fixture_notice);
+  const source = evidenceText(payload?.source || provenance.provider);
+  const fixture = payload?.fixture === true || provenance.fixture === true || mode === "fixture" || /FIXTURE|SCHEMA_ONLY/i.test(`${source} ${fixtureNotice}`);
+  return {
+    mode,
+    provenance: { ...provenance },
+    source,
+    ready: mode === "live" && !fixture && !/SCHEMA_ONLY/i.test(fixtureNotice)
+  };
+}
+function fetchCandidateRouteWindow(request, apiBase, epoch) {
+  const key = candidateRouteWindowKey(apiBase, request);
+  const cached = cachedCandidateRouteWindow(key);
+  if (cached) return Promise.resolve(cached);
+  const existingPending = candidateRouteWindowPending.get(key);
+  if (existingPending?.epoch === epoch) return existingPending.promise;
+  const pending = BusroApi.routeInfo(request.cityCode, request.routeId).then((payload) => {
+    const route = normalizeRoute(payload.route || payload.item || {});
+    const evidence = routeWindowResponseEvidence(payload);
+    const fetchedAt = Date.now();
+    const entry = {
+      apiBase,
+      route: { ...route, city_code: request.cityCode, route_id: request.routeId },
+      ...evidence,
+      fetchedAt,
+      expiresAt: fetchedAt + CANDIDATE_ROUTE_WINDOW_CACHE_TTL_MS
+    };
+    if (epoch !== candidateRouteWindowBaseEpoch || apiBase !== activeCandidateRouteWindowBase) return null;
+    rememberCandidateRouteWindow(key, entry);
+    return entry;
+  }).catch(() => null).finally(() => {
+    if (candidateRouteWindowPending.get(key)?.promise === pending) candidateRouteWindowPending.delete(key);
+  });
+  candidateRouteWindowPending.set(key, { epoch, promise: pending });
+  return pending;
+}
+function useCandidateRouteWindows(candidates) {
+  const requests = candidateRouteRequests(candidates);
+  const apiBase = normalizeCandidateRouteWindowBase();
+  const epoch = activateCandidateRouteWindowBase(apiBase);
+  const signature = `${apiBase}::${requests.map((row) => `${row.cityCode}|${row.routeId}`).join(",")}`;
+  const [windows, setWindows] = useState(() => /* @__PURE__ */ new Map());
+  const [expiryTick, setExpiryTick] = useState(0);
+  useEffect(() => {
+    let active = true;
+    let refreshTimer = null;
+    const queue = [...requests];
+    async function worker() {
+      while (queue.length > 0) await fetchCandidateRouteWindow(queue.shift(), apiBase, epoch);
+    }
+    Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker)).then(() => {
+      if (!active || epoch !== candidateRouteWindowBaseEpoch || apiBase !== activeCandidateRouteWindowBase) return;
+      const next = /* @__PURE__ */ new Map();
+      let nextExpiry = Number.POSITIVE_INFINITY;
+      for (const request of requests) {
+        const entry = cachedCandidateRouteWindow(candidateRouteWindowKey(apiBase, request));
+        if (!entry) continue;
+        next.set(`${request.cityCode}|${request.routeId}`, entry);
+        nextExpiry = Math.min(nextExpiry, entry.expiresAt);
+      }
+      setWindows(next);
+      if (Number.isFinite(nextExpiry)) refreshTimer = window.setTimeout(() => active && setExpiryTick((value) => value + 1), Math.max(1e3, nextExpiry - Date.now() + 25));
+    });
+    return () => {
+      active = false;
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+    };
+  }, [signature, expiryTick]);
+  return windows;
+}
+function validRouteClock(value) {
+  const text = evidenceText(value);
+  if (/^(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(text)) return text;
+  if (/^\d{3,4}$/.test(text)) {
+    const padded = text.padStart(4, "0");
+    const hour = Number(padded.slice(0, 2));
+    const minute = Number(padded.slice(2));
+    if (hour <= 23 && minute <= 59) return `${padded.slice(0, 2)}:${padded.slice(2)}`;
+  }
+  return "";
+}
+function validHeadway(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 && number <= 1440 ? Math.round(number) : null;
+}
+function routeWindowRowAllowed(row) {
+  const value = evidenceObject(row);
+  const provenance = evidenceObject(value.provenance);
+  const mode = evidenceText(value.mode).toLowerCase();
+  const marker = `${evidenceText(value.fixture_notice)} ${evidenceText(value.source)} ${evidenceText(provenance.fixture_notice)} ${evidenceText(provenance.provider)}`;
+  if (value.fixture === true || provenance.fixture === true || mode === "fixture" || /FIXTURE|SCHEMA_ONLY/i.test(marker)) return false;
+  return !mode || mode === "live";
+}
+function routeWindowRows(candidate, context = {}, fetchedWindows = /* @__PURE__ */ new Map()) {
+  const current = evidenceObject(candidate?.current_timetable || candidate?.current_static_timetable || context?.current_timetable || context?.current_static_timetable);
+  const explicit = (Array.isArray(candidate?.route_windows) ? candidate.route_windows : Array.isArray(current.route_windows) ? current.route_windows : []).filter(routeWindowRowAllowed);
+  const routes = Array.isArray(candidate?.routes) ? candidate.routes : [];
+  const fetched = routes.map((route) => fetchedWindows.get(`${evidenceText(route?.city_code || route?.cityCode)}|${evidenceText(route?.route_id || route?.routeId)}`)).filter((entry) => entry?.ready === true).map((entry) => entry.route);
+  return [...explicit, ...fetched, ...routes].map((route, index) => {
+    const row = evidenceObject(route);
+    const first = validRouteClock(row.first_vehicle_time || row.first_time || row.first_departure);
+    const last = validRouteClock(row.last_vehicle_time || row.last_time || row.last_departure);
+    const weekday = validHeadway(row.weekday_interval_minutes || row.weekday_headway_minutes || row.headway_minutes || row.interval_minutes);
+    const saturday = validHeadway(row.saturday_interval_minutes || row.saturday_headway_minutes);
+    const sunday = validHeadway(row.sunday_interval_minutes || row.sunday_headway_minutes);
+    return {
+      key: `${evidenceText(row.city_code || row.cityCode)}|${evidenceText(row.route_id || row.routeId || row.route_no || row.routeNo || index)}`,
+      route: evidenceText(row.route_no || row.routeNo || row.route_id || row.routeId || `\uB178\uC120 ${index + 1}`),
+      first,
+      last,
+      weekday,
+      saturday,
+      sunday
+    };
+  }).filter((row, index, rows) => (row.first || row.last || row.weekday || row.saturday || row.sunday) && rows.findIndex((item) => item.key === row.key) === index).slice(0, 3);
+}
+function currentTimetableEvidence(candidate, context, schedule, timeSummary, fetchedWindows) {
+  const raw = evidenceObject(candidate?.current_timetable || candidate?.current_static_timetable || context?.current_timetable || context?.current_static_timetable);
+  const provider = evidenceText(raw.provider || raw.source_name || raw.municipality || (schedule.ready ? schedule.provider : ""));
+  const granularity = evidenceText(raw.schedule_granularity || raw.granularity || raw.tier);
+  const date = evidenceText(raw.effective_date || raw.valid_from || raw.published_at || raw.source_date);
+  const windows = routeWindowRows(candidate, context, fetchedWindows);
+  const granularityLabel = { EXACT_STOP_TIMES: "\uC815\uB958\uC7A5\uBCC4 \uC2DC\uAC01", TRIP_ORIGIN_ONLY: "\uAE30\uC810 \uCD9C\uBC1C\uD45C", ROUTE_WINDOW: "\uCCAB\uCC28\xB7\uB9C9\uCC28\xB7\uBC30\uCC28" }[granularity] || granularity.replaceAll("_", " ");
+  if (schedule.ready && timeSummary.length > 0) return {
+    ready: true,
+    label: [provider || "\uD604\uC7AC \uACF5\uC2DD \uC2DC\uAC04\uD45C", granularityLabel, date].filter(Boolean).join(" \xB7 "),
+    detail: timeSummary.join(" \xB7 "),
+    windows
+  };
+  if (windows.length > 0 || provider || granularity) return {
+    ready: true,
+    label: [provider || "TAGO", granularityLabel || "ROUTE_WINDOW", date].filter(Boolean).join(" \xB7 "),
+    detail: windows.length > 0 ? "\uC2E4\uC81C \uC218\uC2E0\uB41C \uCCAB\uCC28\xB7\uB9C9\uCC28\xB7\uBC30\uCC28 \uBC94\uC704" : "\uD604\uC7AC \uCD9C\uCC98\uC758 \uC81C\uACF5 \uBC94\uC704\uB9CC \uD45C\uC2DC",
+    windows
+  };
+  return { ready: false, label: "\uC815\uB958\uC7A5\uBCC4 \uCD9C\uBC1C\uC2DC\uAC01 \uBBF8\uD655\uBCF4", detail: "TAGO \uACBD\uB85C\uB294 \uACC4\uC18D \uD45C\uC2DC \xB7 \uC784\uC758 \uC2DC\uAC01 \uC0DD\uC131 \uC548 \uD568", windows: [] };
+}
+function historicalPriorEvidence(candidate, context, schedule, provenance) {
+  const reliability = evidenceObject(candidate?.reliability || context?.reliability);
+  const raw = evidenceObject(candidate?.historical_prior || reliability.historical_gtfs_prior || reliability.historical_prior || context?.historical_prior || schedule.historicalPrior);
+  const evidence = evidenceObject(raw.evidence);
+  const feedId = evidenceText(raw.feed_id || raw.source_id || raw.dataset_id || raw.version_id || raw.evidence_id || evidence.feed_id || evidence.source_id || evidence.dataset_id || evidence.version_id || evidence.evidence_id);
+  const hash = evidenceText(raw.file_sha256 || raw.sha256 || raw.source_hash || evidence.file_sha256 || evidence.sha256 || evidence.source_hash);
+  const explicitEvidence = Boolean(feedId || hash);
+  const matched = raw.matched_to_current_route === true;
+  const present = matched && raw.projection_allowed === false && explicitEvidence;
+  const provider = evidenceText(raw.provider || raw.source || evidence.provider || "GTFS");
+  const hasRawPrior = Object.keys(raw).length > 0;
+  return {
+    present,
+    label: present ? [provider, feedId || (hash ? `SHA-256 ${hash.slice(0, 12)}\u2026` : "")].filter(Boolean).join(" \xB7 ") : matched ? "GTFS \uBAA8\uB378 \uADFC\uAC70 \uC2DD\uBCC4\uC790 \uC5C6\uC74C" : hasRawPrior ? "\uD604\uC7AC \uB178\uC120\uACFC GTFS \uBAA8\uB378 \uADFC\uAC70 \uBBF8\uB9E4\uCE6D" : "GTFS \uACFC\uAC70 \uBAA8\uB378 \uADFC\uAC70 \uBBF8\uC5F0\uACB0",
+    detail: present ? "\uD604\uC7AC \uB178\uC120\uC5D0 \uB9E4\uCE6D\uB41C \uBAA8\uB378 \uAC00\uC911\uCE58 \uC804\uC6A9 \xB7 \uD604\uC7AC \uC2DC\uAC04\uD45C \uD22C\uC601 \uC548 \uD568 \xB7 \uB2E8\uB3C5 \uC131\uACF5\uB960 \uBBF8\uC0B0\uCD9C" : "\uD604\uC7AC \uB178\uC120\uACFC \uBA85\uC2DC\uC801\uC73C\uB85C \uB9E4\uCE6D\uB41C \uADFC\uAC70\uAC00 \uC0DD\uAE30\uAE30 \uC804\uC5D0\uB294 \uAC00\uC911\uCE58\uB85C \uC0AC\uC6A9\uD558\uC9C0 \uC54A\uC74C"
+  };
+}
+function verifiedSuccessProbability(candidate) {
+  const value = candidate?.success_probability;
+  const basis = evidenceText(candidate?.probability_basis || candidate?.reliability?.probability_basis);
+  const scope = evidenceText(candidate?.probability_scope || candidate?.reliability?.probability_scope);
+  if (typeof value !== "number" || !Number.isFinite(value) || !basis || !scope) return null;
+  if (/GTFS|HISTORICAL|PRIOR|RECONSTRUCTION|PASSAGE_OUTCOME_RATIO/i.test(`${basis} ${scope}`)) return null;
+  return Math.max(0, Math.min(1, value));
+}
+function JourneyEvidenceStack({ candidate, context = {}, schedule, provenance, timeSummary, connection, fetchedWindows = /* @__PURE__ */ new Map() }) {
+  const timetable = currentTimetableEvidence(candidate, context, schedule, timeSummary, fetchedWindows);
+  const prior = historicalPriorEvidence(candidate, context, schedule, provenance);
+  const reliability = evidenceObject(candidate?.reliability || context?.reliability);
+  const trust = evidenceObject(reliability.trust_assumption);
+  const live = evidenceObject(candidate?.realtime_adjustment || candidate?.live_adjustment || context?.realtime_adjustment);
+  const liveReady = /READY|LIVE|APPLIED/i.test(evidenceText(live.status || live.state));
+  const liveDetail = liveReady ? evidenceText(live.summary || live.detail || "TAGO \uB3C4\uCC29\xB7\uCC28\uB7C9 \uC704\uCE58 \uBCF4\uC815 \uBC18\uC601") : connection?.mode === "live" || connection?.mode === "ready" ? "TAGO \uC5F0\uACB0\uB428 \xB7 \uC120\uD0DD \uD6C4 \uC815\uB958\uC7A5\uBCC4 \uB3C4\uCC29\uC815\uBCF4\uB85C \uBCF4\uC815" : "\uC120\uD0DD \uD6C4 TAGO \uB3C4\uCC29\uC815\uBCF4\uB85C \uBCF4\uC815 \xB7 \uD604\uC7AC\uAC12 \uC5C6\uC74C";
+  return /* @__PURE__ */ React.createElement("div", { className: "journey-evidence-stack", "aria-label": "\uACBD\uB85C \uB370\uC774\uD130 \uADFC\uAC70" }, /* @__PURE__ */ React.createElement("div", { className: "evidence-tier current" }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "path" })), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("small", null, "1 \xB7 \uD604\uC7AC \uACBD\uB85C"), /* @__PURE__ */ React.createElement("strong", null, "TAGO \uACBD\uC720 \uC21C\uC11C"), /* @__PURE__ */ React.createElement("p", null, "\uD604\uC7AC \uACF5\uC2DD \uC2DD\uBCC4\uC790\uB85C \uC5F0\uACB0\uD55C \uB2E8\uBC29\uD5A5 \uACBD\uB85C"))), /* @__PURE__ */ React.createElement("div", { className: `evidence-tier ${timetable.ready ? "current" : "gap"}` }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "clock" })), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("small", null, "2 \xB7 \uD604\uC7AC \uC815\uC801 \uC2DC\uAC04\uD45C"), /* @__PURE__ */ React.createElement("strong", null, timetable.label), /* @__PURE__ */ React.createElement("p", null, timetable.detail), timetable.windows.map((row) => /* @__PURE__ */ React.createElement("em", { key: row.key }, row.route, " \xB7 ", [row.first ? `\uCCAB\uCC28 ${row.first}` : "", row.last ? `\uB9C9\uCC28 ${row.last}` : "", row.weekday ? `\uD3C9\uC77C ${row.weekday}\uBD84` : "", row.saturday ? `\uD1A0 ${row.saturday}\uBD84` : "", row.sunday ? `\uC77C ${row.sunday}\uBD84` : ""].filter(Boolean).join(" \xB7 "))))), /* @__PURE__ */ React.createElement("div", { className: `evidence-tier ${liveReady ? "live" : "pending"}` }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "broadcast" })), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("small", null, "3 \xB7 \uC2E4\uC2DC\uAC04 \uBCF4\uC815"), /* @__PURE__ */ React.createElement("strong", null, "TAGO \uB3C4\uCC29\xB7\uCC28\uB7C9 \uC704\uCE58"), /* @__PURE__ */ React.createElement("p", null, liveDetail))), /* @__PURE__ */ React.createElement("div", { className: `evidence-tier ${prior.present ? "prior" : "pending"}` }, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "flask" })), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("small", null, "4 \xB7 \uACFC\uAC70 \uBAA8\uB378 \uADFC\uAC70"), /* @__PURE__ */ React.createElement("strong", null, prior.label), /* @__PURE__ */ React.createElement("p", null, prior.detail))), trust.code === "USUALLY_ON_TIME" && /* @__PURE__ */ React.createElement("small", { className: "trust-assumption" }, /* @__PURE__ */ React.createElement(Icon, { name: "shield-check" }), " \uC6B4\uC601 \uAC00\uC815: \uB300\uCCB4\uB85C \uC815\uC2DC \xB7 \uC2E4\uCE21 \uD655\uB960 \uC544\uB2D8"));
 }
 function summarizeJourneyLegs(candidate) {
   const legs = [];
@@ -257,12 +525,15 @@ function summarizeJourneyLegs(candidate) {
   return legs;
 }
 function prepareJourneyForDetail(candidate, context) {
+  const currentSchedule = normalizeSchedule({ schedule: context?.schedule || {} });
   const replayLegs = (Array.isArray(candidate?.replay_legs) ? candidate.replay_legs : []).map((row) => {
     const sourceId = typeof row.time_evidence_source === "object" ? String(row.time_evidence_source.source_id || "") : String(row.time_evidence_source || "");
     const scheduledMinutes = gtfsClockMinutes(row.scheduled_arrival) ?? (row.scheduled_minutes !== null && row.scheduled_minutes !== void 0 && Number.isFinite(Number(row.scheduled_minutes)) ? Number(row.scheduled_minutes) : null);
     const nextDepartureMinutes = gtfsClockMinutes(row.next_departure) ?? (row.next_departure_minutes !== null && row.next_departure_minutes !== void 0 && Number.isFinite(Number(row.next_departure_minutes)) ? Number(row.next_departure_minutes) : null);
     return {
       ...row,
+      scheduled_source_time: String(row.scheduled_arrival || ""),
+      next_departure_source_time: String(row.next_departure || ""),
       scheduled_gtfs_time: String(row.scheduled_arrival || ""),
       next_departure_gtfs_time: String(row.next_departure || ""),
       scheduled_minutes: scheduledMinutes,
@@ -272,7 +543,7 @@ function prepareJourneyForDetail(candidate, context) {
       scheduled_arrival: replayClock(row.scheduled_arrival, scheduledMinutes),
       next_departure: replayClock(row.next_departure, nextDepartureMinutes),
       time_evidence_source: sourceId,
-      time_evidence_verified: row.time_evidence_verified === true || Boolean(row.time_evidence_trip_id && sourceId),
+      time_evidence_verified: currentSchedule.ready && (row.time_evidence_verified === true || Boolean(row.time_evidence_trip_id && sourceId)),
       time_evidence_feed_id: String(row.time_evidence_feed_id || ""),
       next_time_evidence_feed_id: String(row.next_time_evidence_feed_id || "")
     };
@@ -285,18 +556,18 @@ const JOURNEY_CRITERION_LABELS = {
   explorer: "\uD0D0\uD5D8 \uACBD\uB85C",
   earliest_arrival: "\uAC00\uC7A5 \uC774\uB978 \uB3C4\uCC29"
 };
-function JourneyCandidateCard({ candidate, index, schedule, structural = false, context, onChooseJourney }) {
-  const routeIds = Array.isArray(candidate?.route_ids) ? candidate.route_ids.filter(Boolean) : [];
+function JourneyCandidateCard({ candidate, index, schedule, structural = false, context, connection, fetchedWindows, onChooseJourney }) {
+  const routeIds = Array.isArray(candidate?.route_ids) ? candidate.route_ids.filter(Boolean) : Array.isArray(candidate?.routes) ? candidate.routes.map((item) => item?.route_id || item?.routeId).filter(Boolean) : [];
   const legs = summarizeJourneyLegs(candidate);
   const coverage = candidate?.coverage && typeof candidate.coverage === "object" ? candidate.coverage : {};
   const evidence = candidate?.evidence && typeof candidate.evidence === "object" ? candidate.evidence : {};
   const provenance = scheduleEvidence(schedule, candidate);
-  const hasProbability = typeof candidate?.success_probability === "number" && Number.isFinite(candidate.success_probability);
+  const successProbability = verifiedSuccessProbability(candidate);
   const departureTime = formatGtfsClock(candidate?.departure_time, candidate?.departure_seconds);
   const arrivalTime = formatGtfsClock(candidate?.arrival_time, candidate?.arrival_seconds);
   const minutes = Number(candidate?.estimated_minutes);
   const timeSummary = [departureTime ? `\uCD9C\uBC1C ${departureTime}` : "", arrivalTime ? `\uB3C4\uCC29 ${arrivalTime}` : "", Number.isFinite(minutes) ? `${Math.max(0, Math.round(minutes))}\uBD84` : ""].filter(Boolean);
-  return /* @__PURE__ */ React.createElement("article", { className: structural ? "structural-candidate" : "scheduled-candidate" }, /* @__PURE__ */ React.createElement("div", { className: "candidate-rank" }, index + 1), /* @__PURE__ */ React.createElement("div", { className: "candidate-copy" }, /* @__PURE__ */ React.createElement("div", { className: "candidate-title" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", null, JOURNEY_CRITERION_LABELS[candidate?.criterion] || candidate?.criterion || (structural ? "\uBC29\uD5A5 \uACBD\uB85C \uD6C4\uBCF4" : "\uC2DC\uAC04\uD45C \uACBD\uB85C")), /* @__PURE__ */ React.createElement("h3", null, routeIds.length > 0 ? `${candidate?.transfers || 0}\uD68C \uD658\uC2B9 \xB7 ${routeIds.length}\uAC1C \uB178\uC120` : "\uB178\uC120 DATA_GAP")), /* @__PURE__ */ React.createElement("small", { className: structural ? "schedule-gap" : "schedule-ready" }, structural ? "\uC2DC\uAC04 \uBBF8\uAC80\uC99D" : "\uC2DC\uAC04\uD45C \uD655\uC778")), !structural && timeSummary.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "schedule-summary" }, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), /* @__PURE__ */ React.createElement("strong", null, timeSummary.join(" \xB7 "))), structural && /* @__PURE__ */ React.createElement("div", { className: "schedule-gap-copy" }, /* @__PURE__ */ React.createElement(Icon, { name: "warning-circle" }), /* @__PURE__ */ React.createElement("span", null, "\uC815\uB958\uC7A5 \uC9C4\uD589 \uBC29\uD5A5\uB9CC \uD655\uC778\uD588\uC2B5\uB2C8\uB2E4. \uC774 \uB0A0\uC9DC\xB7\uC2DC\uAC01\uC5D0 \uC2E4\uC81C \uC6B4\uD589 \uAC00\uB2A5\uD55C \uACBD\uB85C\uB85C \uD655\uC815\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.")), /* @__PURE__ */ React.createElement("div", { className: "candidate-leg-list" }, legs.map((leg, legIndex) => /* @__PURE__ */ React.createElement("div", { className: "candidate-leg", key: `${leg.routeId}-${leg.tripId}-${legIndex}` }, /* @__PURE__ */ React.createElement("span", { className: "timeline-rail" }, /* @__PURE__ */ React.createElement("i", null), /* @__PURE__ */ React.createElement("b", null)), /* @__PURE__ */ React.createElement("div", { className: "leg-copy" }, /* @__PURE__ */ React.createElement("span", { className: "route-pill" }, /* @__PURE__ */ React.createElement(Icon, { name: "bus" }), " ", leg.routeId), /* @__PURE__ */ React.createElement("strong", null, leg.from?.node_name || leg.from?.node_id || "\uC2B9\uCC28 \uC815\uB958\uC7A5"), !structural && leg.departureTime && /* @__PURE__ */ React.createElement("span", { className: "leg-time" }, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), " ", leg.departureTime, " \uCD9C\uBC1C"), /* @__PURE__ */ React.createElement("small", null, "\uCD1D ", leg.edgeCount + 1, "\uAC1C \uC815\uB958\uC7A5"), /* @__PURE__ */ React.createElement("strong", null, leg.to?.node_name || leg.to?.node_id || "\uD558\uCC28 \uC815\uB958\uC7A5"), !structural && leg.arrivalTime && /* @__PURE__ */ React.createElement("span", { className: "leg-time arrival" }, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), " ", leg.arrivalTime, " \uB3C4\uCC29"), !structural && leg.nextDepartureTime && /* @__PURE__ */ React.createElement("span", { className: "transfer-time" }, "\uB2E4\uC74C \uBC84\uC2A4 ", leg.nextDepartureTime, " \uCD9C\uBC1C"))))), /* @__PURE__ */ React.createElement("footer", null, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "arrows-left-right" }), " ", typeof candidate?.transfers === "number" ? `${candidate.transfers}\uD68C \uD658\uC2B9` : "\uD658\uC2B9 DATA_GAP"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "database" }), " \uC2B9\uCC28 ", evidence.ride_edges ?? "\u2014", " \xB7 \uD658\uC2B9 ", evidence.transfer_edges ?? "\u2014", " \uAC04\uC120"), /* @__PURE__ */ React.createElement("strong", null, hasProbability ? `\uC131\uACF5\uB960 ${Math.round(candidate.success_probability * 100)}%` : "\uC131\uACF5\uB960 DATA_GAP")), !structural && /* @__PURE__ */ React.createElement("small", { className: provenance.ready ? "official-schedule-evidence" : "schedule-evidence-gap" }, /* @__PURE__ */ React.createElement(Icon, { name: provenance.ready ? "shield-check" : "warning-circle" }), " ", provenance.ready ? provenance.label : "\uC2DC\uAC04\uD45C \uCD9C\uCC98 DATA_GAP"), typeof coverage.schedule_routes === "number" && typeof coverage.total_routes === "number" && /* @__PURE__ */ React.createElement("small", { className: "evidence-copy" }, "\uC2DC\uAC04\uD45C \uADFC\uAC70 ", coverage.schedule_routes, "/", coverage.total_routes, typeof coverage.passage_routes === "number" ? ` \xB7 \uD1B5\uACFC \uC774\uB825 ${coverage.passage_routes}/${coverage.total_routes}` : ""), /* @__PURE__ */ React.createElement("button", { className: structural ? "open-candidate structural" : "open-candidate", type: "button", onClick: () => onChooseJourney?.(prepareJourneyForDetail(candidate, context)) }, structural ? "\uC815\uB958\uC7A5 \uC21C\uC11C \uBCF4\uAE30" : "\uC2DC\uAC04\uD45C \uACBD\uB85C \uC790\uC138\uD788 \uBCF4\uAE30", " ", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" }))));
+  return /* @__PURE__ */ React.createElement("article", { className: structural ? "structural-candidate" : "scheduled-candidate" }, /* @__PURE__ */ React.createElement("div", { className: "candidate-rank" }, index + 1), /* @__PURE__ */ React.createElement("div", { className: "candidate-copy" }, /* @__PURE__ */ React.createElement("div", { className: "candidate-title" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", null, JOURNEY_CRITERION_LABELS[candidate?.criterion] || candidate?.criterion || (structural ? "\uD604\uC7AC TAGO \uACBD\uB85C" : "\uD604\uC7AC \uC2DC\uAC04\uD45C \uACBD\uB85C")), /* @__PURE__ */ React.createElement("h3", null, routeIds.length > 0 ? `${candidate?.transfers || 0}\uD68C \uD658\uC2B9 \xB7 ${routeIds.length}\uAC1C \uB178\uC120` : "\uB178\uC120 DATA_GAP")), /* @__PURE__ */ React.createElement("small", { className: structural ? "topology-ready" : "schedule-ready" }, structural ? "TAGO \uACBD\uB85C" : "\uD604\uC7AC \uC2DC\uAC01 \uD655\uC778")), !structural && timeSummary.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "schedule-summary" }, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), /* @__PURE__ */ React.createElement("strong", null, timeSummary.join(" \xB7 "))), structural && /* @__PURE__ */ React.createElement("div", { className: "topology-assumption-copy" }, /* @__PURE__ */ React.createElement(Icon, { name: "path" }), /* @__PURE__ */ React.createElement("span", null, "\uD604\uC7AC TAGO \uC815\uB958\uC7A5 \uC9C4\uD589 \uBC29\uD5A5\uC73C\uB85C \uC5F0\uACB0\uD588\uC2B5\uB2C8\uB2E4. \uC815\uB958\uC7A5\uBCC4 \uCD9C\uBC1C\uC2DC\uAC01\uC774 \uC5C6\uC5B4\uB3C4 \uACBD\uB85C\uB294 \uC720\uC9C0\uD569\uB2C8\uB2E4.")), /* @__PURE__ */ React.createElement("div", { className: "candidate-leg-list" }, legs.map((leg, legIndex) => /* @__PURE__ */ React.createElement("div", { className: "candidate-leg", key: `${leg.routeId}-${leg.tripId}-${legIndex}` }, /* @__PURE__ */ React.createElement("span", { className: "timeline-rail" }, /* @__PURE__ */ React.createElement("i", null), /* @__PURE__ */ React.createElement("b", null)), /* @__PURE__ */ React.createElement("div", { className: "leg-copy" }, /* @__PURE__ */ React.createElement("span", { className: "route-pill" }, /* @__PURE__ */ React.createElement(Icon, { name: "bus" }), " ", leg.routeId), /* @__PURE__ */ React.createElement("strong", null, leg.from?.node_name || leg.from?.node_id || "\uC2B9\uCC28 \uC815\uB958\uC7A5"), !structural && leg.departureTime && /* @__PURE__ */ React.createElement("span", { className: "leg-time" }, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), " ", leg.departureTime, " \uCD9C\uBC1C"), /* @__PURE__ */ React.createElement("small", null, "\uCD1D ", leg.edgeCount + 1, "\uAC1C \uC815\uB958\uC7A5"), /* @__PURE__ */ React.createElement("strong", null, leg.to?.node_name || leg.to?.node_id || "\uD558\uCC28 \uC815\uB958\uC7A5"), !structural && leg.arrivalTime && /* @__PURE__ */ React.createElement("span", { className: "leg-time arrival" }, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), " ", leg.arrivalTime, " \uB3C4\uCC29"), !structural && leg.nextDepartureTime && /* @__PURE__ */ React.createElement("span", { className: "transfer-time" }, "\uB2E4\uC74C \uBC84\uC2A4 ", leg.nextDepartureTime, " \uCD9C\uBC1C"))))), /* @__PURE__ */ React.createElement("footer", null, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "arrows-left-right" }), " ", typeof candidate?.transfers === "number" ? `${candidate.transfers}\uD68C \uD658\uC2B9` : "\uD658\uC2B9 DATA_GAP"), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "database" }), " \uC2B9\uCC28 ", evidence.ride_edges ?? "\u2014", " \xB7 \uD658\uC2B9 ", evidence.transfer_edges ?? "\u2014", " \uAC04\uC120"), /* @__PURE__ */ React.createElement("strong", null, successProbability === null ? "\uC131\uACF5\uB960 \uBBF8\uC0B0\uCD9C" : `\uAD00\uCE21 \uC131\uACF5\uB960 ${Math.round(successProbability * 100)}%`)), !structural && /* @__PURE__ */ React.createElement("small", { className: provenance.ready ? "official-schedule-evidence" : "schedule-evidence-gap" }, /* @__PURE__ */ React.createElement(Icon, { name: provenance.ready ? "shield-check" : "warning-circle" }), " ", provenance.ready ? provenance.label : "\uD604\uC7AC \uC2DC\uAC04\uD45C \uCD9C\uCC98 DATA_GAP"), typeof coverage.schedule_routes === "number" && typeof coverage.total_routes === "number" && /* @__PURE__ */ React.createElement("small", { className: "evidence-copy" }, "\uD604\uC7AC \uC2DC\uAC04\uD45C \uADFC\uAC70 ", coverage.schedule_routes, "/", coverage.total_routes, typeof coverage.passage_routes === "number" ? ` \xB7 \uC2E4\uC81C \uD1B5\uACFC \uC774\uB825 ${coverage.passage_routes}/${coverage.total_routes}` : ""), /* @__PURE__ */ React.createElement(JourneyEvidenceStack, { candidate, context, schedule, provenance, timeSummary, connection, fetchedWindows }), /* @__PURE__ */ React.createElement("button", { className: structural ? "open-candidate structural" : "open-candidate", type: "button", onClick: () => onChooseJourney?.(prepareJourneyForDetail(candidate, context)) }, "\uACBD\uB85C\xB7\uADFC\uAC70 \uC790\uC138\uD788 \uBCF4\uAE30 ", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" }))));
 }
 function GraphCoverage({ networkStatus, result }) {
   const sources = Array.isArray(networkStatus?.sources) ? networkStatus.sources : [];
@@ -314,14 +585,14 @@ function GraphCoverage({ networkStatus, result }) {
   const graph = result?.graph && typeof result.graph === "object" ? result.graph : null;
   const schedule = normalizeSchedule(result);
   const topologyReady = graph && Number(graph.nodes) > 0 && Number(graph.edges) > 0;
-  const scheduleGraph = Boolean(graph && (result?.schedule || String(graph.algorithm || "").includes("time_dependent") || ["expanded_stops", "departures_scanned", "search_complete", "detail_reason"].some((key) => Object.prototype.hasOwnProperty.call(graph, key))));
+  const scheduleGraph = Boolean(schedule.ready && graph && (String(graph.algorithm || "").includes("time_dependent") || ["expanded_stops", "departures_scanned", "search_complete"].some((key) => Object.prototype.hasOwnProperty.call(graph, key))));
   const staticAlternativeCount = Array.isArray(result?.static_alternatives) ? result.static_alternatives.length : 0;
   const scheduleSearchState = graph?.search_complete === true ? "\uAC80\uC0C9 \uC644\uB8CC" : graph?.search_complete === false ? "\uAC80\uC0C9 \uBBF8\uC644\uB8CC" : "\uC644\uB8CC \uC0C1\uD0DC DATA_GAP";
   const scheduleDetailReason = graph?.detail_reason || result?.schedule?.detail_reason || "";
   const primaryStatus = nationwideComplete ? "\uC804\uAD6D \uACBD\uB85C\uB9DD \uC5F0\uACB0\uB428" : graphReady ? "\uACF5\uC2DD \uAC80\uC99D \uAD6C\uAC04 \uC5F0\uACB0\uB428" : "\uC804\uAD6D \uACBD\uB85C\uB9DD \uC900\uBE44 \uC911";
   const catalogSummary = stopRows && routeRows ? `\uC815\uB958\uC7A5 ${formatCount(stopRows)} \xB7 \uB178\uC120 ${formatCount(routeRows)}` : "\uC804\uAD6D \uBAA9\uB85D DATA_GAP";
   const topologySummary = activeRoutes ? `\uBC29\uD5A5 \uB178\uC120 ${formatCount(activeRoutes)} \xB7 \uADF8\uB798\uD504 \uC815\uB958\uC7A5 ${formatCount(activeStops)}` : topologyTargets ? `\uBC29\uD5A5 \uC21C\uC11C ${formatCount(topologyComplete)}/${formatCount(topologyTargets)}` : "\uBC29\uD5A5 \uC21C\uC11C DATA_GAP";
-  return /* @__PURE__ */ React.createElement("div", { className: `graph-coverage ${graphReady ? "catalog-ready" : "catalog-gap"}` }, /* @__PURE__ */ React.createElement("span", { className: "graph-pulse", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement("p", null, /* @__PURE__ */ React.createElement("strong", null, primaryStatus), /* @__PURE__ */ React.createElement("small", null, catalogSummary, " \xB7 ", topologySummary)), /* @__PURE__ */ React.createElement("span", { className: "graph-method" }, scheduleGraph ? "\uC2DC\uAC04\uC758\uC874 Dijkstra" : "\uB2E8\uBC29\uD5A5 Dijkstra"), graphReady && !nationwideComplete && /* @__PURE__ */ React.createElement("small", { className: "coverage-query" }, "\uACF5\uC2DD \uACBD\uC720 \uC21C\uC11C\uAC00 \uC5F0\uACB0\uB41C ", formatCount(activeCities), "\uAC1C \uC9C0\uC5ED\uBD80\uD130 \uC2E4\uC81C \uBC29\uD5A5\uC73C\uB85C \uAC80\uC0C9\uD569\uB2C8\uB2E4. \uC804\uAD6D \uD655\uB300 \uC911\uC785\uB2C8\uB2E4."), !graphReady && /* @__PURE__ */ React.createElement("small", { className: "coverage-gap" }, "TAGO \uB178\uC120\uBCC4 \uACBD\uC720 \uC21C\uC11C\uC758 \uC804\uAD6D \uC801\uC7AC\uAC00 \uB05D\uB098\uC9C0 \uC54A\uC544, \uD655\uC778\uB41C \uAD6C\uAC04\uB9CC \uAC80\uC0C9\uD569\uB2C8\uB2E4."), scheduleGraph && /* @__PURE__ */ React.createElement("small", { className: schedule.ready ? "coverage-query" : "coverage-gap" }, "\uC774\uBC88 \uC77C\uC815 \uAC80\uC0C9: ", formatCount(graph.expanded_stops), "\uAC1C \uC815\uB958\uC7A5 \uD655\uC7A5 \xB7 ", formatCount(graph.departures_scanned), "\uAC1C \uCD9C\uBC1C\uD3B8 \uD655\uC778 \xB7 ", scheduleSearchState, " \xB7 ", graph.algorithm), scheduleGraph && scheduleDetailReason && /* @__PURE__ */ React.createElement("small", { className: "coverage-gap" }, "\uC2DC\uAC04\uD45C \uC0C1\uC138: ", scheduleDetailReason), staticAlternativeCount > 0 && /* @__PURE__ */ React.createElement("small", { className: "coverage-query" }, "\uBC29\uD5A5 \uAD6C\uC870 \uD6C4\uBCF4 ", formatCount(staticAlternativeCount), "\uAC74 \uD655\uC778 \xB7 \uC2DC\uAC04\uD45C \uC6B4\uD589 \uAC00\uB2A5\uC131 \uBBF8\uD655\uC815"), graph && !scheduleGraph && /* @__PURE__ */ React.createElement("small", { className: topologyReady ? "coverage-query" : "coverage-gap" }, "\uC774\uBC88 \uAC80\uC0C9: ", formatCount(graph.nodes), "\uAC1C \uC0C1\uD0DC \xB7 ", formatCount(graph.edges), "\uAC1C \uC2B9\uCC28 \uAC04\uC120 \xB7 ", graph.algorithm || "directed_dijkstra"), graph && !scheduleGraph && !topologyReady && staticAlternativeCount === 0 && /* @__PURE__ */ React.createElement("small", { className: "coverage-gap" }, "DATA_GAP \xB7 \uAC80\uC0C9 \uAC00\uB2A5\uD55C \uAC80\uC99D \uB178\uC120 \uC21C\uC11C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."));
+  return /* @__PURE__ */ React.createElement("div", { className: `graph-coverage ${graphReady ? "catalog-ready" : "catalog-gap"}` }, /* @__PURE__ */ React.createElement("span", { className: "graph-pulse", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement("p", null, /* @__PURE__ */ React.createElement("strong", null, primaryStatus), /* @__PURE__ */ React.createElement("small", null, catalogSummary, " \xB7 ", topologySummary)), /* @__PURE__ */ React.createElement("span", { className: "graph-method" }, scheduleGraph ? "\uD604\uC7AC \uC2DC\uAC04\uD45C Dijkstra" : "TAGO \uBC29\uD5A5 Dijkstra"), graphReady && !nationwideComplete && /* @__PURE__ */ React.createElement("small", { className: "coverage-query" }, "\uACF5\uC2DD \uACBD\uC720 \uC21C\uC11C\uAC00 \uC5F0\uACB0\uB41C ", formatCount(activeCities), "\uAC1C \uC9C0\uC5ED\uBD80\uD130 \uC2E4\uC81C \uBC29\uD5A5\uC73C\uB85C \uAC80\uC0C9\uD569\uB2C8\uB2E4. \uC804\uAD6D \uD655\uB300 \uC911\uC785\uB2C8\uB2E4."), !graphReady && /* @__PURE__ */ React.createElement("small", { className: "coverage-gap" }, "TAGO \uB178\uC120\uBCC4 \uACBD\uC720 \uC21C\uC11C\uC758 \uC804\uAD6D \uC801\uC7AC\uAC00 \uB05D\uB098\uC9C0 \uC54A\uC544, \uD655\uC778\uB41C \uAD6C\uAC04\uB9CC \uAC80\uC0C9\uD569\uB2C8\uB2E4."), scheduleGraph && /* @__PURE__ */ React.createElement("small", { className: schedule.ready ? "coverage-query" : "coverage-gap" }, "\uC774\uBC88 \uC77C\uC815 \uAC80\uC0C9: ", formatCount(graph.expanded_stops), "\uAC1C \uC815\uB958\uC7A5 \uD655\uC7A5 \xB7 ", formatCount(graph.departures_scanned), "\uAC1C \uCD9C\uBC1C\uD3B8 \uD655\uC778 \xB7 ", scheduleSearchState, " \xB7 ", graph.algorithm), scheduleGraph && scheduleDetailReason && /* @__PURE__ */ React.createElement("small", { className: "coverage-gap" }, "\uC2DC\uAC04\uD45C \uC0C1\uC138: ", scheduleDetailReason), staticAlternativeCount > 0 && /* @__PURE__ */ React.createElement("small", { className: "coverage-query" }, "\uD604\uC7AC TAGO \uBC29\uD5A5 \uACBD\uB85C ", formatCount(staticAlternativeCount), "\uAC74 \uD655\uC778 \xB7 \uC815\uB958\uC7A5\uBCC4 \uC2DC\uAC01\uC774 \uC5C6\uC5B4\uB3C4 \uC6B0\uC120 \uD45C\uC2DC"), schedule.historical && /* @__PURE__ */ React.createElement("small", { className: "coverage-prior" }, "\uACFC\uAC70 GTFS\uB294 \uBAA8\uB378 \uAC00\uC911\uCE58 \uC804\uC6A9 \xB7 \uD604\uC7AC \uB0A0\uC9DC \uC2DC\uAC04\uD45C\uB85C \uD22C\uC601\uD558\uC9C0 \uC54A\uC74C"), graph && !scheduleGraph && /* @__PURE__ */ React.createElement("small", { className: topologyReady ? "coverage-query" : "coverage-gap" }, "\uC774\uBC88 \uAC80\uC0C9: ", formatCount(graph.nodes), "\uAC1C \uC0C1\uD0DC \xB7 ", formatCount(graph.edges), "\uAC1C \uC2B9\uCC28 \uAC04\uC120 \xB7 ", graph.algorithm || "directed_dijkstra"), graph && !scheduleGraph && !topologyReady && staticAlternativeCount === 0 && /* @__PURE__ */ React.createElement("small", { className: "coverage-gap" }, "DATA_GAP \xB7 \uAC80\uC0C9 \uAC00\uB2A5\uD55C \uAC80\uC99D \uB178\uC120 \uC21C\uC11C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."));
 }
 function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
   const [fromText, setFromText] = useState("");
@@ -372,20 +643,34 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
   const returnedCandidates = Array.isArray(candidateRows) ? candidateRows : [];
   const scheduled = schedule.ready ? returnedCandidates.filter((candidate) => candidate?.scheduled !== false) : [];
   const staticRows = Array.isArray(result?.static_alternatives) ? result.static_alternatives : [];
-  const structuralCandidates = [...staticRows, ...returnedCandidates.filter((candidate) => !scheduled.includes(candidate) && !staticRows.includes(candidate))];
-  const journeyContext = { from_stop: fromStop, to_stop: toStop, preference, service_date: schedule.serviceDate || serviceDate, departure_time: schedule.departureTime || departureTime, schedule: result?.schedule || { status: schedule.status, reason: schedule.reason } };
+  const structuralPool = [...staticRows, ...returnedCandidates.filter((candidate) => candidate?.scheduled !== true && !scheduled.includes(candidate))];
+  const structuralCandidates = structuralPool.filter((candidate, index, rows) => rows.findIndex((item) => item?.id && item.id === candidate?.id || !item?.id && JSON.stringify(item?.route_ids || []) === JSON.stringify(candidate?.route_ids || []) && item?.criterion === candidate?.criterion) === index);
+  const fetchedWindows = useCandidateRouteWindows([...structuralCandidates, ...scheduled]);
+  const journeyContext = {
+    from_stop: fromStop,
+    to_stop: toStop,
+    preference,
+    service_date: schedule.serviceDate || serviceDate,
+    departure_time: schedule.departureTime || departureTime,
+    schedule: result?.schedule || { status: schedule.status, reason: schedule.reason },
+    current_timetable: result?.current_timetable || result?.current_static_timetable || null,
+    reliability: result?.reliability || null,
+    realtime_adjustment: result?.realtime_adjustment || result?.live_adjustment || null,
+    historical_prior: result?.historical_gtfs_prior || result?.reliability?.historical_prior || null
+  };
   const gapReasons = {
     STOP_NOT_IN_HYDRATED_SEQUENCE: "\uC120\uD0DD\uD55C \uC815\uB958\uC7A5\uC740 \uC804\uAD6D \uBAA9\uB85D\uC5D0 \uC788\uC9C0\uB9CC \uAC80\uC99D\uB41C \uB178\uC120 \uC21C\uC11C \uADF8\uB798\uD504\uC5D0\uB294 \uC544\uC9C1 \uD3EC\uD568\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.",
     NO_DIRECTED_PATH_IN_HYDRATED_GRAPH: "\uD604\uC7AC \uAC80\uC99D \uADF8\uB798\uD504\uC5D0\uC11C \uCD9C\uBC1C \uBC29\uD5A5\uBD80\uD130 \uB3C4\uCC29 \uBC29\uD5A5\uAE4C\uC9C0 \uC774\uC5B4\uC9C0\uB294 \uACBD\uB85C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4. \uC5ED\uBC29\uD5A5 \uAC04\uC120\uC744 \uC784\uC758\uB85C \uB9CC\uB4E4\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",
-    EVIDENCE_INCOMPLETE: "\uACBD\uB85C \uAD6C\uC870\uB294 \uCC3E\uC558\uC9C0\uB9CC \uC2DC\uAC04\uD45C \uB610\uB294 \uD1B5\uACFC \uC774\uB825\uC774 \uBD80\uC871\uD569\uB2C8\uB2E4.",
-    SCHEDULE_DATA_GAP: "\uC120\uD0DD\uD55C \uB0A0\uC9DC\xB7\uCD9C\uBC1C \uC2DC\uAC01\uC5D0 \uC801\uC6A9\uD560 \uACF5\uC2DD GTFS \uC6B4\uD589 \uAE30\uB85D\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uC544\uB798 \uAD6C\uC870 \uD6C4\uBCF4\uAC00 \uC788\uB354\uB77C\uB3C4 \uC2E4\uC81C \uC6B4\uD589 \uAC00\uB2A5 \uACBD\uB85C\uB85C \uD655\uC815\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."
+    EVIDENCE_INCOMPLETE: "\uD604\uC7AC TAGO \uACBD\uB85C\uB294 \uCC3E\uC558\uC9C0\uB9CC \uC815\uB958\uC7A5\uBCC4 \uC2DC\uAC04\uD45C \uB610\uB294 \uC2E4\uC81C \uD1B5\uACFC \uC774\uB825\uC774 \uBD80\uC871\uD569\uB2C8\uB2E4.",
+    SCHEDULE_DATA_GAP: "\uC815\uB958\uC7A5\uBCC4 \uD604\uC7AC \uCD9C\uBC1C\uC2DC\uAC01\uC740 \uD655\uBCF4\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. TAGO \uBC29\uD5A5 \uACBD\uB85C\uC640 \uD655\uBCF4\uB41C \uB178\uC120 \uC6B4\uD589\uCC3D\uC740 \uACC4\uC18D \uD45C\uC2DC\uD569\uB2C8\uB2E4.",
+    HISTORICAL_GTFS_PRIOR_ONLY: "\uACFC\uAC70 GTFS\uB294 \uC2E0\uB8B0\uB3C4 \uBAA8\uB378 \uADFC\uAC70\uB85C\uB9CC \uC0AC\uC6A9\uD558\uBA70 \uC624\uB298 \uC2DC\uAC04\uD45C\uB85C \uD22C\uC601\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."
   };
-  return /* @__PURE__ */ React.createElement("section", { className: "journey-generator" }, /* @__PURE__ */ React.createElement(GlassCard, { className: "generator-card" }, /* @__PURE__ */ React.createElement("div", { className: "generator-heading" }, /* @__PURE__ */ React.createElement("div", { className: "generator-kicker" }, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uC804\uAD6D \uBC84\uC2A4 \uC5EC\uD589"), /* @__PURE__ */ React.createElement(SourceBadge, { mode: connection.mode, label: connection.label })), /* @__PURE__ */ React.createElement("h1", null, "\uC5B4\uB514\uAE4C\uC9C0 \uAC00\uC138\uC694?"), /* @__PURE__ */ React.createElement("p", null, "\uCD9C\uBC1C\uC9C0\uC640 \uB3C4\uCC29\uC9C0, \uB5A0\uB0A0 \uB54C\uB97C \uACE0\uB974\uBA74 \uC2E4\uC81C \uC9C4\uD589 \uBC29\uD5A5\uACFC \uACF5\uC2DD \uC2DC\uAC04\uD45C\uB97C \uD568\uAED8 \uD655\uC778\uD574\uC694.")), /* @__PURE__ */ React.createElement("form", { onSubmit: generate }, /* @__PURE__ */ React.createElement("div", { className: "route-point-sheet" }, /* @__PURE__ */ React.createElement("div", { className: "route-point origin" }, /* @__PURE__ */ React.createElement("span", { className: "point-mark", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement(StopLookup, { label: "\uCD9C\uBC1C", value: fromText, onChange: setFromText, selected: fromStop, onSelect: setFromStop })), /* @__PURE__ */ React.createElement("div", { className: "route-point destination" }, /* @__PURE__ */ React.createElement("span", { className: "point-mark", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement(StopLookup, { label: "\uB3C4\uCC29", value: toText, onChange: setToText, selected: toStop, onSelect: setToStop })), /* @__PURE__ */ React.createElement("button", { className: "generator-swap", type: "button", onClick: () => {
+  return /* @__PURE__ */ React.createElement("section", { className: "journey-generator" }, /* @__PURE__ */ React.createElement(GlassCard, { className: "generator-card" }, /* @__PURE__ */ React.createElement("div", { className: "generator-heading" }, /* @__PURE__ */ React.createElement("div", { className: "generator-kicker" }, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uC804\uAD6D \uBC84\uC2A4 \uC5EC\uD589"), /* @__PURE__ */ React.createElement(SourceBadge, { mode: connection.mode, label: connection.label })), /* @__PURE__ */ React.createElement("h1", null, "\uC5B4\uB514\uAE4C\uC9C0 \uAC00\uC138\uC694?"), /* @__PURE__ */ React.createElement("p", null, "\uD604\uC7AC TAGO \uC9C4\uD589 \uBC29\uD5A5\uC744 \uBA3C\uC800 \uCC3E\uACE0, \uD655\uBCF4\uB41C \uCD5C\uC2E0 \uC815\uC801 \uC2DC\uAC04\uD45C\uC640 \uC2E4\uC2DC\uAC04 \uB3C4\uCC29\uC815\uBCF4\uB97C \uB2E8\uACC4\uBCC4\uB85C \uD655\uC778\uD574\uC694.")), /* @__PURE__ */ React.createElement("form", { onSubmit: generate }, /* @__PURE__ */ React.createElement("div", { className: "route-point-sheet" }, /* @__PURE__ */ React.createElement("div", { className: "route-point origin" }, /* @__PURE__ */ React.createElement("span", { className: "point-mark", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement(StopLookup, { label: "\uCD9C\uBC1C", value: fromText, onChange: setFromText, selected: fromStop, onSelect: setFromStop })), /* @__PURE__ */ React.createElement("div", { className: "route-point destination" }, /* @__PURE__ */ React.createElement("span", { className: "point-mark", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement(StopLookup, { label: "\uB3C4\uCC29", value: toText, onChange: setToText, selected: toStop, onSelect: setToStop })), /* @__PURE__ */ React.createElement("button", { className: "generator-swap", type: "button", onClick: () => {
     setFromStop(toStop);
     setToStop(fromStop);
     setFromText(toText);
     setToText(fromText);
-  }, "aria-label": "\uCD9C\uBC1C\uACFC \uB3C4\uCC29 \uBC14\uAFB8\uAE30" }, /* @__PURE__ */ React.createElement(Icon, { name: "arrows-down-up" }))), /* @__PURE__ */ React.createElement("fieldset", { className: "schedule-fieldset" }, /* @__PURE__ */ React.createElement("legend", null, "\uC5B8\uC81C \uB5A0\uB0A0\uAE4C\uC694?"), /* @__PURE__ */ React.createElement("div", { className: "schedule-input-grid" }, /* @__PURE__ */ React.createElement("label", null, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "calendar-blank" }), " \uC5EC\uD589 \uB0A0\uC9DC"), /* @__PURE__ */ React.createElement("input", { type: "date", value: serviceDate, onChange: (event) => setServiceDate(event.target.value), required: true })), /* @__PURE__ */ React.createElement("label", null, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), " \uCD9C\uBC1C \uC2DC\uAC01"), /* @__PURE__ */ React.createElement("input", { type: "time", value: departureTime, onChange: (event) => setDepartureTime(event.target.value), step: "60", required: true }))), /* @__PURE__ */ React.createElement("small", null, "\uC120\uD0DD\uD55C \uB0A0\uC9DC\uC758 \uACF5\uC2DD GTFS \uC6B4\uD589 \uAE30\uB85D\uB9CC \uC2DC\uAC04 \uAC00\uB2A5 \uACBD\uB85C\uB85C \uD45C\uC2DC\uD569\uB2C8\uB2E4.")), /* @__PURE__ */ React.createElement("fieldset", null, /* @__PURE__ */ React.createElement("legend", null, "\uC5B4\uB5A4 \uAE38\uB85C \uAC08\uAE4C\uC694?"), /* @__PURE__ */ React.createElement("div", { className: "preference-grid" }, [["diverse", "\uCD94\uCC9C", "sparkle"], ["low_transfer", "\uCD5C\uC18C \uD658\uC2B9", "arrows-left-right"], ["reliable", "\uADFC\uAC70 \uC6B0\uC120", "shield-check"], ["challenge", "\uAD6D\uD1A0\uC885\uC8FC", "flag-banner"]].map(([value, label, icon]) => /* @__PURE__ */ React.createElement("button", { type: "button", key: value, className: preference === value ? "active" : "", onClick: () => setPreference(value) }, /* @__PURE__ */ React.createElement(Icon, { name: icon }), label)))), /* @__PURE__ */ React.createElement("button", { className: "liquid-button route-search-primary", type: "submit", disabled: !fromStop || !toStop || !serviceDate || !departureTime || loading }, loading ? "\uACF5\uC2DD \uC2DC\uAC04\uD45C\uC5D0\uC11C \uCC3E\uB294 \uC911\u2026" : "\uC2DC\uAC04\uD45C \uACBD\uB85C \uCC3E\uAE30", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" })), (!fromStop || !toStop) && /* @__PURE__ */ React.createElement("small", { className: "search-help" }, "\uC815\uB958\uC7A5\uBA85\uC744 \uC785\uB825\uD558\uACE0 \uC804\uAD6D \uBAA9\uB85D\uC5D0\uC11C \uCD9C\uBC1C\xB7\uB3C4\uCC29\uC744 \uAC01\uAC01 \uC120\uD0DD\uD558\uC138\uC694."))), /* @__PURE__ */ React.createElement(GraphCoverage, { networkStatus, result }), error && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: "DATA_GAP" }, error, " \uAC80\uC99D\uB41C \uB178\uC120 \uACBD\uC720 \uC815\uB958\uC7A5\uC774 \uC801\uC7AC\uB418\uC5B4\uC57C \uACBD\uB85C\uC5D0 \uD3EC\uD568\uB429\uB2C8\uB2E4."), result && !schedule.ready && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: "SCHEDULE_DATA_GAP" }, gapReasons[schedule.reason] || gapReasons[result.reason] || schedule.reason || "\uC120\uD0DD\uD55C \uC77C\uC815\uC758 \uACF5\uC2DD \uC2DC\uAC04\uD45C \uADFC\uAC70\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."), result && schedule.ready && scheduled.length === 0 && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: result.status || "SCHEDULE_DATA_GAP" }, gapReasons[result.reason] || result.reason || "\uC120\uD0DD\uD55C \uC77C\uC815\uC5D0 \uCD9C\uBC1C \uAC00\uB2A5\uD55C \uACF5\uC2DD \uC2DC\uAC04\uD45C \uACBD\uB85C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."), scheduled.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "generated-journeys scheduled-results" }, /* @__PURE__ */ React.createElement("div", { className: "catalog-heading" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uD655\uC778\uB41C \uC2DC\uAC04\uD45C \uACBD\uB85C"), /* @__PURE__ */ React.createElement("h2", null, scheduled.length, "\uAC00\uC9C0 \uAE38\uC744 \uD655\uC778\uD588\uC5B4\uC694")), /* @__PURE__ */ React.createElement("span", null, schedule.serviceDate || serviceDate, " \xB7 ", schedule.departureTime || departureTime)), /* @__PURE__ */ React.createElement("p", { className: "alternative-hint" }, "\uCD9C\uBC1C\xB7\uB3C4\uCC29 \uC2DC\uAC01\uC740 \uD45C\uC2DC\uB41C GTFS \uC6D0\uBCF8 \uADFC\uAC70\uB97C \uB530\uB985\uB2C8\uB2E4. \uC131\uACF5\uB960\uC740 \uBCC4\uB3C4 \uD1B5\uACFC \uC774\uB825\uC774 \uC788\uC744 \uB54C\uB9CC \uACC4\uC0B0\uD569\uB2C8\uB2E4."), scheduled.map((candidate, index) => /* @__PURE__ */ React.createElement(JourneyCandidateCard, { key: `scheduled-${candidate.id || candidate.criterion || "candidate"}-${index}`, candidate, index, schedule, context: journeyContext, onChooseJourney }))), structuralCandidates.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "generated-journeys structural-results" }, /* @__PURE__ */ React.createElement("div", { className: "catalog-heading" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uBC29\uD5A5 \uAD6C\uC870 \uD6C4\uBCF4"), /* @__PURE__ */ React.createElement("h2", null, "\uC2DC\uAC04\uD45C \uD655\uC778 \uC804 \uACBD\uB85C")), /* @__PURE__ */ React.createElement("span", null, "\uC6B4\uD589 \uAC00\uB2A5\uC131 \uBBF8\uD655\uC815")), /* @__PURE__ */ React.createElement("p", { className: "alternative-hint warning" }, "\uB2E8\uBC29\uD5A5 \uC815\uB958\uC7A5 \uC21C\uC11C\uB9CC \uC5F0\uACB0\uB41C \uACB0\uACFC\uC785\uB2C8\uB2E4. \uC120\uD0DD\uD55C \uC77C\uC815\uC758 \uC2E4\uC81C \uBC84\uC2A4\uAC00 \uC788\uB2E4\uACE0 \uD574\uC11D\uD558\uBA74 \uC548 \uB429\uB2C8\uB2E4."), structuralCandidates.map((candidate, index) => /* @__PURE__ */ React.createElement(JourneyCandidateCard, { key: `structural-${candidate.id || candidate.criterion || "candidate"}-${index}`, candidate, index, schedule, structural: true, context: journeyContext, onChooseJourney }))));
+  }, "aria-label": "\uCD9C\uBC1C\uACFC \uB3C4\uCC29 \uBC14\uAFB8\uAE30" }, /* @__PURE__ */ React.createElement(Icon, { name: "arrows-down-up" }))), /* @__PURE__ */ React.createElement("fieldset", { className: "schedule-fieldset" }, /* @__PURE__ */ React.createElement("legend", null, "\uC5B8\uC81C \uB5A0\uB0A0\uAE4C\uC694?"), /* @__PURE__ */ React.createElement("div", { className: "schedule-input-grid" }, /* @__PURE__ */ React.createElement("label", null, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "calendar-blank" }), " \uC5EC\uD589 \uB0A0\uC9DC"), /* @__PURE__ */ React.createElement("input", { type: "date", value: serviceDate, onChange: (event) => setServiceDate(event.target.value), required: true })), /* @__PURE__ */ React.createElement("label", null, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "clock" }), " \uCD9C\uBC1C \uC2DC\uAC01"), /* @__PURE__ */ React.createElement("input", { type: "time", value: departureTime, onChange: (event) => setDepartureTime(event.target.value), step: "60", required: true }))), /* @__PURE__ */ React.createElement("small", null, "\uB0A0\uC9DC\xB7\uC2DC\uAC01\uC740 \uD604\uC7AC \uACF5\uC2DD \uC815\uC801 \uC2DC\uAC04\uD45C\uC640 TAGO \uC2E4\uC2DC\uAC04 \uBCF4\uC815\uC5D0 \uC0AC\uC6A9\uD569\uB2C8\uB2E4. \uACFC\uAC70 GTFS \uC2DC\uAC01\uC740 \uC624\uB298 \uC2DC\uAC04\uD45C\uB85C \uC4F0\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.")), /* @__PURE__ */ React.createElement("fieldset", null, /* @__PURE__ */ React.createElement("legend", null, "\uC5B4\uB5A4 \uAE38\uB85C \uAC08\uAE4C\uC694?"), /* @__PURE__ */ React.createElement("div", { className: "preference-grid" }, [["diverse", "\uCD94\uCC9C", "sparkle"], ["low_transfer", "\uCD5C\uC18C \uD658\uC2B9", "arrows-left-right"], ["reliable", "\uADFC\uAC70 \uC6B0\uC120", "shield-check"], ["challenge", "\uAD6D\uD1A0\uC885\uC8FC", "flag-banner"]].map(([value, label, icon]) => /* @__PURE__ */ React.createElement("button", { type: "button", key: value, className: preference === value ? "active" : "", onClick: () => setPreference(value) }, /* @__PURE__ */ React.createElement(Icon, { name: icon }), label)))), /* @__PURE__ */ React.createElement("button", { className: "liquid-button route-search-primary", type: "submit", disabled: !fromStop || !toStop || !serviceDate || !departureTime || loading }, loading ? "\uD604\uC7AC TAGO \uACBD\uB85C \uCC3E\uB294 \uC911\u2026" : "\uD604\uC7AC \uBC84\uC2A4 \uACBD\uB85C \uCC3E\uAE30", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" })), (!fromStop || !toStop) && /* @__PURE__ */ React.createElement("small", { className: "search-help" }, "\uC815\uB958\uC7A5\uBA85\uC744 \uC785\uB825\uD558\uACE0 \uC804\uAD6D \uBAA9\uB85D\uC5D0\uC11C \uCD9C\uBC1C\xB7\uB3C4\uCC29\uC744 \uAC01\uAC01 \uC120\uD0DD\uD558\uC138\uC694."))), /* @__PURE__ */ React.createElement(GraphCoverage, { networkStatus, result }), error && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: "DATA_GAP" }, error, " \uAC80\uC99D\uB41C \uB178\uC120 \uACBD\uC720 \uC815\uB958\uC7A5\uC774 \uC801\uC7AC\uB418\uC5B4\uC57C \uACBD\uB85C\uC5D0 \uD3EC\uD568\uB429\uB2C8\uB2E4."), structuralCandidates.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "generated-journeys structural-results" }, /* @__PURE__ */ React.createElement("div", { className: "catalog-heading" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uD604\uC7AC TAGO \uACBD\uB85C"), /* @__PURE__ */ React.createElement("h2", null, structuralCandidates.length, "\uAC00\uC9C0 \uAE38\uC744 \uCC3E\uC558\uC5B4\uC694")), /* @__PURE__ */ React.createElement("span", null, "\uACBD\uB85C \uC6B0\uC120")), /* @__PURE__ */ React.createElement("p", { className: "alternative-hint" }, "\uD604\uC7AC \uACF5\uC2DD \uC815\uB958\uC7A5 \uC21C\uC11C\uB85C \uC5F0\uACB0\uD588\uC2B5\uB2C8\uB2E4. \uC815\uB958\uC7A5\uBCC4 \uCD9C\uBC1C\uC2DC\uAC01\uC774 \uC5C6\uC73C\uBA74 \uC2DC\uAC04\uC740 \uBE44\uC6CC \uB450\uACE0 \uACBD\uB85C\uB294 \uC228\uAE30\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."), structuralCandidates.map((candidate, index) => /* @__PURE__ */ React.createElement(JourneyCandidateCard, { key: `structural-${candidate.id || candidate.criterion || "candidate"}-${index}`, candidate, index, schedule, structural: true, context: journeyContext, connection, fetchedWindows, onChooseJourney }))), scheduled.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "generated-journeys scheduled-results" }, /* @__PURE__ */ React.createElement("div", { className: "catalog-heading" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, "\uD604\uC7AC \uC2DC\uAC04\uD45C \uD655\uC778 \uACBD\uB85C"), /* @__PURE__ */ React.createElement("h2", null, "\uCD9C\uBC1C\uC2DC\uAC01\uAE4C\uC9C0 \uD655\uC778\uD588\uC5B4\uC694")), /* @__PURE__ */ React.createElement("span", null, schedule.serviceDate || serviceDate, " \xB7 ", schedule.departureTime || departureTime)), /* @__PURE__ */ React.createElement("p", { className: "alternative-hint" }, "\uD45C\uC2DC\uB41C \uD604\uC7AC \uACF5\uC2DD \uC2DC\uAC04\uD45C \uBC94\uC704\uB9CC \uC0AC\uC6A9\uD569\uB2C8\uB2E4. \uACFC\uAC70 GTFS \uC2DC\uAC01\uC774\uB098 \uC784\uC758 \uC131\uACF5\uB960\uC740 \uC11E\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."), scheduled.map((candidate, index) => /* @__PURE__ */ React.createElement(JourneyCandidateCard, { key: `scheduled-${candidate.id || candidate.criterion || "candidate"}-${index}`, candidate, index, schedule, context: journeyContext, connection, fetchedWindows, onChooseJourney }))), result && !schedule.ready && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "neutral", icon: schedule.historical ? "flask" : "clock", title: schedule.historical ? "GTFS \xB7 \uBAA8\uB378 \uADFC\uAC70 \uC804\uC6A9" : "\uD604\uC7AC \uC2DC\uAC04\uD45C \uBC94\uC704" }, gapReasons[schedule.reason] || gapReasons[result.reason] || "\uC815\uB958\uC7A5\uBCC4 \uD604\uC7AC \uCD9C\uBC1C\uC2DC\uAC01\uC740 \uC544\uC9C1 \uC5C6\uC2B5\uB2C8\uB2E4. \uD604\uC7AC TAGO \uACBD\uB85C\uB294 \uC704\uC5D0 \uACC4\uC18D \uD45C\uC2DC\uD569\uB2C8\uB2E4."), result && schedule.ready && scheduled.length === 0 && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "clock", title: result.status || "CURRENT_TIMETABLE_DATA_GAP" }, gapReasons[result.reason] || "\uD604\uC7AC \uC2DC\uAC04\uD45C\uC5D0\uC11C \uD574\uB2F9 \uC2DC\uAC01 \uC774\uD6C4 \uCD9C\uBC1C\uD3B8\uC744 \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. TAGO \uBC29\uD5A5 \uACBD\uB85C\uB294 \uBCC4\uB3C4\uB85C \uC720\uC9C0\uD569\uB2C8\uB2E4."));
 }
 function NationwideScreen({ connection, onChooseJourney }) {
   const [seededStop, setSeededStop] = useState(null);

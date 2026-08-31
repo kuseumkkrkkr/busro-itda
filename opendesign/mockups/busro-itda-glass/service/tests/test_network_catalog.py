@@ -126,6 +126,96 @@ class NetworkCatalogCase(unittest.TestCase):
             NetworkCatalog(actual_runtime, clock=lambda: FIXED_NOW)
         self.assertEqual(hashlib.sha256(actual_runtime.read_bytes()).hexdigest(), actual_before)
 
+    def test_nonempty_legacy_active_gtfs_feed_table_fails_closed(self):
+        legacy_path = self.root / "legacy-nonempty.sqlite3"
+        connection = sqlite3.connect(legacy_path)
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE catalog_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO catalog_meta VALUES('revision','7');
+                CREATE TABLE active_gtfs_feeds (
+                    provider TEXT PRIMARY KEY,
+                    feed_id TEXT NOT NULL
+                );
+                INSERT INTO active_gtfs_feeds VALUES('KTDB','legacy-feed');
+                CREATE TABLE active_route_sequences (
+                    city_code TEXT NOT NULL,
+                    route_id TEXT NOT NULL,
+                    sequence_id TEXT NOT NULL,
+                    PRIMARY KEY(city_code,route_id)
+                );
+                INSERT INTO active_route_sequences VALUES('11','R1','legacy-sequence');
+                """
+            )
+        finally:
+            connection.close()
+
+        with self.assertRaisesRegex(
+            CatalogValidationError, "legacy active GTFS feed roles are ambiguous"
+        ):
+            NetworkCatalog(legacy_path, clock=lambda: FIXED_NOW)
+
+        connection = sqlite3.connect(legacy_path)
+        try:
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(active_gtfs_feeds)"
+                )
+            }
+            feed = connection.execute(
+                "SELECT provider,feed_id FROM active_gtfs_feeds"
+            ).fetchone()
+            sequence = connection.execute(
+                "SELECT city_code,route_id,sequence_id FROM active_route_sequences"
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertNotIn("topology_role", columns)
+        self.assertEqual(feed, ("KTDB", "legacy-feed"))
+        self.assertEqual(sequence, ("11", "R1", "legacy-sequence"))
+
+    def test_empty_legacy_active_gtfs_feed_table_migrates_as_historical(self):
+        legacy_path = self.root / "legacy-empty.sqlite3"
+        connection = sqlite3.connect(legacy_path)
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE catalog_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO catalog_meta VALUES('revision','0');
+                CREATE TABLE active_gtfs_feeds (
+                    provider TEXT PRIMARY KEY,
+                    feed_id TEXT NOT NULL
+                );
+                """
+            )
+        finally:
+            connection.close()
+
+        NetworkCatalog(legacy_path, clock=lambda: FIXED_NOW)
+
+        connection = sqlite3.connect(legacy_path)
+        try:
+            role_column = next(
+                row
+                for row in connection.execute(
+                    "PRAGMA table_info(active_gtfs_feeds)"
+                )
+                if row[1] == "topology_role"
+            )
+            connection.execute(
+                "INSERT INTO active_gtfs_feeds(provider,feed_id) VALUES('KTDB','feed')"
+            )
+            role = connection.execute(
+                "SELECT topology_role FROM active_gtfs_feeds WHERE provider='KTDB'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(role_column[3], 1)
+        self.assertEqual(role_column[4], "'historical_model'")
+        self.assertEqual(role, "historical_model")
+
     def test_csv_ids_do_not_create_route_topology_until_explicit_hydration(self):
         self.catalog.import_stops_csv(
             csv_bytes(STOP_COLUMNS, [stop_row(), stop_row(**{"정류장번호": "NODE-C", "정류장명": "터미널"})]),

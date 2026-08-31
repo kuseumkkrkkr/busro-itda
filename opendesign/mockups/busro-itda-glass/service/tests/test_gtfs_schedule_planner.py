@@ -142,6 +142,20 @@ class GtfsSchedulePlannerTests(unittest.TestCase):
             source_url="https://example.go.kr/official/gtfs.zip",
             source_date="2026-08-31",
             provider="KTDB",
+            topology_role="active_topology",
+        )
+
+    def ingest_historical(self, tables: dict[str, bytes]) -> None:
+        path = self.root / "historical.zip"
+        digest = write_zip(path, tables)
+        import_gtfs_zip(
+            self.catalog,
+            zip_path=path,
+            expected_sha256=digest,
+            source_url="https://example.go.kr/historical/gtfs.zip",
+            source_date="2024-03-01",
+            provider="KTDB",
+            topology_role="historical_model",
         )
 
     def node(self, name: str) -> str:
@@ -151,6 +165,26 @@ class GtfsSchedulePlannerTests(unittest.TestCase):
                     "SELECT node_id FROM gtfs_stops WHERE stop_name=?", (name,)
                 ).fetchone()[0]
             )
+
+    def test_historical_feed_is_prior_only_and_never_projects_current_times(self):
+        self.ingest_historical(transfer_tables())
+        result = self.catalog.plan_gtfs_schedule(
+            provider="KTDB",
+            schedule_source_id="ktdb-gtfs-2024",
+            origin_node_id=self.node("출발"),
+            destination_node_id=self.node("도착"),
+            service_date="2026-08-31",
+            departure_time="07:55",
+        )
+        self.assertEqual(result["status"], "DATA_GAP")
+        self.assertEqual(
+            result["schedule"]["detail_reason"],
+            "HISTORICAL_GTFS_PRIOR_ONLY",
+        )
+        self.assertEqual(result["schedule"]["basis"], "HISTORICAL_GTFS_PRIOR_ONLY")
+        self.assertFalse(result["schedule"]["projection_allowed"])
+        self.assertIsNone(result["schedule"]["success_probability"])
+        self.assertEqual(result["alternatives"], [])
 
     def test_civil_midnight_considers_previous_service_day_24_hour_trip(self):
         self.ingest(base_tables())
@@ -364,7 +398,7 @@ class GtfsSchedulePlannerTests(unittest.TestCase):
             "NO_OPERATING_GTFS_PATH_AT_REQUESTED_TIME",
         )
 
-    def test_app_returns_scheduled_candidates_and_separate_static_fallback(self):
+    def test_app_accepts_only_an_explicitly_current_schedule_source(self):
         settings = Settings(
             fixture_mode=True,
             db_path=self.root / "runtime.sqlite3",
@@ -375,6 +409,14 @@ class GtfsSchedulePlannerTests(unittest.TestCase):
             fixture_delays_path=SERVICE_DIR / "fixtures" / "delay_samples.json",
         )
         service = BusroService(settings, clock=lambda: FIXED_NOW)
+        # Synthetic current-source contract for this branch test. The default
+        # production registry keeps ktdb-gtfs-2024 prior-only, covered above
+        # and by test_app_current_route_flow.py.
+        service._source_origins["ktdb-gtfs-2024"] = {
+            "origin_status": "VERIFIED_SCHEDULE_ORIGIN",
+            "ingestion_status": "ACTIVE",
+            "projection_allowed": True,
+        }
         path = self.root / "app-official.zip"
         digest = write_zip(path, transfer_tables())
         import_gtfs_zip(
@@ -384,6 +426,7 @@ class GtfsSchedulePlannerTests(unittest.TestCase):
             source_url="https://example.go.kr/official/gtfs.zip",
             source_date="2026-08-31",
             provider="KTDB",
+            topology_role="active_topology",
         )
         with service.network_catalog.connect() as connection:
             nodes = {

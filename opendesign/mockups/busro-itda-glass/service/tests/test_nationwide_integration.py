@@ -150,7 +150,13 @@ class NationwideIntegrationCase(unittest.TestCase):
         persist_position(8)
         observed = self.service.generate_journeys(request)["candidates"][0]
         self.assertEqual(observed["status"], "DATA_GAP")
-        self.assertEqual(observed["reasons"], ["VERIFIED_TIMETABLE_REQUIRED"])
+        self.assertEqual(
+            observed["reasons"],
+            [
+                "VERIFIED_TIMETABLE_REQUIRED",
+                "VALIDATED_JOURNEY_SUCCESS_MODEL_REQUIRED",
+            ],
+        )
         self.assertIsNone(observed["success_probability"])
         self.assertIsNone(observed["probability_basis"])
         self.assertIsNone(observed["probability_scope"])

@@ -6,6 +6,7 @@
 
 - TAGO `버스도착정보`의 정류소별 실시간 도착예정정보를 조회합니다.
 - TAGO `버스노선정보`와 `버스정류소정보`에서 도시, 노선, 노선 상세, 경유 정류장, 정류장 검색, 반경 500m 정류장, 정류장 경유 노선을 조회합니다.
+- TAGO 노선 상세의 첫차·막차·평일/토요일/공휴일 배차간격은 현재 `ROUTE_WINDOW` 근거로 표시합니다. 이는 특정 회차나 중간 정류장 출발시각이 아닙니다.
 - `POST /api/mappings/validate`는 노선 경유 정류장 목록에서 `route_id + node_id`의 실제 포함 여부를 검증하고 결과·출처 해시를 저장합니다.
 - `POST /api/collect`를 실행한 시점부터 로컬 SQLite에 스냅샷을 축적합니다.
 - TAGO `버스위치정보`의 노선별 현재 차량 위치를 조회하고 `POST /api/positions/collect` 시점부터 위치 스냅샷을 축적합니다.
@@ -18,11 +19,11 @@
 - 날짜별 `data_gap`은 성공률과 실패율의 분모에서 제외합니다.
 - fixture 시뮬레이션만 8개 이상의 합성 지연 표본으로 동작하며, UI·연동 시험용임을 응답 `basis.mode=fixture`로 표시합니다.
 - 예정시각 진단은 한국 표준시 `Asia/Seoul` 기준으로만 비교합니다.
-- 전국 경로 생성에 필요한 TAGO 카탈로그 원천은 제공하지만, TAGO가 제공하지 않는 지자체별 고정 시간표와 과거 원자료는 별도 수집원이 필요합니다.
+- 전국 경로 생성의 현재 방향 그래프는 TAGO 카탈로그를 사용합니다. TAGO가 제공하지 않는 회차별 고정 시간표는 최신 지자체 공식 파일/페이지를 별도로 격리 수집하고 정확한 TAGO ID 매핑을 검수해야 활성화합니다.
 - TAGO는 과거 위치 조회나 날짜 인자를 제공하지 않습니다. 서비스 가동 이전 날짜는 복원할 수 없고 `DATA_GAP`입니다.
 - 공공데이터포털 전국 버스정류장 CSV와 TS BIS 노선 CSV를 전용 SQLite에 원본 URL·기준일·SHA-256·제외 행 수와 함께 가져옵니다. 이름·거리로 ID를 억지 조인하지 않습니다.
 - 여행 그래프는 TAGO 또는 출처·해시·순번이 검증된 공식 지자체 경유 정류장 순서만 사용합니다. 운영용 주 경로는 `topology_ingest.py`가 TAGO 도시→노선→전체 경유 정류장을 전국 배치 적재하는 방식이며, `POST /api/network/hydrate`는 단일 노선 진단용입니다. API는 같은 출발·도착에서 최대 5개까지 결정론적으로 생성할 수 있고, 모바일 기본 흐름은 빠른 1차 경로를 보여준 뒤 추천·최소 환승·근거 우선·국토종주 기준을 바꿔 탐색합니다.
-- 시간표와 충분한 자체 통과 이력이 모두 없으면 성공확률을 만들지 않고 `DATA_GAP`을 반환합니다.
+- 구조 경로는 시간표가 부족해도 후보로 반환합니다. 다만 현재 시간표와 실제 조발·연착/환승 결과를 함께 검증하기 전에는 성공확률을 만들지 않으며 `success_probability=null`입니다. 연속 정류장 통과 재구성 비율은 관측 커버리지일 뿐 성공확률이 아닙니다.
 - 지도는 OSM `route=bus` 관계를 우선 사용합니다. 없으면 공식 정류장 순서를 OSRM 도로에 연결한 추정 형상을 반환하며 정확도를 별도 표시합니다.
 - `/api/sources`는 TAGO와 조사한 지자체 공식 시간표/BIS 출처, robots·허가·갱신 정책을 우선순위와 함께 제공합니다.
 
@@ -144,12 +145,14 @@ python -B gtfs_ingest.py `
   --provider KTDB
 ```
 
+기본 `topology_role=historical_model`입니다. 과거 GTFS는 현재 시간표·현재 경로·표출시각에 투영하지 않고, 정확한 현재 TAGO ID와 실제 조발·연착 관측을 별도로 결합한 모델의 사전정보/동률 보정 근거로만 저장합니다. 별도의 최신·현행 GTFS임을 검증한 경우에만 운영자가 `--topology-role active_topology`를 명시할 수 있습니다.
+
 - `stops.txt`, `routes.txt`, `trips.txt`, `stop_times.txt`, `calendar.txt`가 모두 있어야 하며 `calendar_dates.txt`가 있으면 예외일도 함께 저장합니다.
 - 입력은 UTF-8만 허용합니다. ZIP 경로 탈출·심볼릭 링크·암호화·중복 파일·과도한 압축률을 거부하고, 압축/해제 크기·파일 수·행·열·셀 상한을 적용합니다. ZIP은 하나의 열린 파일 descriptor에서 SHA-256 검증과 해제를 수행하고 활성화 직전 다시 검증하며, 각 표는 한 번의 해제 스트림에서 SHA-256 계산과 CSV 적재를 함께 합니다.
 - 전체 파일과 참조 무결성을 먼저 검증한 뒤 GTFS 원문, 파일별 SHA-256, 기준일, 원본 ID alias, trip 시간과 달력, 방향성 정류장 패턴, 활성 포인터를 한 SQLite 트랜잭션으로 기록합니다. 같은 ZIP 재실행은 revision과 버전을 늘리지 않습니다.
 - 그래프 ID는 `GTFS:KTDB:...` namespace에서 원본 ID를 해시해 만듭니다. 원본 ID는 alias로 그대로 보존하되 이름·거리·노선번호로 TAGO ID와 결합하지 않습니다.
-- 같은 노선이라도 정류장 순서가 반대면 별도 방향 패턴으로 생성합니다. `route_type=3`과 GTFS 확장 버스 유형 `700..799`만 버스 여행 그래프에 활성화합니다.
-- `pickup_type` 또는 `drop_off_type`이 일반 승하차(`0`/빈 값)가 아닌 trip은 원문 시간표 근거에는 보존하지만, 시간표 인지 승하차 필터가 없는 일반 여행 그래프에는 활성화하지 않습니다. 해당 trip만 있는 feed는 활성 근거로 적재되되 일반 그래프 경로를 생성하지 않습니다.
+- 같은 노선이라도 정류장 순서 또는 정류장별 승차·하차 허용 벡터가 다르면 별도 방향 패턴으로 저장합니다. `route_type=3`과 GTFS 확장 버스 유형 `700..799`만 버스 자료로 취급합니다.
+- `pickup_type`·`drop_off_type`은 원문과 구조 패턴에 정확히 보존합니다. 승차 금지 정류장은 출발점/환승 승차로, 하차 금지 정류장은 도착점/환승 하차로 사용할 수 없지만 제한 정류장을 지나 계속 승차한 상태의 이동은 유지합니다.
 - `24:xx:xx`부터 `47:59:59`까지는 원문과 초 단위 값을 함께 보존합니다. `NetworkCatalog.gtfs_schedule_evidence(...)`는 활성 원본·달력·예외일·trip·stop time 근거만 반환하며 `eligible_for_success_rate=false`, `success_probability=null`을 고정합니다. 배포자 시간표 의미 검증과 다일 실제 통과 이력이 없으면 제품 성공률 근거로 사용할 수 없습니다.
 - importer는 원본 행을 메모리에 모으지 않고 카탈로그와 같은 드라이브의 임시 SQLite에 스트리밍합니다. 기본 상한은 `stop_times.txt` 2,500만 행·전체 3,000만 행으로, 확인된 KTDB 2024 전체 `stop_times` 21,889,865행을 거부하지 않습니다. 전체 행 상한은 각 표 스트림 안에서 즉시 적용합니다. stage에는 `max_page_count`를 적재 전에 설정하고, 카탈로그 DB 성장·WAL·512 MiB 여유를 포함한 같은 드라이브 가용공간을 사전 검사합니다. 방향 패턴 쿼리는 임시 정렬이 필요한 실행계획을 거부하고 SQLite temp 저장소는 메모리로 고정해 C: 임시공간을 사용하지 않습니다. 검증 완료 뒤에만 카탈로그 본 DB로 한 트랜잭션 복사·활성화하며 stage는 삭제합니다. 실제 승인 ZIP의 end-to-end 소요시간·최종 DB 크기는 파일 수령 후 별도 검증해야 합니다. `frequencies.txt`, `shapes.txt`, `transfers.txt`는 이번 적재 근거에 포함하지 않습니다.
 
@@ -213,7 +216,7 @@ python -B multi_collector.py `
 - `GET /api/network/cities?q=서울&limit=20`
 - `GET /api/network/stops?q=서울역&limit=20`
 - `GET /api/network/routes?q=601&limit=20`
-- `GET /api/sources?status=VERIFIED_ROUTE_ONLY&limit=25`
+- `GET /api/sources?status=VERIFIED_ROUTE_ONLY&limit=25` (`status`는 호환용이며 응답은 `origin_status`와 `ingestion_status`를 분리합니다.)
 - `GET /api/arrivals?city_code=25&node_id=DJB8001793`
 - `GET /api/history?route_id=DJB30300002&from=2026-08-01&to=2026-08-31`
 - `GET /api/positions?city_code=25&route_id=DJB30300052`
@@ -224,7 +227,7 @@ python -B multi_collector.py `
 - `POST /api/simulate` — 현재 fixture 모드 전용. LIVE는 `PASSAGE_HISTORY_REQUIRED`.
 - `POST /api/mappings/validate` — `{city_code,route_id,node_id}`가 실제 노선 경유 정류장인지 최대 1,000개 범위에서 검증합니다.
 - `POST /api/network/hydrate` — `{city_code,route_id}`의 전체 경유 순서를 서버가 TAGO에서 조회해 그래프에 적재합니다.
-- `POST /api/journeys/generate` — `{from_stop_id,to_stop_id,service_date,departure_time,preference,max_alternatives}`로 활성 공식 GTFS의 해당 운행일·출발 시각 이후 가장 이른 도착 경로를 검색합니다. 날짜와 시각은 함께 보내야 하며 KST 민간시를 사용합니다. 공식 시간표가 없으면 `SCHEDULE_DATA_GAP`과 별도의 `static_alternatives`만 반환하고 실제 운행 가능 경로로 확정하지 않습니다.
+- `POST /api/journeys/generate` — `{from_stop_id,to_stop_id,service_date,departure_time,preference,max_alternatives}`로 현재 TAGO 방향 그래프의 구조 경로를 먼저 반환합니다. 날짜와 시각은 함께 보내며 KST 민간시를 사용합니다. 현재로 검증된 정확한 시간표가 있을 때만 가장 이른 도착 시간표 경로를 우선하고, 과거 GTFS 또는 시간표 공백이면 구조 후보를 `candidates`에 유지한 채 시간 가능성은 `DATA_GAP`으로 분리합니다.
 - `POST /api/osm/geometry` — `{route_ref,stops}`로 OSM 버스 관계 또는 명시적으로 라벨된 도로 추정 형상을 반환합니다.
 
 카탈로그 응답은 `provenance.snapshot_id`, `upstream_hash`, `captured_at`을 포함합니다. fixture는 `source=TAGO_SCHEMA_FIXTURE`와 `fixture_notice=SCHEMA_ONLY_NOT_LIVE`로 표시되며 실데이터로 해석하면 안 됩니다.
@@ -240,31 +243,7 @@ python -B multi_collector.py `
 
 fixture 시뮬레이션은 UI·계약 시험용이며 실제 운행 성공률로 표현하면 안 됩니다. 실제 후보는 아래 `/api/replay`처럼 자체 적재한 통과 시간창만 사용합니다.
 
-실제 통과 이력 재생 계약 예시입니다. 아래 ID는 형식 설명용이며, 실제 요청에서는 활성 GTFS 조회 결과의 ID로 교체해야 합니다.
-
-```json
-{
-  "route": {"id": "B", "name": "실제 ID 매핑 경로"},
-  "legs": [
-    {
-      "id": "verified-transfer",
-      "route_id": "GTFS:KTDB:R000000000000000000000000:P0000000000000000000000000000000000000000",
-      "node_id": "GTFS:KTDB:S000000000000000000000000",
-      "node_order": 2,
-      "time_evidence_source": "ktdb-gtfs-2024",
-      "time_evidence_trip_id": "GTFS:KTDB:T000000000000000000000000",
-      "next_route_id": "GTFS:KTDB:R111111111111111111111111:P1111111111111111111111111111111111111111",
-      "next_node_id": "GTFS:KTDB:S111111111111111111111111",
-      "next_node_order": 1,
-      "next_time_evidence_trip_id": "GTFS:KTDB:T111111111111111111111111"
-    }
-  ],
-  "dates": {"from": "2026-08-31", "to": "2026-09-06"},
-  "match_window_minutes": 180
-}
-```
-
-LIVE에서는 요청의 `scheduled_arrival`·`next_departure`·`minimum_transfer_minutes` 값을 신뢰하지 않습니다. 서버가 같은 활성 GTFS feed와 서비스일에서 도착 trip/정류장 레코드와 다음 출발 trip/정류장 레코드를 각각 유일하게 결합한 경우에만 저장된 `arrival_seconds`·`departure_seconds`를 사용합니다. 최소 환승 여유는 GTFS 공식 값이 아니라 서버 안전 정책으로 고정한 5분이며, 응답의 `minimum_transfer_source=server_safety_policy`와 `minimum_transfer_minutes=5`로 구분합니다. ID가 없거나 모호하거나 feed가 다르면 `422 OFFICIAL_SCHEDULE_RECORD_REQUIRED`입니다.
+LIVE replay는 현재 시간표로 명시적으로 활성화된 동일 feed·서비스일의 도착/다음 출발 trip과 정확한 정류장 ID를 각각 유일하게 결합한 경우에만 허용합니다. 과거 KTDB GTFS ID를 2026 날짜에 투영한 요청은 `HISTORICAL_GTFS_PRIOR_ONLY` 또는 `OFFICIAL_SCHEDULE_RECORD_REQUIRED`로 거부합니다. 요청이 보낸 임의의 `scheduled_arrival`·`next_departure` 값은 신뢰하지 않습니다.
 
 `summary.eligible_days = success_days + failure_days`이며 `gap_days`는 분모에 들어가지 않습니다. `success_rate`는 증거가 있는 날짜가 없으면 `null`입니다.
 

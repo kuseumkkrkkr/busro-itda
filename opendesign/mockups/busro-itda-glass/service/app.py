@@ -150,17 +150,21 @@ class BusroService:
         self.journey_planner = JourneyPlanner()
         self._planner_graph_lock = threading.Lock()
         self.source_registry = load_default_registry()
+        registry_sources = [
+            source
+            for offset in (0, 100)
+            for source in self.source_registry.list_sources(limit=100, offset=offset)
+        ]
+        self._source_origins = {source["id"]: source for source in registry_sources}
         self._verified_schedule_origins = {
             source["id"]: {
                 "source_id": source["id"],
                 "name": source["name"],
                 "municipality": source["municipality"],
-                "status": source["status"],
+                "origin_status": source["origin_status"],
             }
-            for offset in (0, 100)
-            for source in self.source_registry.list_sources(
-                status="VERIFIED_SCHEDULE_ORIGIN", limit=100, offset=offset
-            )
+            for source in registry_sources
+            if source["origin_status"] == "VERIFIED_SCHEDULE_ORIGIN"
         }
         self._fixture_delays: dict[str, Any] | None = None
         self._singleflight = _KeyedSingleFlight()
@@ -472,11 +476,18 @@ class BusroService:
             "path_algorithm": "directed_dijkstra",
             "topology_policy": "all_active_verified_route_sequences",
             "id_join_policy": "exact_identifiers_only",
-            "success_probability_policy": "verified_timetable_and_persisted_live_passage_outcomes_required",
+            "success_probability_policy": (
+                "current_verified_timetable_plus_matched_actual_early_late_outcomes_"
+                "plus_matched_historical_gtfs_prior_required"
+            ),
         }
 
     def sources(self, query: dict[str, str]) -> dict[str, Any]:
-        self._only_fields(query, {"q", "limit", "offset", "status", "priority_tier"}, "query")
+        self._only_fields(
+            query,
+            {"q", "limit", "offset", "status", "origin_status", "priority_tier"},
+            "query",
+        )
         limit = self._bounded_int(query.get("limit", 25), "limit", 1, 100)
         try:
             if query.get("q"):
@@ -487,6 +498,7 @@ class BusroService:
                     limit=limit,
                     offset=self._bounded_int(query.get("offset", 0), "offset", 0, 10_000),
                     status=query.get("status") or None,
+                    origin_status=query.get("origin_status") or None,
                     priority_tier=int(priority) if priority not in (None, "") else None,
                 )
         except (RegistryError, TypeError, ValueError) as exc:
@@ -629,20 +641,72 @@ class BusroService:
         )
         scheduled: dict[str, Any] | None = None
         if has_service_date:
+            service_date = str(body.get("service_date"))
+            departure_time = str(body.get("departure_time"))
             try:
-                snapshot = self.network_catalog.planning_snapshot()
-                scheduled = self.network_catalog.plan_gtfs_schedule(
-                    provider="KTDB",
-                    schedule_source_id="ktdb-gtfs-2024",
-                    origin_node_id=body.get("from_stop_id"),
-                    destination_node_id=body.get("to_stop_id"),
-                    service_date=str(body.get("service_date")),
-                    departure_time=str(body.get("departure_time")),
-                )
-            except CatalogError as exc:
+                service_date = date.fromisoformat(service_date).isoformat()
+            except ValueError as exc:
                 raise AppError(
-                    "JOURNEY_PLANNER_INPUT_INVALID", str(exc), status=422
+                    "JOURNEY_PLANNER_INPUT_INVALID",
+                    "service_date must use YYYY-MM-DD",
+                    status=422,
                 ) from exc
+            if re.fullmatch(r"([01][0-9]|2[0-3]):([0-5][0-9])", departure_time) is None:
+                raise AppError(
+                    "JOURNEY_PLANNER_INPUT_INVALID",
+                    "departure_time must use HH:MM",
+                    status=422,
+                )
+
+            schedule_source_id, schedule_provider = next(
+                iter(GTFS_SCHEDULE_SOURCE_PROVIDERS.items())
+            )
+            schedule_origin = self._source_origins.get(schedule_source_id) or {}
+            current_schedule_allowed = (
+                schedule_origin.get("origin_status") == "VERIFIED_SCHEDULE_ORIGIN"
+                and schedule_origin.get("ingestion_status") == "ACTIVE"
+                and schedule_origin.get("projection_allowed") is True
+            )
+            if current_schedule_allowed:
+                try:
+                    snapshot = self.network_catalog.planning_snapshot()
+                    scheduled = self.network_catalog.plan_gtfs_schedule(
+                        provider=schedule_provider,
+                        schedule_source_id=schedule_source_id,
+                        origin_node_id=body.get("from_stop_id"),
+                        destination_node_id=body.get("to_stop_id"),
+                        service_date=service_date,
+                        departure_time=departure_time,
+                    )
+                except CatalogError as exc:
+                    raise AppError(
+                        "JOURNEY_PLANNER_INPUT_INVALID", str(exc), status=422
+                    ) from exc
+            else:
+                scheduled = {
+                    "status": "DATA_GAP",
+                    "reason": "HISTORICAL_GTFS_PRIOR_ONLY",
+                    "schedule": {
+                        "status": "DATA_GAP",
+                        "reason": "HISTORICAL_GTFS_PRIOR_ONLY",
+                        "detail_reason": "HISTORICAL_GTFS_PRIOR_ONLY",
+                        "service_date": service_date,
+                        "departure_time": departure_time,
+                        "provider": schedule_provider,
+                        "source_id": schedule_source_id,
+                        "feed_id": None,
+                        "basis": "HISTORICAL_GTFS_PRIOR_ONLY",
+                        "origin_status": schedule_origin.get("origin_status"),
+                        "projection_allowed": current_schedule_allowed,
+                        "success_probability": None,
+                        "timezone": "Asia/Seoul",
+                    },
+                    "graph": {
+                        "search_complete": False,
+                        "detail_reason": "HISTORICAL_GTFS_PRIOR_ONLY",
+                    },
+                    "alternatives": [],
+                }
             if scheduled.get("reason") == "SCHEDULE_BUSY":
                 raise AppError(
                     "SCHEDULE_BUSY",
@@ -773,6 +837,7 @@ class BusroService:
                     "success_probability": candidate.get("success_probability"),
                     "probability_basis": candidate.get("probability_basis"),
                     "probability_scope": candidate.get("probability_scope"),
+                    "reliability": candidate.get("reliability"),
                     "estimated_minutes": candidate.get("estimated_minutes"),
                     "transfer_count": candidate.get("transfers", 0),
                     "transfers": candidate.get("transfers", 0),
@@ -808,32 +873,29 @@ class BusroService:
             "candidates": candidates,
             "alternatives": candidates,
             "evidence_policy": (
-                "Only persisted live TAGO observations and at least 8 reconstructed outcomes per route; "
-                "the ratio measures observation reconstruction, not timetable or transfer reliability"
+                "Current timetable, matched actual early/late outcomes, and a matched historical GTFS "
+                "prior are separate evidence layers; reconstructed passages are coverage, not reliability"
             ),
         }
         if has_service_date:
             assert scheduled is not None
-            scheduled_candidates = self._public_scheduled_candidates(
-                scheduled, snapshot
-            )
+            # READY schedules returned above.  A schedule data gap must not
+            # displace the current TAGO structural candidates or leak partial
+            # timetable values as if they formed a usable itinerary.
+            schedule = scheduled.get("schedule") or {}
             response.update(
                 {
-                    "status": scheduled.get("status", "DATA_GAP"),
-                    "reason": scheduled.get("reason") or (
-                        scheduled.get("schedule") or {}
-                    ).get("reason"),
-                    "schedule": scheduled.get("schedule", {}),
+                    "schedule": schedule,
+                    "schedule_status": schedule.get("status", "DATA_GAP"),
+                    "schedule_reason": scheduled.get("reason")
+                    or schedule.get("reason"),
                     "preference_requested": preference,
-                    "preference_applied": "earliest_arrival",
-                    "preference_ignored": preference != "earliest_arrival",
-                    "graph": scheduled.get("graph", {}),
-                    "count": len(scheduled_candidates),
-                    "candidates": scheduled_candidates,
-                    "alternatives": scheduled_candidates,
-                    "static_alternatives": candidates,
+                    "preference_applied": preference,
+                    "preference_ignored": False,
+                    "scheduled_alternatives": [],
+                    "static_alternatives": [],
                     "static_alternatives_notice": (
-                        "STRUCTURAL_ONLY_NOT_TIME_FEASIBILITY"
+                        "PRIMARY_STRUCTURAL_ONLY_NOT_TIME_FEASIBILITY"
                     ),
                 }
             )
@@ -896,6 +958,18 @@ class BusroService:
                     "success_probability": None,
                     "probability_basis": None,
                     "probability_scope": None,
+                    "reliability": {
+                        "status": "DATA_GAP",
+                        "success_probability": None,
+                        "current_timetable_matched": True,
+                        "actual_outcomes_matched": False,
+                        "historical_gtfs_prior": {
+                            "role": "model_weight_only",
+                            "matched_to_current_route": False,
+                            "value": None,
+                            "projection_allowed": False,
+                        },
+                    },
                     "estimated_minutes": candidate.get("estimated_minutes"),
                     "in_vehicle_and_wait_minutes": candidate.get("in_vehicle_and_wait_minutes"),
                     "departure_time": candidate.get("departure_time"),

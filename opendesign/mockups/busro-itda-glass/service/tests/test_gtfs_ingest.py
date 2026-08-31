@@ -110,7 +110,10 @@ class GtfsIngestTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def ingest(self, path: Path, digest: str, *, source_date: str = "2026-08-31", limits=None):
+    def ingest(
+        self, path: Path, digest: str, *, source_date: str = "2026-08-31",
+        limits=None, topology_role: str = "active_topology",
+    ):
         return import_gtfs_zip(
             self.catalog,
             zip_path=path,
@@ -118,6 +121,7 @@ class GtfsIngestTests(unittest.TestCase):
             source_url="https://example.go.kr/official/gtfs.zip",
             source_date=source_date,
             provider="KTDB",
+            topology_role=topology_role,
             limits=limits,
         )
 
@@ -185,6 +189,47 @@ class GtfsIngestTests(unittest.TestCase):
             set(base_tables()),
         )
         self.assertTrue(all(len(row["sha256"]) == 64 for row in table_hashes))
+
+    def test_historical_model_role_stores_gtfs_without_current_route_activation(self):
+        path = self.root / "historical.zip"
+        digest = write_zip(path, base_tables())
+
+        historical = self.ingest(
+            path, digest, topology_role="historical_model"
+        )
+
+        self.assertEqual(historical["topology_role"], "historical_model")
+        self.assertEqual(len(self.catalog.planning_snapshot().route_sequences), 0)
+        evidence = self.catalog.gtfs_feed_evidence(provider="KTDB")
+        self.assertEqual(evidence["feed"]["topology_role"], "historical_model")
+        with self.catalog.connect() as connection:
+            historical_route_id = str(
+                connection.execute(
+                    "SELECT graph_route_id FROM gtfs_patterns ORDER BY graph_route_id LIMIT 1"
+                ).fetchone()[0]
+            )
+        projected = self.catalog.gtfs_schedule_evidence(
+            provider="KTDB",
+            graph_route_id=historical_route_id,
+            service_date="2026-08-31",
+        )
+        self.assertEqual(projected["reason"], "HISTORICAL_GTFS_PRIOR_ONLY")
+        self.assertFalse(projected["projection_allowed"])
+        self.assertEqual(projected["trips"], [])
+        with self.catalog.connect() as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM gtfs_patterns").fetchone()[0],
+                2,
+            )
+
+        activated = self.ingest(path, digest, topology_role="active_topology")
+        self.assertFalse(activated["created"])
+        self.assertTrue(activated["activated"])
+        self.assertEqual(len(self.catalog.planning_snapshot().route_sequences), 2)
+
+        deactivated = self.ingest(path, digest, topology_role="historical_model")
+        self.assertTrue(deactivated["activated"])
+        self.assertEqual(len(self.catalog.planning_snapshot().route_sequences), 0)
 
     def test_same_feed_reimport_is_idempotent(self):
         path = self.root / "official.zip"
@@ -402,7 +447,7 @@ class GtfsIngestTests(unittest.TestCase):
         self.assertFalse(self.catalog.gtfs_feed_evidence(provider="KTDB").get("feed"))
         self.assertFalse(list(self.root.glob("gtfs-stage-*")))
 
-    def test_stop_level_boarding_restrictions_do_not_remove_bus_topology(self):
+    def test_stop_level_boarding_restrictions_are_exact_graph_state(self):
         tables = base_tables()
         reader = csv.DictReader(io.StringIO(tables["stop_times.txt"].decode("utf-8")))
         rows = list(reader)
@@ -418,6 +463,11 @@ class GtfsIngestTests(unittest.TestCase):
         self.assertEqual(result["counts"]["bus_patterns"], 2)
         sequences = self.catalog.planning_snapshot().route_sequences
         self.assertEqual(len(sequences), 2)
+        outbound = next(
+            sequence for sequence in sequences if sequence.stops[0].node_name == "출발"
+        )
+        self.assertFalse(outbound.stops[0].can_board)
+        self.assertTrue(outbound.stops[0].can_alight)
         with self.catalog.connect() as connection:
             trip = connection.execute(
                 "SELECT pattern_id FROM gtfs_trips WHERE raw_trip_id='왕복/상행'"
@@ -429,7 +479,7 @@ class GtfsIngestTests(unittest.TestCase):
         self.assertIsNotNone(trip["pattern_id"])
         self.assertEqual(restriction["pickup_type"], 1)
 
-        rows[3]["drop_off_type"] = "2"
+        rows[4]["drop_off_type"] = "2"
         tables["stop_times.txt"] = csv_text(
             tuple(reader.fieldnames or ()), rows
         ).encode("utf-8")
@@ -439,7 +489,92 @@ class GtfsIngestTests(unittest.TestCase):
             all_restricted_path, all_restricted_digest, source_date="2026-09-01"
         )
         self.assertEqual(all_restricted["counts"]["bus_patterns"], 2)
-        self.assertEqual(len(self.catalog.planning_snapshot().route_sequences), 2)
+        restricted_sequences = self.catalog.planning_snapshot().route_sequences
+        self.assertEqual(len(restricted_sequences), 2)
+        return_route = next(
+            sequence for sequence in restricted_sequences
+            if sequence.stops[0].node_name == "도착"
+        )
+        self.assertFalse(return_route.stops[1].can_alight)
+
+    def test_terminal_access_restrictions_are_preserved(self):
+        tables = base_tables()
+        reader = csv.DictReader(io.StringIO(tables["stop_times.txt"].decode("utf-8")))
+        rows = list(reader)
+        for start, end in ((0, 2), (3, 5)):
+            rows[start]["drop_off_type"] = "1"
+            rows[end]["pickup_type"] = "1"
+        tables["stop_times.txt"] = csv_text(
+            tuple(reader.fieldnames or ()), rows
+        ).encode("utf-8")
+        path = self.root / "terminal-restrictions.zip"
+        digest = write_zip(path, tables)
+
+        result = self.ingest(path, digest)
+
+        self.assertEqual(result["counts"]["bus_patterns"], 2)
+        sequences = self.catalog.planning_snapshot().route_sequences
+        self.assertEqual(len(sequences), 2)
+        for sequence in sequences:
+            self.assertFalse(sequence.stops[0].can_alight)
+            self.assertFalse(sequence.stops[-1].can_board)
+            self.assertTrue(sequence.stops[0].can_board)
+            self.assertTrue(sequence.stops[-1].can_alight)
+
+    def test_same_stop_order_with_different_access_vector_is_a_distinct_pattern(self):
+        tables = base_tables()
+        trip_reader = csv.DictReader(io.StringIO(tables["trips.txt"].decode("utf-8")))
+        trips = list(trip_reader)
+        trips.append(
+            {
+                "route_id": "원본 노선/1", "service_id": "평일 서비스",
+                "trip_id": "왕복/상행-예약승차", "direction_id": "0",
+                "trip_headsign": "도착 방면",
+            }
+        )
+        tables["trips.txt"] = csv_text(
+            tuple(trip_reader.fieldnames or ()), trips
+        ).encode("utf-8")
+
+        stop_reader = csv.DictReader(
+            io.StringIO(tables["stop_times.txt"].decode("utf-8"))
+        )
+        stop_times = list(stop_reader)
+        for sequence, stop_id, pickup_type in (
+            (1, "정류장 A/원본", "0"),
+            (2, "정류장 B/원본", "2"),
+            (3, "정류장 C/원본", "0"),
+        ):
+            stop_times.append(
+                {
+                    "trip_id": "왕복/상행-예약승차",
+                    "arrival_time": f"26:{sequence * 10:02d}:00",
+                    "departure_time": f"26:{sequence * 10:02d}:00",
+                    "stop_id": stop_id,
+                    "stop_sequence": str(sequence),
+                    "pickup_type": pickup_type,
+                    "drop_off_type": "0",
+                }
+            )
+        tables["stop_times.txt"] = csv_text(
+            tuple(stop_reader.fieldnames or ()), stop_times
+        ).encode("utf-8")
+        path = self.root / "access-vector.zip"
+        digest = write_zip(path, tables)
+
+        result = self.ingest(path, digest)
+
+        self.assertEqual(result["counts"]["bus_patterns"], 3)
+        forward = [
+            sequence for sequence in self.catalog.planning_snapshot().route_sequences
+            if [stop.node_name for stop in sequence.stops] == ["출발", "중간", "도착"]
+        ]
+        self.assertEqual(len(forward), 2)
+        self.assertEqual(len({sequence.route_id for sequence in forward}), 2)
+        self.assertEqual(
+            sorted(sequence.stops[1].can_board for sequence in forward),
+            [False, True],
+        )
 
     def test_single_trip_stop_limit_aborts_before_unbounded_list_growth(self):
         tables = base_tables()

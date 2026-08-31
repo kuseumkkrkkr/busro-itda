@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "priority_order": [
     {"tier": 1, "id": "TAGO", "label": "TAGO"},
     {"tier": 2, "id": "MUNICIPAL_PUBLIC_API", "label": "지자체 공개API"},
@@ -13,7 +13,9 @@
       "name": "TAGO 노선정보",
       "municipality": "전국",
       "priority_tier": 1,
-      "status": "VERIFIED_ROUTE_ONLY",
+      "origin_status": "VERIFIED_ROUTE_ONLY",
+      "schedule_granularity": "NONE",
+      "collection_policy": "BOUNDED_API",
       "urls": [
         {"role": "official_openapi", "url": "https://www.data.go.kr/data/15098529/openapi.do", "robots": "DATA_GAP"}
       ],
@@ -27,7 +29,9 @@
       "name": "TAGO 정류장정보",
       "municipality": "전국",
       "priority_tier": 1,
-      "status": "VERIFIED_ROUTE_ONLY",
+      "origin_status": "VERIFIED_ROUTE_ONLY",
+      "schedule_granularity": "NONE",
+      "collection_policy": "BOUNDED_API",
       "urls": [
         {"role": "official_openapi", "url": "https://www.data.go.kr/data/15098534/openapi.do", "robots": "DATA_GAP"}
       ],
@@ -41,7 +45,9 @@
       "name": "TAGO 버스위치정보",
       "municipality": "전국",
       "priority_tier": 1,
-      "status": "VERIFIED_ROUTE_ONLY",
+      "origin_status": "VERIFIED_ROUTE_ONLY",
+      "schedule_granularity": "NONE",
+      "collection_policy": "BOUNDED_API",
       "urls": [
         {"role": "official_openapi", "url": "https://www.data.go.kr/data/15098533/openapi.do", "robots": "DATA_GAP"}
       ],
@@ -55,7 +61,9 @@
       "name": "TAGO 버스도착정보",
       "municipality": "전국",
       "priority_tier": 1,
-      "status": "VERIFIED_ROUTE_ONLY",
+      "origin_status": "VERIFIED_ROUTE_ONLY",
+      "schedule_granularity": "NONE",
+      "collection_policy": "BOUNDED_API",
       "urls": [
         {"role": "official_openapi", "url": "https://www.data.go.kr/data/15098530/openapi.do", "robots": "DATA_GAP"}
       ],
@@ -69,7 +77,9 @@
       "name": "국토교통부 버스 노선별 정류장 정보",
       "municipality": "비수도권 5대 광역시·제주",
       "priority_tier": 1,
-      "status": "VERIFIED_ROUTE_ONLY",
+      "origin_status": "VERIFIED_ROUTE_ONLY",
+      "schedule_granularity": "NONE",
+      "collection_policy": "BOUNDED_API",
       "urls": [
         {"role": "official_openapi", "url": "https://www.data.go.kr/data/15142031/openapi.do", "robots": "DATA_GAP"}
       ],
@@ -83,7 +93,24 @@
       "name": "KTDB 대중교통 GTFS 2024년 기준",
       "municipality": "전국",
       "priority_tier": 2,
-      "status": "VERIFIED_SCHEDULE_ORIGIN",
+      "origin_status": "VERIFIED_PRIOR_ONLY",
+      "schedule_granularity": "STOP_LEVEL_TIMES",
+      "collection_policy": "MANUAL_APPLICATION_ONLY",
+      "projection_allowed": false,
+      "allowed_uses": [
+        "HISTORICAL_SCHEDULE_BASELINE",
+        "PRIOR_FEATURE_INPUT_WITH_MATCHED_ACTUALS",
+        "RANKING_PRIOR_TIE_BREAK_ONLY",
+        "PROVENANCE_AUDIT"
+      ],
+      "prohibited_uses": [
+        "CURRENT_TOPOLOGY",
+        "CURRENT_TIMETABLE",
+        "JOURNEY_FEASIBILITY",
+        "DISPLAYED_DEPARTURE_OR_ARRIVAL",
+        "LIVE_OPERATION_PROOF",
+        "STANDALONE_DELAY_OR_RELIABILITY_PROBABILITY"
+      ],
       "urls": [
         {
           "role": "official_notice",
@@ -106,11 +133,42 @@
       }
     },
     {
+      "id": "gwangju-current-timetable",
+      "name": "광주 시내버스 최신 운행시간표 공지",
+      "municipality": "광주광역시",
+      "priority_tier": 3,
+      "origin_status": "VERIFIED_SCHEDULE_ORIGIN",
+      "ingestion_status": "DISCOVERED_ONLY",
+      "schedule_granularity": "TERMINAL_DEPARTURES",
+      "collection_policy": "PERMISSION_REQUIRED",
+      "projection_allowed": false,
+      "urls": [
+        {
+          "role": "official_notice_board",
+          "url": "https://bus.gwangju.go.kr/guide/notice/noticeList",
+          "robots": "BOUNDED_NOTICE_ATTACHMENT_FETCH"
+        }
+      ],
+      "formats": ["XLSX"],
+      "license": "DATA_GAP",
+      "refresh": {
+        "policy": "LATEST_NOTICE_ID_AND_CONTENT_HASH",
+        "observed_notice_id": "1209",
+        "notice_date": "2026-08-21",
+        "effective_date": "2026-08-22",
+        "checked_at": "2026-08-31",
+        "coverage": "WEEKDAY_SATURDAY_HOLIDAY_TERMINAL_DEPARTURES",
+        "activation": "QUARANTINE_AND_EXACT_TAGO_ROUTE_MAPPING_REQUIRED"
+      }
+    },
+    {
       "id": "yeongdong-timetable",
       "name": "영동군 버스 시간표",
       "municipality": "영동군",
       "priority_tier": 3,
-      "status": "VERIFIED_SCHEDULE_ORIGIN",
+      "origin_status": "VERIFIED_SCHEDULE_ORIGIN",
+      "schedule_granularity": "UNKNOWN",
+      "collection_policy": "PERMISSION_REQUIRED",
       "urls": [
         {"role": "official_html", "url": "https://www.yd21.go.kr/kr/html/sub05/05070101.html", "robots": "DATA_GAP"},
         {"role": "official_xlsx", "url": "https://www.yd21.go.kr/_prog/download/?file_id=9i0u7msopjm1gdu6liza1rhj2opmm8", "robots": "BLOCKED"}
@@ -123,7 +181,9 @@
       "name": "김천시 시내버스 노선 안내",
       "municipality": "김천시",
       "priority_tier": 3,
-      "status": "VERIFIED_ROUTE_ONLY",
+      "origin_status": "VERIFIED_ROUTE_ONLY",
+      "schedule_granularity": "NONE",
+      "collection_policy": "DISCOVERY_ONLY",
       "urls": [
         {"role": "official_html", "url": "https://www.gc.go.kr/dept2/post16/main.do", "robots": "DATA_GAP"}
       ],
@@ -135,7 +195,9 @@
       "name": "김천시 버스정보시스템",
       "municipality": "김천시",
       "priority_tier": 3,
-      "status": "SOURCE_DOWN",
+      "origin_status": "SOURCE_DOWN",
+      "schedule_granularity": "NONE",
+      "collection_policy": "DISCOVERY_ONLY",
       "urls": [
         {"role": "official_bis", "url": "https://bus.gimcheon.go.kr/main/main.do", "robots": "DATA_GAP"}
       ],
@@ -147,7 +209,9 @@
       "name": "성주군 버스 시간표",
       "municipality": "성주군",
       "priority_tier": 3,
-      "status": "VERIFIED_SCHEDULE_ORIGIN",
+      "origin_status": "VERIFIED_SCHEDULE_ORIGIN",
+      "schedule_granularity": "UNKNOWN",
+      "collection_policy": "DISCOVERY_ONLY",
       "urls": [
         {"role": "official_html", "url": "https://sj.go.kr/page.do?mnu_uid=4803", "robots": "HTML_PRIMARY_UPLOAD_BLOCKED"}
       ],
@@ -159,7 +223,9 @@
       "name": "영천시 버스 시간표",
       "municipality": "영천시",
       "priority_tier": 3,
-      "status": "VERIFIED_SCHEDULE_ORIGIN",
+      "origin_status": "VERIFIED_SCHEDULE_ORIGIN",
+      "schedule_granularity": "UNKNOWN",
+      "collection_policy": "PERMISSION_REQUIRED",
       "urls": [
         {"role": "official_bis_html", "url": "https://bis.yc.go.kr/bustime.do", "robots": "DATA_GAP"}
       ],
@@ -171,7 +237,9 @@
       "name": "영천시 버스 노선정보",
       "municipality": "영천시",
       "priority_tier": 3,
-      "status": "VERIFIED_ROUTE_ONLY",
+      "origin_status": "VERIFIED_ROUTE_ONLY",
+      "schedule_granularity": "NONE",
+      "collection_policy": "PERMISSION_REQUIRED",
       "urls": [
         {"role": "official_bis_html", "url": "https://bis.yc.go.kr/busLineInfo.do", "robots": "DATA_GAP"}
       ],
@@ -183,7 +251,9 @@
       "name": "경주시 교통정보 화면",
       "municipality": "경주시",
       "priority_tier": 3,
-      "status": "VERIFIED_ROUTE_ONLY",
+      "origin_status": "VERIFIED_ROUTE_ONLY",
+      "schedule_granularity": "NONE",
+      "collection_policy": "SCREEN_CHECK_ONLY",
       "urls": [
         {"role": "official_its_screen", "url": "https://its.gyeongju.go.kr/", "robots": "DATA_GAP"},
         {"role": "official_livebus_screen", "url": "https://livebus.gyeongju.go.kr/", "robots": "DATA_GAP"}
@@ -196,7 +266,9 @@
       "name": "울산 버스 시간표",
       "municipality": "울산광역시",
       "priority_tier": 3,
-      "status": "VERIFIED_SCHEDULE_ORIGIN",
+      "origin_status": "VERIFIED_SCHEDULE_ORIGIN",
+      "schedule_granularity": "UNKNOWN",
+      "collection_policy": "PERMISSION_REQUIRED",
       "urls": [
         {"role": "official_transport_html", "url": "https://ulsan.go.kr/u/traffic/contents.ulsan?mId=001003002000000000", "robots": "DATA_GAP"},
         {"role": "official_timetable_board", "url": "https://www.ulsanbus.or.kr/bbs/board.php?bo_table=time", "robots": "DATA_GAP"},

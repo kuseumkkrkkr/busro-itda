@@ -42,13 +42,17 @@ class JourneyPlannerCase(unittest.TestCase):
         )
 
     @staticmethod
-    def stop(node_id, order, latitude, longitude):
+    def stop(
+        node_id, order, latitude, longitude, *, can_board=True, can_alight=True
+    ):
         return {
             "node_id": node_id,
             "node_name": node_id,
             "node_order": order,
             "latitude": latitude,
             "longitude": longitude,
+            "can_board": can_board,
+            "can_alight": can_alight,
         }
 
     def hydrate_three_paths(self):
@@ -107,6 +111,79 @@ class JourneyPlannerCase(unittest.TestCase):
         self.assertEqual(transfer["from"]["node_id"], "X")
         self.assertEqual(transfer["to"]["node_id"], "X")
         self.assertEqual(transfer["evidence"]["type"], "shared_node_id")
+
+    def test_access_rules_block_endpoints_and_transfers_but_allow_through_rides(self):
+        self.hydrate(
+            "THROUGH",
+            [
+                self.stop("O", 1, 36.50, 127.30),
+                self.stop(
+                    "X", 2, 36.51, 127.31,
+                    can_board=False, can_alight=False,
+                ),
+                self.stop("D", 3, 36.52, 127.32),
+            ],
+        )
+        through = JourneyPlanner().plan(
+            self.catalog.snapshot(), origin_node_id="O", destination_node_id="D",
+            alternatives=1,
+        )
+        self.assertEqual(through["alternatives"][0]["route_ids"], ["THROUGH"])
+
+        blocked_start = JourneyPlanner().plan(
+            self.catalog.snapshot(), origin_node_id="X", destination_node_id="D",
+            alternatives=1,
+        )
+        blocked_end = JourneyPlanner().plan(
+            self.catalog.snapshot(), origin_node_id="O", destination_node_id="X",
+            alternatives=1,
+        )
+        self.assertEqual(blocked_start["reason"], "STOP_ACCESS_RESTRICTED")
+        self.assertEqual(blocked_end["reason"], "STOP_ACCESS_RESTRICTED")
+
+        self.hydrate(
+            "NO_ALIGHT",
+            [
+                self.stop("O2", 1, 36.60, 127.40),
+                self.stop("T2", 2, 36.61, 127.41, can_alight=False),
+            ],
+        )
+        self.hydrate(
+            "AFTER_ALIGHT",
+            [
+                self.stop("T2", 1, 36.61, 127.41),
+                self.stop("D2", 2, 36.62, 127.42),
+            ],
+        )
+        no_alight_transfer = JourneyPlanner().plan(
+            self.catalog.snapshot(), origin_node_id="O2", destination_node_id="D2",
+            alternatives=1,
+        )
+        self.assertEqual(
+            no_alight_transfer["reason"], "NO_DIRECTED_PATH_IN_HYDRATED_GRAPH"
+        )
+
+        self.hydrate(
+            "BEFORE_BOARD",
+            [
+                self.stop("O3", 1, 36.70, 127.50),
+                self.stop("T3", 2, 36.71, 127.51),
+            ],
+        )
+        self.hydrate(
+            "NO_BOARD",
+            [
+                self.stop("T3", 1, 36.71, 127.51, can_board=False),
+                self.stop("D3", 2, 36.72, 127.52),
+            ],
+        )
+        no_board_transfer = JourneyPlanner().plan(
+            self.catalog.snapshot(), origin_node_id="O3", destination_node_id="D3",
+            alternatives=1,
+        )
+        self.assertEqual(
+            no_board_transfer["reason"], "NO_DIRECTED_PATH_IN_HYDRATED_GRAPH"
+        )
 
     def test_candidate_steps_expose_official_stop_coordinates_for_map(self):
         self.hydrate(
@@ -255,22 +332,38 @@ class JourneyPlannerCase(unittest.TestCase):
         self.assertIsNone(schedule_only["alternatives"][0]["success_probability"])
         self.assertIn("PASSAGE_HISTORY_REQUIRED", schedule_only["alternatives"][0]["reasons"])
 
-    def test_probability_requires_verified_schedule_and_minimum_passage_samples(self):
+    def test_reconstructed_passage_ratio_never_becomes_success_probability(self):
         self.hydrate_three_paths()
         service = {route: self.verified_timetable() for route in ("R1", "R2", "R3")}
-        insufficient = {route: {"sample_count": 7, "success_probability": 0.9} for route in service}
+        insufficient = {
+            route: {"sample_count": 7, "observed_passage_ratio": 0.9}
+            for route in service
+        }
         gap = JourneyPlanner().plan(
             self.catalog.snapshot(), origin_node_id="O", destination_node_id="D", alternatives=1,
             service_evidence=service, passage_history=insufficient,
         )
         self.assertIsNone(gap["alternatives"][0]["success_probability"])
-        sufficient = {route: {"sample_count": 8, "success_probability": 0.9} for route in service}
-        ready = JourneyPlanner().plan(
+        sufficient = {
+            route: {"sample_count": 8, "observed_passage_ratio": 0.9}
+            for route in service
+        }
+        observed = JourneyPlanner().plan(
             self.catalog.snapshot(), origin_node_id="O", destination_node_id="D", alternatives=1,
             service_evidence=service, passage_history=sufficient,
         )
-        self.assertEqual(ready["status"], "READY")
-        self.assertEqual(ready["alternatives"][0]["success_probability"], 0.9)
+        candidate = observed["alternatives"][0]
+        self.assertEqual(observed["status"], "DATA_GAP")
+        self.assertIsNone(candidate["success_probability"])
+        self.assertNotIn("PASSAGE_HISTORY_REQUIRED", candidate["reasons"])
+        self.assertIn("VALIDATED_JOURNEY_SUCCESS_MODEL_REQUIRED", candidate["reasons"])
+        self.assertEqual(
+            candidate["evidence"]["passage_routes"]["R1"]["observed_passage_ratio"],
+            0.9,
+        )
+        self.assertFalse(
+            candidate["reliability"]["historical_gtfs_prior"]["projection_allowed"]
+        )
 
     def test_route_edges_are_directional_and_never_inferred_in_reverse(self):
         self.hydrate("ONEWAY", [self.stop("O", 1, 36.5, 127.3), self.stop("M", 2, 36.51, 127.31), self.stop("D", 3, 36.52, 127.32)])

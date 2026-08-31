@@ -14,6 +14,18 @@ function cleanIdentifier(value) {
 function isClockTime(value) {
   return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(value || ""));
 }
+function journeyUsesCurrentTimetable(journey) {
+  const schedule = journey?.schedule && typeof journey.schedule === "object" ? journey.schedule : {};
+  const topologyRole = String(schedule.topology_role || "");
+  const basis = String(schedule.basis || "");
+  const reason = String(schedule.reason || "");
+  const provider = String(schedule.provider || "");
+  const feedId = String(schedule.feed_id || "");
+  if (schedule.projection_allowed === false || /HISTORICAL_MODEL/i.test(topologyRole) || /HISTORICAL|PRIOR_ONLY|VERIFIED_PRIOR_ONLY/i.test(`${basis} ${reason}`)) return false;
+  const gtfsLike = /GTFS|KTDB/i.test(`${provider} ${basis} ${feedId}`);
+  if (gtfsLike && !(schedule.projection_allowed === true && /ACTIVE_TOPOLOGY/i.test(topologyRole))) return false;
+  return journey?.scheduled === true;
+}
 function buildDataGapSimulation(days, code = "JOURNEY_REQUIRED", reason = "\uC804\uAD6D \uC5EC\uD589 \uD6C4\uBCF4\uB97C \uBA3C\uC800 \uC120\uD0DD\uD558\uC138\uC694.") {
   const end = /* @__PURE__ */ new Date();
   const perDay = Array.from({ length: Math.max(1, Number(days) || 7) }, (_, index) => {
@@ -32,6 +44,7 @@ function replayValue(step, key) {
 }
 function deriveJourneyLegs(journey, { replayOnly = false } = {}) {
   const steps = Array.isArray(journey?.steps) ? journey.steps : [];
+  const currentTimetableAllowed = journeyUsesCurrentTimetable(journey);
   const groups = [];
   let current = null;
   steps.forEach((step) => {
@@ -68,7 +81,7 @@ function deriveJourneyLegs(journey, { replayOnly = false } = {}) {
     const minimumTransfer = replayRow.minimum_transfer_minutes ?? replayValue(lastRide, "minimum_transfer_minutes");
     const evidenceBlock = replayRow.time_evidence || lastRide?.time_evidence || lastRide?.timetable || lastRide?.replay || {};
     const timeEvidenceSource = cleanIdentifier(replayRow.time_evidence_source || evidenceBlock.source || "");
-    const timeEvidenceVerified = replayRow.time_evidence_verified === true || evidenceBlock.verified === true;
+    const timeEvidenceVerified = currentTimetableAllowed && (replayRow.time_evidence_verified === true || evidenceBlock.verified === true);
     const timeEvidenceTripId = cleanIdentifier(replayRow.time_evidence_trip_id || evidenceBlock.trip_id || "");
     const timeEvidenceFeedId = cleanIdentifier(replayRow.time_evidence_feed_id || evidenceBlock.feed_id || "");
     const nextRouteId = cleanIdentifier(replayRow.next_route_id || evidenceBlock.next_route_id || "");
@@ -223,7 +236,7 @@ function App() {
   const replayReady = useMemo(() => effectiveReplayCheckpoints.length > 0 && effectiveReplayCheckpoints.every((item) => item.timeEvidenceVerified && item.timeEvidenceSource && item.timeEvidenceTripId && item.timeEvidenceFeedId && item.nextRouteId && item.nextNodeId && Number.isInteger(item.nextNodeOrder) && item.nextTimeEvidenceTripId && item.nextTimeEvidenceFeedId && isClockTime(item.scheduledArrival) && isClockTime(item.nextDeparture) && Number.isInteger(item.minimumTransfer) && item.alightNodeId && Number.isInteger(item.alightNodeOrder)), [effectiveReplayCheckpoints]);
   const replayApplicability = useMemo(() => {
     if (!activeJourney) return "journey_required";
-    if (activeJourney.scheduled === true && Number(activeJourney.transfers) === 0) return "not_applicable";
+    if (journeyUsesCurrentTimetable(activeJourney) && Number(activeJourney.transfers) === 0) return "not_applicable";
     return replayReady ? "ready" : "data_gap";
   }, [activeJourney, replayReady]);
   useEffect(() => {
@@ -369,7 +382,7 @@ function App() {
       return;
     }
     if (!replayReady) {
-      setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "\uC2E4\uC81C \uC2DC\uAC04\uD45C\uC758 \uD658\uC2B9 \uC2DC\uAC01 \uADFC\uAC70\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4."));
+      setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "\uAC80\uC99D\uB41C \uD604\uC7AC \uC2DC\uAC04\uD45C\uC758 \uD658\uC2B9 \uC2DC\uAC01 \uADFC\uAC70\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4."));
       setSimLoading(false);
       return;
     }
@@ -431,7 +444,7 @@ function App() {
   useEffect(() => {
     if (!activeJourney) setSimulation(buildDataGapSimulation(days));
     else if (replayApplicability === "not_applicable") setSimulation(buildDataGapSimulation(days, "NO_TRANSFER_CONNECTIONS", "\uC9C1\uD1B5 \uACBD\uB85C\uB294 \uD658\uC2B9 \uC5F0\uACB0 \uC131\uACF5\xB7\uC2E4\uD328 \uC2DC\uBBAC\uB808\uC774\uC158 \uB300\uC0C1\uC774 \uC544\uB2D9\uB2C8\uB2E4."));
-    else if (!replayReady) setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "\uC2E4\uC81C \uC2DC\uAC04\uD45C\uC758 \uD658\uC2B9 \uC2DC\uAC01 \uADFC\uAC70\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4."));
+    else if (!replayReady) setSimulation(buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "\uAC80\uC99D\uB41C \uD604\uC7AC \uC2DC\uAC04\uD45C\uC758 \uD658\uC2B9 \uC2DC\uAC01 \uADFC\uAC70\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4."));
     else setSimulation(buildDataGapSimulation(days, "REPLAY_NOT_RUN", "\uC120\uD0DD \uAE30\uAC04\uC758 \uC2E4\uC81C \uD1B5\uACFC \uC774\uB825\uC744 \uC7AC\uC0DD\uD558\uC138\uC694."));
   }, [days, activeJourney, replayApplicability, replayReady]);
   function changeTab(next) {
@@ -452,7 +465,7 @@ function App() {
     setLiveNotice("");
     setLegCoverage({ ...EMPTY_PASSAGE_COVERAGE, code: nextLiveLegs.length ? "PASSAGE_HISTORY_UNAVAILABLE" : "JOURNEY_RIDE_LEGS_REQUIRED" });
     setPassageCoverage({ ...EMPTY_PASSAGE_COVERAGE, code: nextReplayCheckpoints.length ? "PASSAGE_HISTORY_UNAVAILABLE" : "VERIFIED_TRANSFER_CHECKPOINTS_REQUIRED" });
-    setSimulation(candidate.scheduled === true && Number(candidate.transfers) === 0 ? buildDataGapSimulation(days, "NO_TRANSFER_CONNECTIONS", "\uC9C1\uD1B5 \uACBD\uB85C\uB294 \uD658\uC2B9 \uC5F0\uACB0 \uC131\uACF5\xB7\uC2E4\uD328 \uC2DC\uBBAC\uB808\uC774\uC158 \uB300\uC0C1\uC774 \uC544\uB2D9\uB2C8\uB2E4.") : buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "\uC2E4\uC81C \uC2DC\uAC04\uD45C\uC758 \uD658\uC2B9 \uC2DC\uAC01 \uADFC\uAC70\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4."));
+    setSimulation(journeyUsesCurrentTimetable(candidate) && Number(candidate.transfers) === 0 ? buildDataGapSimulation(days, "NO_TRANSFER_CONNECTIONS", "\uC9C1\uD1B5 \uACBD\uB85C\uB294 \uD658\uC2B9 \uC5F0\uACB0 \uC131\uACF5\xB7\uC2E4\uD328 \uC2DC\uBBAC\uB808\uC774\uC158 \uB300\uC0C1\uC774 \uC544\uB2D9\uB2C8\uB2E4.") : buildDataGapSimulation(days, "VERIFIED_TIMETABLE_TIMES_REQUIRED", "\uAC80\uC99D\uB41C \uD604\uC7AC \uC2DC\uAC04\uD45C\uC758 \uD658\uC2B9 \uC2DC\uAC01 \uADFC\uAC70\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4."));
     checkConnection(nextMappings, nextOperationalLegs);
     changeTab("journey");
   }
@@ -486,6 +499,6 @@ function App() {
       setSettingsError(error.message || "\uC5F0\uACB0 \uC124\uC815\uC744 \uC800\uC7A5\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
     }
   }
-  return /* @__PURE__ */ React.createElement("div", { className: "stage" }, /* @__PURE__ */ React.createElement("main", { className: `app-shell tab-${tab}`, "aria-label": "\uBC84\uC2A4\uB85C \uC787\uB2E4" }, /* @__PURE__ */ React.createElement(AppHeader, { connection, onSettings: () => setSettingsOpen(true) }), /* @__PURE__ */ React.createElement("div", { className: "screen-scroll" }, tab === "explore" && /* @__PURE__ */ React.createElement(NationwideScreen, { connection, onChooseJourney: openJourney }), tab === "live" && /* @__PURE__ */ React.createElement(LiveScreen, { journey: activeJourney, connection, legs: effectiveLiveLegs, selectedLeg, setSelectedLeg, arrivals, history, passageCoverage: legCoverage, mappingSummary: liveMappingSummary, loading: liveLoading, error: liveError, notice: liveNotice, onRefresh: () => loadLive(leg), onCollect: collectSnapshot, onExplore: () => changeTab("explore") }), tab === "simulation" && /* @__PURE__ */ React.createElement(SimulationScreen, { journey: activeJourney, replayReady, replayApplicability, connection, simulation, days, setDays, passageCoverage, mappingSummary: replayMappingSummary, loading: simLoading, onRun: runSimulation, onExplore: () => changeTab("explore") }), tab === "journey" && /* @__PURE__ */ React.createElement(JourneyScreen, { journey: activeJourney, onExplore: () => changeTab("explore") })), /* @__PURE__ */ React.createElement(BottomDock, { tab, onChange: changeTab }), /* @__PURE__ */ React.createElement(SettingsSheet, { open: settingsOpen, onClose: () => setSettingsOpen(false), apiBase, setApiBase, connection, journey: activeJourney, mappings, legs: effectiveOperationalLegs, mappingSummary: operationalMappingSummary, settingsError, onMappingChange: updateMapping, onVerifyMapping: verifyMapping, onReconnect: saveConnection })));
+  return /* @__PURE__ */ React.createElement("div", { className: "stage" }, /* @__PURE__ */ React.createElement("main", { className: `app-shell tab-${tab}`, "aria-label": "\uBC84\uC2A4\uB85C \uC787\uB2E4" }, /* @__PURE__ */ React.createElement(AppHeader, { connection, onSettings: () => setSettingsOpen(true) }), /* @__PURE__ */ React.createElement("div", { className: "screen-scroll" }, tab === "explore" && /* @__PURE__ */ React.createElement(NationwideScreen, { connection, onChooseJourney: openJourney }), tab === "live" && /* @__PURE__ */ React.createElement(LiveScreen, { journey: activeJourney, connection, legs: effectiveLiveLegs, selectedLeg, setSelectedLeg, arrivals, history, passageCoverage: legCoverage, mappingSummary: liveMappingSummary, loading: liveLoading, error: liveError, notice: liveNotice, onRefresh: () => loadLive(leg), onCollect: collectSnapshot, onExplore: () => changeTab("explore") }), tab === "simulation" && /* @__PURE__ */ React.createElement(SimulationScreen, { journey: activeJourney, replayReady, replayApplicability, connection, simulation, days, setDays, passageCoverage, mappingSummary: replayMappingSummary, loading: simLoading, onRun: runSimulation, onExplore: () => changeTab("explore") }), tab === "journey" && /* @__PURE__ */ React.createElement(JourneyScreen, { journey: activeJourney, connection, onExplore: () => changeTab("explore") })), /* @__PURE__ */ React.createElement(BottomDock, { tab, onChange: changeTab }), /* @__PURE__ */ React.createElement(SettingsSheet, { open: settingsOpen, onClose: () => setSettingsOpen(false), apiBase, setApiBase, connection, journey: activeJourney, mappings, legs: effectiveOperationalLegs, mappingSummary: operationalMappingSummary, settingsError, onMappingChange: updateMapping, onVerifyMapping: verifyMapping, onReconnect: saveConnection })));
 }
 ReactDOM.createRoot(document.getElementById("root")).render(/* @__PURE__ */ React.createElement(App, null));

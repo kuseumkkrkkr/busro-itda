@@ -21,12 +21,40 @@ MAX_QUERY_LENGTH = 100
 MAX_RESULT_LIMIT = 100
 MAX_OFFSET = 10_000
 
-VALID_STATUSES = frozenset(
+VALID_ORIGIN_STATUSES = frozenset(
     {
         "VERIFIED_SCHEDULE_ORIGIN",
+        "VERIFIED_PRIOR_ONLY",
         "VERIFIED_ROUTE_ONLY",
         "SOURCE_DOWN",
         "DATA_GAP",
+    }
+)
+VALID_STATUSES = VALID_ORIGIN_STATUSES
+VALID_INGESTION_STATUSES = frozenset(
+    {
+        "DISCOVERED_ONLY",
+        "STAGED",
+        "ACTIVE",
+        "STALE",
+        "REJECTED",
+    }
+)
+VALID_SCHEDULE_GRANULARITIES = frozenset(
+    {
+        "NONE",
+        "UNKNOWN",
+        "TERMINAL_DEPARTURES",
+        "STOP_LEVEL_TIMES",
+    }
+)
+VALID_COLLECTION_POLICIES = frozenset(
+    {
+        "BOUNDED_API",
+        "MANUAL_APPLICATION_ONLY",
+        "PERMISSION_REQUIRED",
+        "DISCOVERY_ONLY",
+        "SCREEN_CHECK_ONLY",
     }
 )
 ALLOWED_URL_HOSTS = frozenset(
@@ -43,6 +71,7 @@ ALLOWED_URL_HOSTS = frozenset(
         "ulsan.go.kr",
         "www.ulsan.go.kr",
         "www.ulsanbus.or.kr",
+        "bus.gwangju.go.kr",
     }
 )
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -67,6 +96,25 @@ def _safe_string(value: Any, name: str, *, maximum: int = 500) -> str:
     if not value or len(value) > maximum or _CONTROL_RE.search(value):
         raise RegistryError(f"{name} is empty, too long, or contains control characters")
     return value
+
+
+def _enum_string(value: Any, name: str, allowed: frozenset[str]) -> str:
+    normalized = _safe_string(value, name, maximum=80)
+    if normalized not in allowed:
+        raise RegistryError(f"{name} is invalid")
+    return normalized
+
+
+def _safe_string_list(value: Any, name: str) -> list[str]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 20:
+        raise RegistryError(f"{name} must contain 1 to 20 entries")
+    normalized = [
+        _safe_string(item, f"{name}[{index}]", maximum=100)
+        for index, item in enumerate(value)
+    ]
+    if len(set(normalized)) != len(normalized):
+        raise RegistryError(f"{name} contains duplicate entries")
+    return normalized
 
 
 def _walk_strings(value: Any, path: str = "root") -> Iterable[tuple[str, str]]:
@@ -151,9 +199,54 @@ def _validate_source(raw: Any, *, index: int) -> dict[str, Any]:
     source_id = _safe_string(raw.get("id"), f"sources[{index}].id", maximum=64)
     if not _ID_RE.fullmatch(source_id):
         raise RegistryError("source id must contain only lowercase letters, digits, and hyphens")
-    status = _safe_string(raw.get("status"), f"sources[{index}].status", maximum=40)
-    if status not in VALID_STATUSES:
-        raise RegistryError(f"unsupported source status: {status}")
+    origin_status = _safe_string(
+        raw.get("origin_status"), f"sources[{index}].origin_status", maximum=40
+    )
+    if origin_status not in VALID_ORIGIN_STATUSES:
+        raise RegistryError(f"unsupported source origin_status: {origin_status}")
+    ingestion_status = _enum_string(
+        raw.get("ingestion_status", "DISCOVERED_ONLY"),
+        f"sources[{index}].ingestion_status",
+        VALID_INGESTION_STATUSES,
+    )
+    schedule_granularity = _enum_string(
+        raw.get("schedule_granularity"),
+        f"sources[{index}].schedule_granularity",
+        VALID_SCHEDULE_GRANULARITIES,
+    )
+    collection_policy = _enum_string(
+        raw.get("collection_policy"),
+        f"sources[{index}].collection_policy",
+        VALID_COLLECTION_POLICIES,
+    )
+    if origin_status in {"VERIFIED_SCHEDULE_ORIGIN", "VERIFIED_PRIOR_ONLY"}:
+        if schedule_granularity == "NONE":
+            raise RegistryError("schedule origins must declare schedule granularity")
+
+    projection_allowed = raw.get("projection_allowed")
+    if projection_allowed is not None and not isinstance(projection_allowed, bool):
+        raise RegistryError(f"sources[{index}].projection_allowed must be a boolean")
+    allowed_uses: list[str] | None = None
+    prohibited_uses: list[str] | None = None
+    if origin_status == "VERIFIED_PRIOR_ONLY":
+        if projection_allowed is not False:
+            raise RegistryError("prior-only sources must set projection_allowed=false")
+        allowed_uses = _safe_string_list(
+            raw.get("allowed_uses"), f"sources[{index}].allowed_uses"
+        )
+        prohibited_uses = _safe_string_list(
+            raw.get("prohibited_uses"), f"sources[{index}].prohibited_uses"
+        )
+        if set(allowed_uses) & set(prohibited_uses):
+            raise RegistryError("allowed_uses and prohibited_uses must be disjoint")
+    if projection_allowed is True and (
+        ingestion_status != "ACTIVE"
+        or origin_status != "VERIFIED_SCHEDULE_ORIGIN"
+    ):
+        raise RegistryError(
+            "current projection requires a VERIFIED_SCHEDULE_ORIGIN with "
+            "ingestion_status=ACTIVE and projection_allowed=true"
+        )
     tier = _bounded_int(raw.get("priority_tier"), "priority_tier", minimum=1, maximum=5)
 
     urls = raw.get("urls")
@@ -180,6 +273,7 @@ def _validate_source(raw: Any, *, index: int) -> dict[str, Any]:
         )
 
     normalized = deepcopy(raw)
+    normalized.pop("status", None)
     normalized.update(
         {
             "id": source_id,
@@ -188,13 +282,24 @@ def _validate_source(raw: Any, *, index: int) -> dict[str, Any]:
                 raw.get("municipality"), f"sources[{index}].municipality", maximum=80
             ),
             "priority_tier": tier,
-            "status": status,
+            "origin_status": origin_status,
+            "ingestion_status": ingestion_status,
+            "schedule_granularity": schedule_granularity,
+            "collection_policy": collection_policy,
             "urls": normalized_urls,
             "license": _safe_string(
                 raw.get("license"), f"sources[{index}].license", maximum=60
             ),
         }
     )
+    if allowed_uses is not None and prohibited_uses is not None:
+        normalized.update(
+            {
+                "projection_allowed": False,
+                "allowed_uses": allowed_uses,
+                "prohibited_uses": prohibited_uses,
+            }
+        )
     refresh = raw.get("refresh")
     if not isinstance(refresh, dict):
         raise RegistryError("source refresh must be an object")
@@ -206,7 +311,7 @@ class SourceRegistry:
     """Immutable-in-practice source index with bounded list and search operations."""
 
     def __init__(self, document: dict[str, Any]) -> None:
-        if not isinstance(document, dict) or document.get("schema_version") != 1:
+        if not isinstance(document, dict) or document.get("schema_version") != 2:
             raise RegistryError("unsupported municipal source registry schema")
         self._priority_order = _validate_priority_order(document.get("priority_order"))
         raw_sources = document.get("sources")
@@ -250,12 +355,18 @@ class SourceRegistry:
         limit: int = 25,
         offset: int = 0,
         status: str | None = None,
+        origin_status: str | None = None,
         priority_tier: int | None = None,
     ) -> list[dict[str, Any]]:
         bounded_limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_RESULT_LIMIT)
         bounded_offset = _bounded_int(offset, "offset", minimum=0, maximum=MAX_OFFSET)
-        if status is not None and status not in VALID_STATUSES:
+        if status is not None and status not in VALID_ORIGIN_STATUSES:
             raise RegistryError("status filter is invalid")
+        if origin_status is not None and origin_status not in VALID_ORIGIN_STATUSES:
+            raise RegistryError("origin_status filter is invalid")
+        if status is not None and origin_status is not None and status != origin_status:
+            raise RegistryError("status and origin_status filters conflict")
+        selected_origin_status = origin_status or status
         if priority_tier is not None:
             priority_tier = _bounded_int(
                 priority_tier, "priority_tier", minimum=1, maximum=5
@@ -263,7 +374,10 @@ class SourceRegistry:
         matches = (
             source
             for source in self._sources
-            if (status is None or source["status"] == status)
+            if (
+                selected_origin_status is None
+                or source["origin_status"] == selected_origin_status
+            )
             and (priority_tier is None or source["priority_tier"] == priority_tier)
         )
         selected: list[dict[str, Any]] = []
@@ -285,7 +399,10 @@ class SourceRegistry:
                     source["id"],
                     source["name"],
                     source["municipality"],
-                    source["status"],
+                    source["origin_status"],
+                    source["ingestion_status"],
+                    source["schedule_granularity"],
+                    source["collection_policy"],
                     *(url["role"] for url in source["urls"]),
                 )
             ).casefold()
@@ -307,6 +424,10 @@ __all__ = [
     "MAX_RESULT_LIMIT",
     "RegistryError",
     "SourceRegistry",
+    "VALID_COLLECTION_POLICIES",
+    "VALID_INGESTION_STATUSES",
+    "VALID_ORIGIN_STATUSES",
+    "VALID_SCHEDULE_GRANULARITIES",
     "VALID_STATUSES",
     "load_default_registry",
 ]

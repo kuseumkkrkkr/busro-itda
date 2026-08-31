@@ -75,12 +75,12 @@ function Segmented({ value, options, onChange, label }) {
   );
 }
 
-function ProbabilityRing({ value, size = "large" }) {
+function ProbabilityRing({ value, size = "large", label = "관측 성공률" }) {
   const available = Number.isFinite(value);
   const safeValue = available ? Math.max(0, Math.min(100, value)) : 0;
   return (
-    <div className={`probability-ring ${size} ${available ? "" : "unavailable"}`} style={{ "--probability": `${safeValue * 3.6}deg` }} aria-label={available ? `경로 성공 확률 ${value}%` : "시뮬레이션 데이터 부족"}>
-      <div><strong>{available ? value : "—"}</strong>{available && <span>%</span>}<small>{available ? "성공 가능성" : "DATA GAP"}</small></div>
+    <div className={`probability-ring ${size} ${available ? "" : "unavailable"}`} style={{ "--probability": `${safeValue * 3.6}deg` }} aria-label={available ? `${label} ${value}%` : "관측 데이터 부족"}>
+      <div><strong>{available ? value : "—"}</strong>{available && <span>%</span>}<small>{available ? label : "DATA GAP"}</small></div>
     </div>
   );
 }

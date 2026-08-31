@@ -827,15 +827,19 @@ class ServiceCase(unittest.TestCase):
             )
         self.assertEqual(missing_metadata.exception.status, 422)
         self.assertEqual(
-            missing_metadata.exception.code, "OFFICIAL_SCHEDULE_RECORD_REQUIRED"
+            missing_metadata.exception.code, "UNVERIFIED_TIMETABLE_SOURCE"
         )
         self.assertEqual(
-            missing_metadata.exception.details["reason"],
-            "LIVE_SCHEDULE_METADATA_REQUIRED",
+            missing_metadata.exception.details["required_status"],
+            "VERIFIED_SCHEDULE_ORIGIN",
         )
-        self.assertIn(
-            "next_route_id", missing_metadata.exception.details["missing_fields"]
-        )
+
+        # Synthetic current-source contract for the metadata/storage checks
+        # below. Production keeps ktdb-gtfs-2024 prior-only.
+        live._verified_schedule_origins["ktdb-gtfs-2024"] = {
+            "source_id": "ktdb-gtfs-2024",
+            "origin_status": "VERIFIED_SCHEDULE_ORIGIN",
+        }
 
         complete_leg = {
             **leg,
@@ -875,6 +879,10 @@ class ServiceCase(unittest.TestCase):
             ),
             clock=lambda: FIXED_NOW,
         )
+        live._verified_schedule_origins["ktdb-gtfs-2024"] = {
+            "source_id": "ktdb-gtfs-2024",
+            "origin_status": "VERIFIED_SCHEDULE_ORIGIN",
+        }
         route_id = "GTFS:KTDB:R0123456789abcdef0123:P0123456789abcdef0123456789abcdef01234567"
         node_id = "GTFS:KTDB:S0123456789abcdef0123"
         trip_id = "GTFS:KTDB:T0123456789abcdef0123"
@@ -1071,6 +1079,10 @@ class ServiceCase(unittest.TestCase):
             ),
             clock=lambda: FIXED_NOW,
         )
+        live._verified_schedule_origins["ktdb-gtfs-2024"] = {
+            "source_id": "ktdb-gtfs-2024",
+            "origin_status": "VERIFIED_SCHEDULE_ORIGIN",
+        }
         base = {
             "id": "gtfs-sequence",
             "route_id": "GTFS:KTDB:R0123456789abcdef0123:P0123456789abcdef0123456789abcdef01234567",

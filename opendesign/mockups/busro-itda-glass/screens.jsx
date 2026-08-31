@@ -1,5 +1,5 @@
 function ExploreScreen({ form, setForm, connection, simulation, onSearch, onOpenSimulation, onOpenLive }) {
-  const summary = simulation.summary || { probability: 0, weakestLeg: "집계 전", coverage: 0 };
+  const summary = simulation.summary || { probability: null, weakestLeg: "집계 전", coverage: 0 };
   return (
     <main className="screen explore-screen">
       <div className="map-atmosphere" aria-hidden="true">
@@ -20,20 +20,20 @@ function ExploreScreen({ form, setForm, connection, simulation, onSearch, onOpen
         <button className="swap-button" type="button" aria-label="출발지와 도착지 바꾸기" onClick={() => setForm({ ...form, from: form.to, to: form.from })}><Icon name="arrows-down-up" /></button>
         <label className="place-field"><span className="place-dot end" /><span><small>도착</small><input value={form.to} onChange={(event) => setForm({ ...form, to: event.target.value })} aria-label="도착지" /></span></label>
         <div className="search-meta">
-          <button type="button"><Icon name="calendar-blank" /> 9월 1일</button>
-          <button type="button"><Icon name="clock" /> 07:00</button>
+          <button type="button"><Icon name="calendar-blank" /> 날짜 선택</button>
+          <button type="button"><Icon name="clock" /> 시각 선택</button>
           <button className="search-submit" type="button" onClick={onSearch} disabled={!form.from.trim() || !form.to.trim()} aria-label="경로 검색"><Icon name="arrow-right" /></button>
         </div>
       </GlassCard>
 
       <GlassCard className="probability-hero">
         <div className="probability-copy">
-          <p className="eyebrow">DAILY ROUTE PULSE</p>
-          <h2>오늘, 끝까지<br />이어질 확률</h2>
-          <p>{summary.coverage > 0 ? `최근 적재 이력 ${summary.coverage}건 기반` : "아직 공식 이력 없음 · 샘플 분포"}</p>
+          <p className="eyebrow">OBSERVED CONNECTIONS</p>
+          <h2>실제로 이어진<br />날짜별 기록</h2>
+          <p>{summary.coverage > 0 ? `실제 적재 이력 ${summary.coverage}건 기반` : "아직 실제 이력 없음 · 확률 미산출"}</p>
           <button className="text-link" type="button" onClick={onOpenSimulation}>날짜별 결과 보기 <Icon name="arrow-up-right" /></button>
         </div>
-        <ProbabilityRing value={summary.probability || 0} />
+        <ProbabilityRing value={Number.isFinite(summary.probability) ? summary.probability : null} />
       </GlassCard>
 
       <div className="quick-grid">
@@ -46,7 +46,7 @@ function ExploreScreen({ form, setForm, connection, simulation, onSearch, onOpen
 
 function LiveScreen({ journey, connection, legs, selectedLeg, setSelectedLeg, arrivals, history, passageCoverage, mappingSummary, loading, error, notice, onRefresh, onCollect, onExplore }) {
   if (!journey || legs.length === 0) {
-    const directWithoutTransfer = journey?.scheduled === true && Number(journey?.transfers) === 0;
+    const directWithoutTransfer = journeyUsesCurrentTimetable(journey) && Number(journey?.transfers) === 0;
     return (
       <main className="screen content-screen">
         <ScreenHeading eyebrow="실시간" title={directWithoutTransfer ? "환승 관측 구간이 없습니다" : "조회할 여행이 없습니다"} detail={directWithoutTransfer ? "직통 경로에는 환승 체크포인트가 없어 연결 이력 수집 대상이 아닙니다." : journey ? "선택한 후보에 검증된 환승 체크포인트가 없습니다." : "전국 탐색에서 실제 생성된 여행 후보를 먼저 선택하세요."} />
@@ -96,7 +96,7 @@ function LiveScreen({ journey, connection, legs, selectedLeg, setSelectedLeg, ar
         {values.length ? <div className="history-chart" aria-label="최근 지연 관측 막대 그래프">
           {values.slice(-10).map((item, index) => { const delay = Number(item.delay || item.delay_minutes || 0); return <div key={`${item.timestamp || item.label || "history"}-${index}`}><span style={{ height: `${Math.max(12, (delay / maxDelay) * 100)}%` }} className={Number.isFinite(leg.buffer) && delay > leg.buffer ? "risk" : ""} /><small>{String(item.label || item.observed_at || index + 1).slice(5, 10)}</small></div>; })}
         </div> : <div className="history-empty"><Icon name="path" /><p>통과 이력이 없어 성공·실패를 판정하지 않습니다.</p></div>}
-        <p className="chart-note">도착예정시간 관측값{Number.isFinite(leg.buffer) ? ` · 실제 시간표 기준 환승 여유 ${leg.buffer}분` : " · 시간표 환승 시각 DATA_GAP"}</p>
+        <p className="chart-note">도착예정시간 관측값{Number.isFinite(leg.buffer) ? ` · 검증된 현재 시간표 기준 환승 여유 ${leg.buffer}분` : " · 현재 시간표 환승 시각 DATA_GAP"}</p>
       </GlassCard>
     </main>
   );
@@ -112,17 +112,17 @@ function SimulationScreen({ journey, replayReady, replayApplicability, connectio
       </main>
     );
   }
-  const summary = simulation.summary || { probability: 0, successfulDays: 0, totalDays: days, weakestLeg: "집계 전", coverage: 0 };
+  const summary = simulation.summary || { probability: null, successfulDays: 0, totalDays: days, weakestLeg: "집계 전", coverage: 0 };
   const notApplicable = replayApplicability === "not_applicable";
   const allMapped = mappingSummary.total > 0 && mappingSummary.verified === mappingSummary.total;
   const canReplay = !notApplicable && replayReady && connection.mode === "live" && allMapped;
   return (
     <main className="screen content-screen simulation-screen">
-      <ScreenHeading eyebrow="이력 재생" title="날짜별 연결 결과" detail="검증된 시간표와 저장된 차량 통과 이력으로만 판정합니다." />
+      <ScreenHeading eyebrow="이력 재생" title="날짜별 연결 결과" detail="검증된 현재 시간표와 저장된 TAGO 차량 통과 이력이 함께 있는 날짜만 판정합니다." />
       <CoverageStrip mappingSummary={mappingSummary} coverage={passageCoverage} />
       {mappingSummary.verified < mappingSummary.total && <InlineNotice tone="warning" icon="map-pin-line" title="DATA_GAP · 공식 매핑 미완료">선택 여행 {mappingSummary.total}개 구간이 모두 검증되기 전에는 날짜별 결과를 판정하지 않습니다.</InlineNotice>}
       {notApplicable && <InlineNotice tone="neutral" icon="minus-circle" title="환승 연결 시뮬레이션 비대상">이 후보는 직통 경로라 환승 연결의 성공·실패가 없습니다. 성공률을 만들지 않습니다.</InlineNotice>}
-      {!notApplicable && !replayReady && <InlineNotice tone="warning" icon="clock" title="DATA_GAP · 실제 환승 시각 필요">후보에 검증된 시간표 출처, 도착 예정시각, 다음 출발시각, 최소 환승시간이 없습니다. 임의 시각이나 fixture 성공률을 사용하지 않습니다.</InlineNotice>}
+      {!notApplicable && !replayReady && <InlineNotice tone="warning" icon="clock" title="DATA_GAP · 현재 환승 시각 필요">후보에 검증된 현재 시간표 출처, 도착 예정시각, 다음 출발시각, 최소 환승시간이 없습니다. 과거 GTFS 시각이나 fixture 성공률을 사용하지 않습니다.</InlineNotice>}
       {!notApplicable && replayReady && connection.mode !== "live" && <InlineNotice tone="warning" icon="database" title="DATA_GAP · TAGO LIVE 필요">실제 차량 통과 이력이 적재된 TAGO LIVE 연결 뒤에만 재생합니다.</InlineNotice>}
       <GlassCard className="sim-control">
         <label>분석 기간<Segmented value={days} onChange={setDays} label="분석 기간" options={[{ value: 7, label: "7일" }, { value: 14, label: "14일" }, { value: 30, label: "30일" }]} /></label>
@@ -130,7 +130,7 @@ function SimulationScreen({ journey, replayReady, replayApplicability, connectio
       </GlassCard>
 
       <GlassCard className="sim-summary">
-        <ProbabilityRing value={summary.probability || 0} />
+        <ProbabilityRing value={Number.isFinite(summary.probability) ? summary.probability : null} />
         <div><p className="eyebrow">관측 결과</p><h2>{notApplicable ? "비대상" : summary.dataGap ? "자료 부족" : summary.successfulDays}<span>{notApplicable ? " · 직통" : summary.dataGap ? " · DATA_GAP" : ` / ${summary.totalDays}일 성공`}</span></h2><p>{notApplicable ? "환승 연결이 없어 성공률을 산출하지 않습니다." : summary.dataGap ? "검증된 시각과 해당 날짜 통과 이력이 모두 필요합니다." : <>결과 요약은 <strong>{summary.weakestLeg}</strong>입니다.</>}</p><div className="coverage-row"><span><Icon name="database" /> 적재 통과 이벤트</span><strong>{summary.coverage || 0}건</strong></div></div>
       </GlassCard>
 
@@ -144,7 +144,7 @@ function SimulationScreen({ journey, replayReady, replayApplicability, connectio
           </article>
         ))}
       </section>
-      <InlineNotice tone="neutral" icon="flask" title="결과 해석">{notApplicable ? "직통 경로는 환승 연결 판정 대상이 아니며 성공·실패 또는 성공률을 만들지 않습니다." : "TAGO는 과거 운행 이력을 소급 제공하지 않습니다. 연결 이후 적재한 실제 차량 통과와 검증된 시간표 시각이 함께 있는 날짜만 성공·실패로 판정하며, 나머지는 DATA_GAP입니다."}</InlineNotice>
+      <InlineNotice tone="neutral" icon="flask" title="결과 해석">{notApplicable ? "직통 경로는 환승 연결 판정 대상이 아니며 성공·실패 또는 성공률을 만들지 않습니다." : "TAGO는 과거 운행 이력을 소급 제공하지 않습니다. 연결 이후 적재한 실제 차량 통과와 검증된 현재 시간표 시각이 함께 있는 날짜만 성공·실패로 판정합니다. GTFS 과거 자료는 모델 근거일 뿐 단독 판정값이 아닙니다."}</InlineNotice>
     </main>
   );
 }
@@ -374,6 +374,7 @@ function journeyReasonLabel(reason) {
   return ({
     VERIFIED_TIMETABLE_REQUIRED: "검증된 시간표 없음",
     PASSAGE_HISTORY_REQUIRED: "실제 통과 이력 부족",
+    HISTORICAL_GTFS_PRIOR_ONLY: "과거 GTFS · 모델 근거 전용",
   })[reason] || reason;
 }
 
@@ -450,7 +451,8 @@ function JourneyRouteMap({ sections, fromName, toName }) {
   </section>;
 }
 
-function JourneyScreen({ journey, onExplore }) {
+function JourneyScreen({ journey, connection, onExplore }) {
+  const selectedFetchedWindows = useCandidateRouteWindows(journey ? [journey] : []);
   if (!journey) {
     return (
       <main className="screen content-screen journey-screen">
@@ -472,14 +474,20 @@ function JourneyScreen({ journey, onExplore }) {
   const sections = summarizeJourneySections(journey);
   const reasons = Array.isArray(journey.reasons) ? journey.reasons.filter(Boolean) : [];
   const status = journey.status || "DATA_GAP";
-  const hasProbability = typeof journey.success_probability === "number" && Number.isFinite(journey.success_probability);
+  const successProbability = verifiedSuccessProbability(journey);
   const coverage = journey.coverage && typeof journey.coverage === "object" ? journey.coverage : {};
   const evidence = journey.evidence && typeof journey.evidence === "object" ? journey.evidence : {};
   const sources = collectJourneySources(journey);
+  const schedule = normalizeSchedule({ schedule: journey.schedule || {} });
+  const provenance = scheduleEvidence(schedule, journey);
+  const departureTime = schedule.ready ? formatGtfsClock(journey.departure_time, journey.departure_seconds) : null;
+  const arrivalTime = schedule.ready ? formatGtfsClock(journey.arrival_time, journey.arrival_seconds) : null;
+  const timeSummary = [departureTime ? `출발 ${departureTime}` : "", arrivalTime ? `도착 ${arrivalTime}` : ""].filter(Boolean);
+  const topologyReady = sections.some((section) => section.kind === "ride");
 
   return (
     <main className="screen content-screen journey-screen">
-      <ScreenHeading eyebrow="선택한 여정" title={`${fromName} → ${toName}`} detail="공식 경유 정류장으로 생성된 경로입니다. 관측 근거가 있는 정보만 표시합니다." />
+      <ScreenHeading eyebrow="선택한 여정" title={`${fromName} → ${toName}`} detail="현재 TAGO 경유 정류장으로 생성한 경로입니다. 시간표·실시간·과거 모델 근거를 구분해 표시합니다." />
       <JourneyRouteMap sections={sections} fromName={fromName} toName={toName} />
       <GlassCard className="ticket-card">
         <div className="ticket-route"><div><small>출발 정류장</small><strong>{fromName}</strong><span>{fromStop.node_id || "ID DATA_GAP"}</span></div><div className="ticket-line"><span /><Icon name="bus" /><span /></div><div><small>도착 정류장</small><strong>{toName}</strong><span>{toStop.node_id || "ID DATA_GAP"}</span></div></div>
@@ -490,6 +498,7 @@ function JourneyScreen({ journey, onExplore }) {
         </div>
         {routeIds.length > 0 && <div className="ticket-meta">{routeIds.map((routeId) => <span key={routeId}><Icon name="path" /> {routeId}</span>)}</div>}
       </GlassCard>
+      <JourneyEvidenceStack candidate={journey} context={journey} schedule={schedule} provenance={provenance} timeSummary={timeSummary} connection={connection} fetchedWindows={selectedFetchedWindows} />
       <section className="leg-timeline">
         {sections.map((section, index) => {
           const stepFrom = section.from || {};
@@ -515,11 +524,11 @@ function JourneyScreen({ journey, onExplore }) {
           {source.url && <a href={source.url} target="_blank" rel="noreferrer">공식 원문 보기 <Icon name="arrow-square-out" /></a>}
         </article>)}</div>
       </details>}
-      <InlineNotice tone={status === "READY" ? "success" : "warning"} icon={status === "READY" ? "shield-check" : "warning-circle"} title={status}>
+      <InlineNotice tone={topologyReady ? "success" : "warning"} icon={topologyReady ? "path" : "warning-circle"} title={topologyReady ? "현재 TAGO 경로" : status}>
         {reasons.length > 0 ? reasons.map(journeyReasonLabel).join(" · ") : "추가 결측 사유 없음"}
-        {` · 성공률 ${hasProbability ? `${Math.round(journey.success_probability * 100)}%` : "DATA_GAP"}`}
-        {typeof coverage.schedule_routes === "number" && typeof coverage.total_routes === "number" ? ` · 시간표 근거 ${coverage.schedule_routes}/${coverage.total_routes}` : ""}
-        {typeof coverage.passage_routes === "number" && typeof coverage.total_routes === "number" ? ` · 통과 이력 ${coverage.passage_routes}/${coverage.total_routes}` : ""}
+        {` · ${successProbability === null ? "성공률 미산출" : `관측 성공률 ${Math.round(successProbability * 100)}%`}`}
+        {typeof coverage.schedule_routes === "number" && typeof coverage.total_routes === "number" ? ` · 현재 시간표 근거 ${coverage.schedule_routes}/${coverage.total_routes}` : ""}
+        {typeof coverage.passage_routes === "number" && typeof coverage.total_routes === "number" ? ` · 실제 통과 이력 ${coverage.passage_routes}/${coverage.total_routes}` : ""}
         {evidence.topology ? " · 검증된 단방향 경유 순서" : ""}
       </InlineNotice>
       <button className="liquid-button sticky-action" type="button" onClick={onExplore}>다른 전국 여행 찾기 <Icon name="arrow-right" /></button>

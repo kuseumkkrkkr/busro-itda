@@ -39,10 +39,10 @@ function BottomDock({ tab, onChange }) {
 function Segmented({ value, options, onChange, label }) {
   return /* @__PURE__ */ React.createElement("div", { className: "segmented", role: "group", "aria-label": label }, options.map((option) => /* @__PURE__ */ React.createElement("button", { key: option.value, type: "button", className: value === option.value ? "active" : "", onClick: () => onChange(option.value) }, option.label)));
 }
-function ProbabilityRing({ value, size = "large" }) {
+function ProbabilityRing({ value, size = "large", label = "\uAD00\uCE21 \uC131\uACF5\uB960" }) {
   const available = Number.isFinite(value);
   const safeValue = available ? Math.max(0, Math.min(100, value)) : 0;
-  return /* @__PURE__ */ React.createElement("div", { className: `probability-ring ${size} ${available ? "" : "unavailable"}`, style: { "--probability": `${safeValue * 3.6}deg` }, "aria-label": available ? `\uACBD\uB85C \uC131\uACF5 \uD655\uB960 ${value}%` : "\uC2DC\uBBAC\uB808\uC774\uC158 \uB370\uC774\uD130 \uBD80\uC871" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("strong", null, available ? value : "\u2014"), available && /* @__PURE__ */ React.createElement("span", null, "%"), /* @__PURE__ */ React.createElement("small", null, available ? "\uC131\uACF5 \uAC00\uB2A5\uC131" : "DATA GAP")));
+  return /* @__PURE__ */ React.createElement("div", { className: `probability-ring ${size} ${available ? "" : "unavailable"}`, style: { "--probability": `${safeValue * 3.6}deg` }, "aria-label": available ? `${label} ${value}%` : "\uAD00\uCE21 \uB370\uC774\uD130 \uBD80\uC871" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("strong", null, available ? value : "\u2014"), available && /* @__PURE__ */ React.createElement("span", null, "%"), /* @__PURE__ */ React.createElement("small", null, available ? label : "DATA GAP")));
 }
 function ScreenHeading({ eyebrow, title, detail, action }) {
   return /* @__PURE__ */ React.createElement("div", { className: "screen-heading" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "eyebrow" }, eyebrow), /* @__PURE__ */ React.createElement("h1", null, title), detail && /* @__PURE__ */ React.createElement("p", { className: "screen-detail" }, detail)), action);
