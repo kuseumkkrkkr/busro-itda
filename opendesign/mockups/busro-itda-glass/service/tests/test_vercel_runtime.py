@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from vercel_runtime import dispatch_request, reset_runtime_for_tests
+from busro_vercel_runtime import dispatch_request, reset_runtime_for_tests
 
 
 class VercelRuntimeCase(unittest.TestCase):

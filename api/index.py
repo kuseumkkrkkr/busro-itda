@@ -15,7 +15,7 @@ SERVICE_DIR = ROOT / "opendesign" / "mockups" / "busro-itda-glass" / "service"
 if str(SERVICE_DIR) not in sys.path:
     sys.path.insert(0, str(SERVICE_DIR))
 
-from vercel_runtime import RuntimeResponse, dispatch_request  # noqa: E402
+from busro_vercel_runtime import RuntimeResponse, dispatch_request  # noqa: E402
 
 
 HOST_RE = re.compile(r"^[A-Za-z0-9.-]+(?::[0-9]{1,5})?$")
