@@ -30,6 +30,7 @@ from molit_route_stop_ingest import (  # noqa: E402
     MolitRequestBudgetExhausted,
     MolitRouteStopClient,
     MolitRouteStopStage,
+    MolitTransientUpstreamError,
     MolitValidationError,
     NationwideMolitRegionCollector,
     ResumableMolitCollector,
@@ -189,6 +190,18 @@ class MolitParserCase(unittest.TestCase):
             parse_page(payload([wrong_mode]), request())
         with self.assertRaises(MolitQuotaError):
             parse_page(payload([], total_count=0, result_code="22"), request())
+
+        gateway_error = {
+            "OpenAPI_ServiceResponse": {
+                "cmmMsgHeader": {
+                    "errMsg": "HTTP_ERROR",
+                    "returnAuthMsg": "HTTP 에러",
+                    "returnReasonCode": "04",
+                }
+            }
+        }
+        with self.assertRaisesRegex(MolitTransientUpstreamError, "04"):
+            parse_page(gateway_error, request())
 
     def test_cross_boundary_stop_region_is_preserved_not_forced_to_query_region(self) -> None:
         cross_boundary = raw_row(1, "STOP_1")

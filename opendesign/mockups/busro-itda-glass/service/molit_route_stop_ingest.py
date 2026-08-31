@@ -98,6 +98,10 @@ class MolitFatalUpstreamError(MolitProtocolError):
     pass
 
 
+class MolitTransientUpstreamError(MolitProtocolError):
+    """The gateway reached the provider but returned a retryable envelope."""
+
+
 class MolitQuotaError(MolitFatalUpstreamError):
     pass
 
@@ -475,6 +479,39 @@ class MolitPage:
 
 def _response_body(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     root = _casefold_mapping(payload, "official API response")
+    # The data.go.kr gateway uses a separate envelope when the provider cannot
+    # route/process a request.  Preserve the upstream code instead of reducing
+    # it to the unhelpful "missing response" protocol error.
+    service_response = root.get("openapi_serviceresponse")
+    if isinstance(service_response, Mapping):
+        service_root = _casefold_mapping(
+            service_response, "OpenAPI_ServiceResponse"
+        )
+        message_header = service_root.get("cmmmsgheader")
+        if isinstance(message_header, Mapping):
+            error_root = _casefold_mapping(message_header, "cmmMsgHeader")
+            reason_code = _text(
+                error_root.get("returnreasoncode"),
+                "returnReasonCode",
+                16,
+                required=False,
+            )
+            error_message = _text(
+                error_root.get("errormsg") or error_root.get("errMsg")
+                or error_root.get("returnauthmsg") or error_root.get("returnAuthMsg"),
+                "errMsg",
+                160,
+                required=False,
+            )
+            if reason_code in {"04", "05"}:
+                raise MolitTransientUpstreamError(
+                    "official API gateway returned "
+                    f"{reason_code or 'unknown'}{(': ' + error_message) if error_message else ''}"
+                )
+            raise MolitProtocolError(
+                "official API gateway returned "
+                f"{reason_code or 'unknown'}{(': ' + error_message) if error_message else ''}"
+            )
     response = _casefold_mapping(
         _required_field(root, "response", "official API response"), "response"
     )
@@ -727,6 +764,9 @@ class MolitRouteStopClient:
                             "official API response exceeds configured byte limit"
                         )
                     return parse_page(payload, request)
+            except MolitTransientUpstreamError as exc:
+                if attempt >= self.retries:
+                    terminal_error = exc
             except HTTPError as exc:
                 retryable = exc.code == 429 or 500 <= exc.code <= 599
                 if not retryable or attempt >= self.retries:
@@ -3012,6 +3052,7 @@ __all__ = [
     "MolitRequest",
     "MolitRouteStopClient",
     "MolitRouteStopStage",
+    "MolitTransientUpstreamError",
     "MolitValidationError",
     "NationwideMolitRegionCollector",
     "ResumableMolitCollector",
