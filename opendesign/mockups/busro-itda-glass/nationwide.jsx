@@ -72,7 +72,7 @@ function RouteBrowser({ connection, onUseStop }) {
       if (!active) return;
       const normalized = (payload.cities || payload.items || []).map(normalizeCity).filter((item) => item.code && item.name);
       setCities(normalized); setCityCode((value) => value || normalized[0]?.code || "");
-    }).catch((reason) => active && setError(reason.status === 503 ? "TAGO 전국 도시 목록을 쓰려면 서버에 인증키를 연결해야 합니다." : "전국 도시 목록을 불러오지 못했습니다."));
+    }).catch((reason) => active && setError(reason.status === 503 ? "TAGO 공식 데이터 연결이 준비되지 않았습니다." : "전국 도시 목록을 불러오지 못했습니다."));
     return () => { active = false; };
   }, []);
 
@@ -99,8 +99,10 @@ function RouteBrowser({ connection, onUseStop }) {
       setStops(normalizedStops);
       setRouteInfo(normalizeRoute(infoPayload.route || infoPayload.item || route));
       setPositions(positionPayload.positions || []);
-      try { await BusroApi.hydrateRoute(cityCode, route.routeId); }
-      catch (reason) { setHydrationGap(reason.message || "공식 경유 순서를 여행 그래프에 적재하지 못했습니다."); }
+      if (connection.hydrationReady) {
+        try { await BusroApi.hydrateRoute(cityCode, route.routeId); }
+        catch (reason) { setHydrationGap(reason.message || "공식 경유 순서를 여행 그래프에 적재하지 못했습니다."); }
+      } else setHydrationGap("검증된 공유 카탈로그 쓰기가 비활성화되어 새 노선은 적재하지 않았습니다.");
       if (normalizedStops.length >= 2) {
         try { setGeometryPayload(await BusroApi.routeGeometry(route.routeNo, normalizedStops)); }
         catch (reason) { setError(`노선은 찾았지만 OSM 형상을 만들지 못했습니다. ${reason.message || "DATA_GAP"}`); }
@@ -119,7 +121,7 @@ function RouteBrowser({ connection, onUseStop }) {
           <label><span>노선번호</span><input value={routeQuery} onChange={(event) => setRouteQuery(event.target.value)} placeholder="예: 601" maxLength="24" /></label>
           <button type="submit" disabled={!cityCode || loading}><Icon name="magnifying-glass" />{loading ? "조회 중" : "노선 찾기"}</button>
         </form>
-        <p className="source-note"><Icon name="database" /> 지역·노선·정류장은 TAGO 공식 식별자로 조회합니다. 서비스 키는 서버에만 있습니다.</p>
+        <p className="source-note"><Icon name="database" /> 지역·노선·정류장은 TAGO 공식 식별자로 조회합니다. 서비스 키는 브라우저에 저장하지 않습니다.</p>
       </GlassCard>
 
       {error && <InlineNotice tone="warning" icon="warning-circle" title="DATA_GAP">{error}</InlineNotice>}

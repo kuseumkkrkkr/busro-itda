@@ -154,6 +154,26 @@ python -B gtfs_ingest.py `
 
 주기 수집은 명시적으로 별도 실행합니다. 숨은 백그라운드 호출은 하지 않습니다.
 
+### 기존 로컬 TAGO 런타임 재사용
+
+서비스 키를 숨김 입력으로 보유한 직접 연결 서버가 이미 `127.0.0.1:8791`에서 실행 중이고, 최신 UI 서버가 같은 이력·카탈로그 DB를 사용한다면 다음처럼 키를 다시 입력하지 않고 연결할 수 있습니다.
+
+```powershell
+python -u server.py `
+  --host 127.0.0.1 --port 8792 `
+  --db D:\path\to\busro-itda-live.sqlite3 `
+  --catalog-db D:\path\to\network_catalog.runtime.sqlite3 `
+  --local-live-api http://127.0.0.1:8791 `
+  --shared-live-storage
+```
+
+- upstream은 DNS 이름이 아닌 literal `127.0.0.1` 또는 `::1`, 명시 포트, 현재 리스너와 다른 포트만 허용합니다.
+- 시작 시 upstream이 fixture나 연쇄 proxy가 아닌 직접 TAGO LIVE인지 확인합니다. 상태는 `state=ready`와 `credential_scope=loopback_upstream`으로 분리해 현재 프로세스가 키를 보유한다고 표시하지 않습니다.
+- 구버전 직접 서버가 한글 노선 ID capability를 광고하지 않으면 ASCII 노선은 계속 사용하되 한글 ID 요청은 명시적 503으로 차단합니다. 전체 노선 ID 지원에는 키 보유 upstream을 현재 코드로 숨김 입력 재시작해야 합니다.
+- GET은 고정된 TAGO 조회 9개 경로만 전달합니다. POST는 수집·매핑 검증·노선 적재 4개만 고정 허용하며 브라우저의 Cookie·Authorization·Origin은 전달하지 않습니다.
+- `--shared-live-storage`가 없으면 수집·노선 적재 쓰기는 거부합니다. 설정해도 시작 시 두 DB의 저장 카운트·그래프 요약이 다르면 실행하지 않으며, 수집 스냅샷 또는 노선 sequence가 로컬 DB에서 즉시 보이지 않으면 `LOOPBACK_SHARED_STORAGE_MISMATCH`로 중단합니다.
+- HTTP 환경 proxy·redirect·재시도는 사용하지 않습니다. 응답 2 MiB, 요청 64 KiB, 총 8초, 동시 8개가 기본 상한입니다.
+
 ```powershell
 python collector.py --city-code 25 --node-id DJB8001793 --interval 300
 ```
@@ -262,6 +282,7 @@ LIVE에서는 요청의 `scheduled_arrival`·`next_departure`·`minimum_transfer
 - HTTP accept queue는 256, 동시 활성 처리기는 최대 200, 요청 소켓 대기는 10초입니다. 연결이 끊긴 클라이언트의 응답 쓰기는 안전하게 종료합니다.
 - JSON 64 KiB, fixture 정규화 500대, replay `dates × legs` 300 및 사건 스캔 100,000건 상한이 있습니다.
 - 외부 URL은 TAGO의 도착·위치 및 허용된 7개 노선/정류장 operation으로 고정하며 사용자 URL·operation을 프록시하지 않습니다. 입력은 URL 인코딩 전에 길이·형식·페이지 상한을 검사합니다.
+- 로컬 LIVE bridge도 literal loopback과 고정 API 경로만 허용합니다. 직접 서버 상태를 확인해 proxy chaining을 차단하고, 키·브라우저 인증 헤더·upstream CORS 헤더를 전달하거나 노출하지 않습니다.
 - 카탈로그 동일 요청은 SQLite 캐시와 per-key singleflight로 합치며, 실제 키는 디코딩 키를 서버 환경변수로 받아 한 번만 인코딩합니다.
 - 운영에서는 `collector.py` 또는 동등한 별도 수집 작업을 상시 운영해야 과거 표본이 누적됩니다.
 - SQLite WAL·busy timeout·정규화 인덱스를 사용하지만, 이 표준 라이브러리 서버는 로컬 검증용입니다. 실제 200 동시접속 운영은 별도 배포 서버·작업 큐·공유 DB 구성이 필요합니다.

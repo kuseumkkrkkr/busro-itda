@@ -12,11 +12,14 @@ import json
 import mimetypes
 from pathlib import Path
 import threading
+import time
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from app import AppError, BusroService
 from config import Settings
+from loopback_live_api import GET_PATHS as LOOPBACK_GET_PATHS
+from loopback_live_api import LoopbackApiError, LoopbackLiveApiClient
 
 
 WEB_ROOT = Path(__file__).resolve().parent.parent
@@ -35,6 +38,23 @@ OPERATOR_ENDPOINTS = frozenset(
         "/api/network/hydrate",
     }
 )
+def _require_direct_live_upstream(status: dict[str, Any]) -> None:
+    """Reject unavailable, fixture, or already-proxied status responses."""
+    tago = status.get("tago") if isinstance(status, dict) else None
+    if (
+        not isinstance(tago, dict)
+        or status.get("mode") != "live"
+        or tago.get("state") != "ready"
+        or tago.get("configured") is not True
+        or tago.get("key_exposed") is not False
+        or tago.get("credential_scope") == "loopback_upstream"
+        or tago.get("connection") == "loopback_proxy"
+    ):
+        raise LoopbackApiError(
+            "LOOPBACK_UPSTREAM_NOT_DIRECT_LIVE",
+            "Loopback upstream must be a direct live TAGO service",
+            status=503,
+        )
 
 
 class BusroHTTPServer(ThreadingHTTPServer):
@@ -47,6 +67,9 @@ class BusroHTTPServer(ThreadingHTTPServer):
         handler,
         *,
         service: BusroService,
+        live_api: LoopbackLiveApiClient | None = None,
+        shared_live_storage: bool = False,
+        shared_storage_baseline_consistent: bool = False,
         max_concurrent_requests: int = 200,
         request_timeout_seconds: float = 10.0,
     ):
@@ -59,6 +82,16 @@ class BusroHTTPServer(ThreadingHTTPServer):
         self._request_slots = threading.BoundedSemaphore(self.max_concurrent_requests)
         super().__init__(address, handler)
         self.service = service
+        self.live_api = live_api
+        self.shared_live_storage = bool(shared_live_storage)
+        self.shared_storage_baseline_consistent = bool(shared_storage_baseline_consistent)
+        self.shared_storage_write_verified = False
+        self.shared_storage_failed = False
+        self.live_upstream_direct = live_api is not None
+        self.live_upstream_transport_identifiers = False
+        self.live_upstream_attested_at = 0.0
+        self.live_upstream_attestation_revision = 0
+        self._live_attestation_lock = threading.Lock()
 
     def get_request(self):
         request, client_address = super().get_request()
@@ -88,6 +121,10 @@ class Handler(BaseHTTPRequestHandler):
     @property
     def service(self) -> BusroService:
         return self.server.service  # type: ignore[attr-defined]
+
+    @property
+    def live_api(self) -> LoopbackLiveApiClient | None:
+        return self.server.live_api  # type: ignore[attr-defined]
 
     def do_OPTIONS(self) -> None:
         if not self._host_allowed() or not self._request_origin_allowed():
@@ -120,7 +157,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             query = self._query(parsed.query)
             if method == "GET" and parsed.path == "/api/status":
-                self._json_response(200, self.service.status())
+                self._json_response(200, self._status_payload())
+            elif method == "GET" and self.live_api and parsed.path in LOOPBACK_GET_PATHS:
+                self._attest_live_api()
+                self._require_upstream_route_id(query.get("route_id"))
+                self._json_response(200, self.live_api.get(self._proxy_target(parsed.path, query)))
             elif method == "GET" and parsed.path == "/api/arrivals":
                 self._json_response(200, self.service.arrivals(query))
             elif method == "GET" and parsed.path == "/api/history":
@@ -155,31 +196,72 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(200, self.service.passage_history(query))
             elif method == "POST" and parsed.path == "/api/collect":
                 body = self._json_body()
-                result, status = self.service.collect(
-                    body, header_idempotency_key=self.headers.get("Idempotency-Key")
-                )
+                if self.live_api:
+                    self._require_shared_mutation_ready()
+                    result = self.live_api.post(
+                        parsed.path,
+                        body,
+                        allow_mutation=True,
+                        idempotency_key=self.headers.get("Idempotency-Key"),
+                    )
+                    self._verify_shared_snapshot(result, position=False)
+                    status = 201 if result.get("created") is True else 200
+                else:
+                    result, status = self.service.collect(
+                        body, header_idempotency_key=self.headers.get("Idempotency-Key")
+                    )
                 self._json_response(status, result)
             elif method == "POST" and parsed.path == "/api/simulate":
                 self._json_response(200, self.service.simulate(self._json_body()))
             elif method == "POST" and parsed.path == "/api/positions/collect":
                 body = self._json_body()
-                result, status = self.service.collect_positions(
-                    body, header_idempotency_key=self.headers.get("Idempotency-Key")
-                )
+                if self.live_api:
+                    self._require_shared_mutation_ready()
+                    self._require_upstream_route_id(body.get("route_id"))
+                    result = self.live_api.post(
+                        parsed.path,
+                        body,
+                        allow_mutation=True,
+                        idempotency_key=self.headers.get("Idempotency-Key"),
+                    )
+                    self._verify_shared_snapshot(result, position=True)
+                    status = 201 if result.get("created") is True else 200
+                else:
+                    result, status = self.service.collect_positions(
+                        body, header_idempotency_key=self.headers.get("Idempotency-Key")
+                    )
                 self._json_response(status, result)
             elif method == "POST" and parsed.path == "/api/replay":
                 self._json_response(200, self.service.replay(self._json_body()))
             elif method == "POST" and parsed.path == "/api/mappings/validate":
-                self._json_response(200, self.service.validate_mapping(self._json_body()))
+                body = self._json_body()
+                payload = (
+                    self._proxy_mapping_validation(parsed.path, body)
+                    if self.live_api
+                    else self.service.validate_mapping(body)
+                )
+                self._json_response(200, payload)
             elif method == "POST" and parsed.path == "/api/network/hydrate":
-                self._json_response(200, self.service.hydrate_network_route(self._json_body()))
+                body = self._json_body()
+                if self.live_api:
+                    self._require_shared_mutation_ready()
+                    self._require_upstream_route_id(body.get("route_id"))
+                    payload = self.live_api.post(
+                        parsed.path,
+                        body,
+                        allow_mutation=True,
+                    )
+                    self._verify_shared_route(payload, body)
+                else:
+                    payload = self.service.hydrate_network_route(body)
+                self._json_response(200, payload)
             elif method == "POST" and parsed.path == "/api/journeys/generate":
                 self._json_response(200, self.service.generate_journeys(self._json_body()))
             elif method == "POST" and parsed.path == "/api/osm/geometry":
                 self._json_response(200, self.service.route_geometry(self._json_body()))
             else:
                 raise AppError("NOT_FOUND", "API endpoint not found", status=404)
-        except AppError as exc:
+        except (AppError, LoopbackApiError) as exc:
             retry_after = None
             if exc.status == 429 and isinstance(exc.details, dict):
                 try:
@@ -200,6 +282,224 @@ class Handler(BaseHTTPRequestHandler):
                 500,
                 {"ok": False, "error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}},
             )
+
+    @staticmethod
+    def _proxy_target(path: str, query: dict[str, str]) -> str:
+        return path if not query else f"{path}?{urlencode(query)}"
+
+    def _status_payload(self) -> dict[str, Any]:
+        local = self.service.status()
+        if not self.live_api:
+            return local
+        try:
+            self._attest_live_api(force=True)
+        except LoopbackApiError as exc:
+            local["tago"] = {
+                "configured": False,
+                "state": "upstream_unavailable",
+                "key_exposed": False,
+                "credential_scope": "loopback_upstream",
+                "connection": "loopback_proxy",
+                "error_code": exc.code,
+            }
+            local["capabilities"].update(
+                {
+                    "live_arrivals": False,
+                    "snapshot_collection": False,
+                    "live_positions": False,
+                    "position_snapshot_collection": False,
+                    "route_stop_mapping_validation": False,
+                    "verified_route_hydration": False,
+                    "transport_route_identifiers": False,
+                }
+            )
+            return local
+
+        mutation_ready = self._shared_mutation_ready()
+        transport_route_identifiers = (
+            "hangul_ascii_safe"
+            if self.server.live_upstream_transport_identifiers  # type: ignore[attr-defined]
+            else "legacy_ascii_only"
+        )
+        local["capabilities"].update(
+            {
+                "snapshot_collection": mutation_ready,
+                "position_snapshot_collection": mutation_ready,
+                "verified_route_hydration": "/api/network/hydrate" if mutation_ready else False,
+                "route_stop_mapping_validation": "/api/mappings/validate",
+                "transport_route_identifiers": transport_route_identifiers,
+            }
+        )
+        local["tago"] = {
+            "configured": False,
+            "state": "ready",
+            "key_exposed": False,
+            "credential_scope": "loopback_upstream",
+            "connection": "loopback_proxy",
+        }
+        local["loopback_live_api"] = {
+            "ready": True,
+            "origin_exposed": False,
+            "shared_storage_asserted": self.server.shared_live_storage,  # type: ignore[attr-defined]
+            "baseline_consistent": self.server.shared_storage_baseline_consistent,  # type: ignore[attr-defined]
+            "write_verified": self.server.shared_storage_write_verified,  # type: ignore[attr-defined]
+            "failed": self.server.shared_storage_failed,  # type: ignore[attr-defined]
+            "transport_route_identifiers": transport_route_identifiers,
+        }
+        return local
+
+    def _attest_live_api(self, *, force: bool = False) -> None:
+        if not self.live_api:
+            raise LoopbackApiError(
+                "LOOPBACK_API_UNAVAILABLE", "Loopback live API is unavailable", status=503
+            )
+        now = time.monotonic()
+        server = self.server  # type: ignore[assignment]
+        observed_revision = server.live_upstream_attestation_revision  # type: ignore[attr-defined]
+        if not force:
+            if not server.live_upstream_direct:  # type: ignore[attr-defined]
+                raise LoopbackApiError(
+                    "LOOPBACK_UPSTREAM_NOT_ATTESTED",
+                    "Loopback upstream direct-live status must be revalidated",
+                    status=503,
+                )
+            if now - server.live_upstream_attested_at <= 5.0:  # type: ignore[attr-defined]
+                return
+        with server._live_attestation_lock:  # type: ignore[attr-defined]
+            if server.live_upstream_attestation_revision != observed_revision:  # type: ignore[attr-defined]
+                if server.live_upstream_direct:  # type: ignore[attr-defined]
+                    return
+                raise LoopbackApiError(
+                    "LOOPBACK_UPSTREAM_NOT_ATTESTED",
+                    "Loopback upstream direct-live status must be revalidated",
+                    status=503,
+                )
+            now = time.monotonic()
+            if not force:
+                if not server.live_upstream_direct:  # type: ignore[attr-defined]
+                    raise LoopbackApiError(
+                        "LOOPBACK_UPSTREAM_NOT_ATTESTED",
+                        "Loopback upstream direct-live status must be revalidated",
+                        status=503,
+                    )
+                if now - server.live_upstream_attested_at <= 5.0:  # type: ignore[attr-defined]
+                    return
+            try:
+                upstream = self.live_api.probe_status()
+                _require_direct_live_upstream(upstream)
+            except LoopbackApiError:
+                server.live_upstream_direct = False  # type: ignore[attr-defined]
+                server.live_upstream_transport_identifiers = False  # type: ignore[attr-defined]
+                server.live_upstream_attested_at = time.monotonic()  # type: ignore[attr-defined]
+                server.live_upstream_attestation_revision += 1  # type: ignore[attr-defined]
+                raise
+            server.live_upstream_direct = True  # type: ignore[attr-defined]
+            capabilities = upstream.get("capabilities")
+            server.live_upstream_transport_identifiers = bool(  # type: ignore[attr-defined]
+                isinstance(capabilities, dict)
+                and capabilities.get("transport_route_identifiers") == "hangul_ascii_safe"
+            )
+            server.live_upstream_attested_at = time.monotonic()  # type: ignore[attr-defined]
+            server.live_upstream_attestation_revision += 1  # type: ignore[attr-defined]
+
+    def _shared_mutation_ready(self) -> bool:
+        return bool(
+            self.server.shared_live_storage  # type: ignore[attr-defined]
+            and self.server.shared_storage_baseline_consistent  # type: ignore[attr-defined]
+            and not self.server.shared_storage_failed  # type: ignore[attr-defined]
+        )
+
+    def _require_shared_mutation_ready(self) -> None:
+        self._attest_live_api()
+        if not self._shared_mutation_ready():
+            code = (
+                "LOOPBACK_SHARED_STORAGE_FAILED"
+                if self.server.shared_storage_failed  # type: ignore[attr-defined]
+                else "LOOPBACK_SHARED_STORAGE_REQUIRED"
+            )
+            raise LoopbackApiError(
+                code,
+                "Loopback writes require one healthy, verified shared storage configuration",
+                status=503,
+            )
+
+    def _proxy_mapping_validation(
+        self, path: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        self._attest_live_api()
+        self._require_upstream_route_id(body.get("route_id"))
+        assert self.live_api is not None
+        return self.live_api.post(path, body, allow_mutation=True)
+
+    def _require_upstream_route_id(self, value: Any) -> None:
+        route_id = str(value or "")
+        if route_id and not route_id.isascii() and not self.server.live_upstream_transport_identifiers:  # type: ignore[attr-defined]
+            raise LoopbackApiError(
+                "LOOPBACK_UPSTREAM_ROUTE_ID_UNSUPPORTED",
+                "The running upstream must be restarted on the current server version for Hangul route identifiers",
+                status=503,
+            )
+
+    def _latch_shared_storage_failure(self) -> None:
+        self.server.shared_storage_failed = True  # type: ignore[attr-defined]
+        self.server.shared_storage_write_verified = False  # type: ignore[attr-defined]
+
+    def _verify_shared_snapshot(self, payload: dict[str, Any], *, position: bool) -> None:
+        snapshot = payload.get("snapshot")
+        snapshot_id = snapshot.get("snapshot_id") if isinstance(snapshot, dict) else None
+        if not isinstance(snapshot_id, str) or not 8 <= len(snapshot_id) <= 128:
+            self._latch_shared_storage_failure()
+            raise LoopbackApiError(
+                "INVALID_LOOPBACK_RESPONSE",
+                "Loopback collection response omitted its snapshot identifier",
+                status=502,
+            )
+        stored = (
+            self.service.store.get_position_snapshot(snapshot_id)
+            if position
+            else self.service.store.get_snapshot(snapshot_id)
+        )
+        if stored is None:
+            self._latch_shared_storage_failure()
+            raise LoopbackApiError(
+                "LOOPBACK_SHARED_STORAGE_MISMATCH",
+                "Loopback collection is not visible in the local history store",
+                status=502,
+            )
+        if not self.server.shared_storage_failed:  # type: ignore[attr-defined]
+            self.server.shared_storage_write_verified = True  # type: ignore[attr-defined]
+
+    def _verify_shared_route(self, payload: dict[str, Any], body: dict[str, Any]) -> None:
+        sequence = payload.get("sequence")
+        sequence_id = sequence.get("sequence_id") if isinstance(sequence, dict) else None
+        if not isinstance(sequence_id, str):
+            self._latch_shared_storage_failure()
+            raise LoopbackApiError(
+                "INVALID_LOOPBACK_RESPONSE",
+                "Loopback hydration response omitted its sequence identifier",
+                status=502,
+            )
+        try:
+            active = self.service.network_catalog.active_route_sequence_info(
+                city_code=str(body.get("city_code") or ""),
+                route_id=str(body.get("route_id") or ""),
+            )
+        except Exception as exc:
+            self._latch_shared_storage_failure()
+            raise LoopbackApiError(
+                "LOOPBACK_SHARED_STORAGE_MISMATCH",
+                "Loopback hydration is not visible in the local network catalog",
+                status=502,
+            ) from exc
+        if not active or active.get("sequence_id") != sequence_id:
+            self._latch_shared_storage_failure()
+            raise LoopbackApiError(
+                "LOOPBACK_SHARED_STORAGE_MISMATCH",
+                "Loopback hydration is not visible in the local network catalog",
+                status=502,
+            )
+        if not self.server.shared_storage_failed:  # type: ignore[attr-defined]
+            self.server.shared_storage_write_verified = True  # type: ignore[attr-defined]
 
     @staticmethod
     def _query(raw_query: str) -> dict[str, str]:
@@ -381,6 +681,15 @@ def main() -> None:
         action="store_true",
         help="read a decoded TAGO key without echo; never stores it in argv or files",
     )
+    parser.add_argument(
+        "--local-live-api",
+        help="reuse one direct live TAGO service at a literal loopback HTTP origin",
+    )
+    parser.add_argument(
+        "--shared-live-storage",
+        action="store_true",
+        help="assert that this process and --local-live-api share both SQLite stores",
+    )
     parser.add_argument("--host", help="bind host; defaults to BUSRO_HOST or 127.0.0.1")
     parser.add_argument("--port", type=int, help="bind port; defaults to BUSRO_PORT or 8791")
     parser.add_argument("--db", type=Path, help="SQLite path; defaults to BUSRO_DB_PATH")
@@ -398,6 +707,11 @@ def main() -> None:
     parser.add_argument("--routes-source-url", default="https://www.data.go.kr/tcs/dss/selectFileDataDetailView.do?publicDataPk=15105964")
     parser.add_argument("--routes-source-date", default="2026-07-16")
     args = parser.parse_args()
+
+    if args.shared_live_storage and not args.local_live_api:
+        parser.error("--shared-live-storage requires --local-live-api")
+    if args.local_live_api and (args.fixture or args.service_key_stdin):
+        parser.error("--local-live-api cannot be combined with --fixture or --service-key-stdin")
 
     settings = Settings.from_env(fixture_override=True if args.fixture else None)
     if args.service_key_stdin:
@@ -418,7 +732,36 @@ def main() -> None:
     if args.catalog_db:
         settings = replace(settings, network_catalog_path=args.catalog_db.expanduser().resolve())
 
+    if args.local_live_api and settings.tago_service_key:
+        parser.error("--local-live-api cannot be combined with a local TAGO service key")
+
     service = BusroService(settings)
+    live_api: LoopbackLiveApiClient | None = None
+    shared_storage_baseline_consistent = False
+    if args.local_live_api:
+        try:
+            live_api = LoopbackLiveApiClient(
+                args.local_live_api,
+                listener_port=settings.port,
+                timeout_seconds=settings.tago_timeout_seconds,
+                max_concurrency=settings.tago_max_concurrent_calls,
+                admission_wait_seconds=settings.tago_admission_timeout_seconds,
+            )
+            upstream_status = live_api.probe_status()
+            _require_direct_live_upstream(upstream_status)
+        except LoopbackApiError as exc:
+            parser.error(f"local live API is not ready ({exc.code})")
+        if args.shared_live_storage:
+            local_status = service.status()
+            shared_storage_baseline_consistent = (
+                upstream_status.get("storage") == local_status.get("storage")
+                and (upstream_status.get("network_catalog") or {}).get("topology")
+                == (local_status.get("network_catalog") or {}).get("topology")
+            )
+            if not shared_storage_baseline_consistent:
+                parser.error(
+                    "--shared-live-storage baseline differs between local and upstream stores"
+                )
     imports: list[dict[str, Any]] = []
     if args.import_stops:
         imports.append(
@@ -443,8 +786,15 @@ def main() -> None:
         if not imports:
             parser.error("--import-only requires --import-stops or --import-routes")
         return
-    server = BusroHTTPServer((settings.host, settings.port), Handler, service=service)
-    mode = "fixture" if settings.fixture_mode else "live"
+    server = BusroHTTPServer(
+        (settings.host, settings.port),
+        Handler,
+        service=service,
+        live_api=live_api,
+        shared_live_storage=args.shared_live_storage,
+        shared_storage_baseline_consistent=shared_storage_baseline_consistent,
+    )
+    mode = "fixture" if settings.fixture_mode else ("live via loopback" if live_api else "live")
     print(f"Busro Itda web ({mode}) listening on http://{settings.host}:{settings.port}/")
     try:
         server.serve_forever()

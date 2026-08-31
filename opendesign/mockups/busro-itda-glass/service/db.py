@@ -257,6 +257,14 @@ class Store:
             ).fetchone()
             return self._snapshot_row(row) if row else None
 
+    def get_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
+        """Return one arrival snapshot by its public identifier."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM snapshots WHERE snapshot_id=?", (snapshot_id,)
+            ).fetchone()
+            return self._snapshot_row(row) if row else None
+
     def create_snapshot(
         self,
         *,
@@ -393,6 +401,14 @@ class Store:
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT * FROM position_snapshots WHERE idempotency_key=?", (key,)
+            ).fetchone()
+            return self._position_snapshot_row(row) if row else None
+
+    def get_position_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
+        """Return one vehicle-position snapshot by its public identifier."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM position_snapshots WHERE snapshot_id=?", (snapshot_id,)
             ).fetchone()
             return self._position_snapshot_row(row) if row else None
 

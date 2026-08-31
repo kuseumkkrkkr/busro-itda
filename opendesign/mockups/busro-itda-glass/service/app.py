@@ -252,6 +252,7 @@ class BusroService:
                 "diverse_journey_generation": "/api/journeys/generate",
                 "osm_route_geometry": "/api/osm/geometry",
                 "municipal_source_registry": "/api/sources",
+                "transport_route_identifiers": "hangul_ascii_safe",
                 "simulation_basis": "fixture_model" if self.settings.fixture_mode else "passage_history_required",
             },
         }
@@ -275,7 +276,7 @@ class BusroService:
     def route_info(self, query: dict[str, str]) -> dict[str, Any]:
         self._only_fields(query, {"city_code", "route_id"}, "query")
         city_code = self._city_code(query.get("city_code"), "city_code")
-        route_id = self._identifier(query.get("route_id"), "route_id")
+        route_id = self._transport_identifier(query.get("route_id"), "route_id")
         result = self._catalog_response(
             "route_info",
             {"city_code": city_code, "route_id": route_id},
@@ -290,7 +291,7 @@ class BusroService:
     def route_stops(self, query: dict[str, str]) -> dict[str, Any]:
         self._only_fields(query, {"city_code", "route_id", "page", "limit"}, "query")
         city_code = self._city_code(query.get("city_code"), "city_code")
-        route_id = self._identifier(query.get("route_id"), "route_id")
+        route_id = self._transport_identifier(query.get("route_id"), "route_id")
         page, limit = self._pagination(query)
         return self._catalog_response(
             "route_stops",
@@ -361,7 +362,7 @@ class BusroService:
     def validate_mapping(self, body: dict[str, Any]) -> dict[str, Any]:
         self._only_fields(body, {"city_code", "route_id", "node_id"}, "body")
         city_code = self._city_code(body.get("city_code"), "city_code")
-        route_id = self._identifier(body.get("route_id"), "route_id")
+        route_id = self._transport_identifier(body.get("route_id"), "route_id")
         node_id = self._node_id(body.get("node_id"), "node_id")
         request = {"city_code": city_code, "route_id": route_id, "node_id": node_id}
 
@@ -543,7 +544,7 @@ class BusroService:
     def hydrate_network_route(self, body: dict[str, Any]) -> dict[str, Any]:
         self._only_fields(body, {"city_code", "route_id"}, "body")
         city_code = self._city_code(body.get("city_code"), "city_code")
-        route_id = self._identifier(body.get("route_id"), "route_id")
+        route_id = self._transport_identifier(body.get("route_id"), "route_id")
         pages: list[dict[str, Any]] = []
         stops: list[dict[str, Any]] = []
         total_count = 1
@@ -1752,7 +1753,7 @@ class BusroService:
         city_code = str(data.get("city_code") or "")
         if not CITY_CODE_RE.fullmatch(city_code):
             raise AppError("INVALID_CITY_CODE", "city_code must contain 1-9 digits")
-        route_id = self._identifier(data.get("route_id"), "route_id")
+        route_id = self._transport_identifier(data.get("route_id"), "route_id")
         return city_code, route_id
 
     @staticmethod

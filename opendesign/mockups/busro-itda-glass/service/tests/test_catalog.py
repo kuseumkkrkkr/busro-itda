@@ -175,6 +175,26 @@ class CatalogCase(unittest.TestCase):
                 with self.assertRaises(AppError):
                     operation()
 
+    def test_tago_transport_route_ids_preserve_hangul(self) -> None:
+        route_id = "GMB수점10"
+        self.assertIsNone(
+            self.service.route_info({"city_code": "25", "route_id": route_id})["route"]
+        )
+        self.assertEqual(
+            self.service.route_stops({"city_code": "25", "route_id": route_id})["stops"],
+            [],
+        )
+        self.assertFalse(
+            self.service.validate_mapping(
+                {"city_code": "25", "route_id": route_id, "node_id": "NODE1"}
+            )["valid"]
+        )
+        positions = self.service.positions({"city_code": "25", "route_id": route_id})[
+            "positions"
+        ]
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(positions[0]["route_id"], route_id)
+
     def test_mapping_validation_proves_route_contains_exact_node(self) -> None:
         valid = self.service.validate_mapping(
             {

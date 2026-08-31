@@ -246,10 +246,12 @@ function App() {
       const mappedCount = Object.values(nextMappings).filter((item) => item.state === "verified").length;
       const total = legsSnapshot.length;
       const allMapped = total > 0 && mappedCount === total;
+      const collectionReady = status.capabilities?.snapshot_collection === true && status.capabilities?.position_snapshot_collection === true;
+      const hydrationReady = Boolean(status.capabilities?.verified_route_hydration);
       const mode = tagoState === "fixture" ? "fixture" : tagoState === "ready" && allMapped ? "live" : tagoState === "ready" ? "ready" : "offline";
-      const label = mode === "live" ? "TAGO LIVE" : mode === "ready" ? total ? "TAGO \uC5F0\uACB0 \xB7 \uB9E4\uD551 \uD544\uC694" : "TAGO \uC5F0\uACB0 \xB7 \uC5EC\uD589 \uC120\uD0DD \uD544\uC694" : mode === "fixture" ? "FIXTURE \uC5F0\uACB0" : "TAGO \uD0A4 \uD544\uC694";
-      const message = mode === "live" ? `\uC11C\uBE44\uC2A4 \uD0A4\uC640 \uC120\uD0DD \uC5EC\uD589 ${total}\uAC1C \uAD6C\uAC04\uC758 \uACF5\uC2DD \uC2DD\uBCC4\uC790\uAC00 \uBAA8\uB450 \uAC80\uC99D\uB410\uC2B5\uB2C8\uB2E4.` : mode === "ready" ? total ? `\uC11C\uBE44\uC2A4 \uD0A4\uB294 \uD655\uC778\uB410\uC9C0\uB9CC \uC120\uD0DD \uC5EC\uD589 \uB9E4\uD551\uC740 ${mappedCount}/${total}\uAC1C\uC785\uB2C8\uB2E4. LIVE\uB85C \uD45C\uC2DC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.` : "\uC11C\uBE44\uC2A4 \uD0A4\uB294 \uD655\uC778\uB410\uC2B5\uB2C8\uB2E4. \uC804\uAD6D \uD0D0\uC0C9\uC5D0\uC11C \uC5EC\uD589 \uD6C4\uBCF4\uB97C \uBA3C\uC800 \uC120\uD0DD\uD558\uC138\uC694." : mode === "fixture" ? "\uC2A4\uD0A4\uB9C8 \uAC80\uC99D\uC6A9 FIXTURE\uC785\uB2C8\uB2E4. \uC120\uD0DD \uC5EC\uD589\uC758 \uC2E4\uC2DC\uAC04 \uB3C4\uCC29\uC815\uBCF4\uB098 \uC131\uACF5\uB960\uB85C \uD45C\uC2DC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4." : "\uC11C\uBC84\uB294 \uCF1C\uC838 \uC788\uC9C0\uB9CC TAGO \uC11C\uBE44\uC2A4 \uD0A4\uAC00 \uC124\uC815\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.";
-      setConnection({ mode, label, message, tagoReady: tagoState === "ready", apiMapped: allMapped, mappingSupported: mappingResult.supported });
+      const label = mode === "live" ? "TAGO LIVE" : mode === "ready" ? total ? "TAGO \uC5F0\uACB0 \xB7 \uB9E4\uD551 \uD544\uC694" : "TAGO \uC5F0\uACB0 \xB7 \uC5EC\uD589 \uC120\uD0DD \uD544\uC694" : mode === "fixture" ? "FIXTURE \uC5F0\uACB0" : "TAGO \uC5F0\uACB0 \uD544\uC694";
+      const message = mode === "live" ? `\uACF5\uC2DD TAGO \uC5F0\uACB0\uACFC \uC120\uD0DD \uC5EC\uD589 ${total}\uAC1C \uAD6C\uAC04\uC758 \uACF5\uC2DD \uC2DD\uBCC4\uC790\uAC00 \uBAA8\uB450 \uAC80\uC99D\uB410\uC2B5\uB2C8\uB2E4.` : mode === "ready" ? total ? `\uACF5\uC2DD TAGO \uC5F0\uACB0\uC740 \uC900\uBE44\uB410\uC9C0\uB9CC \uC120\uD0DD \uC5EC\uD589 \uB9E4\uD551\uC740 ${mappedCount}/${total}\uAC1C\uC785\uB2C8\uB2E4. LIVE\uB85C \uD45C\uC2DC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.` : "\uACF5\uC2DD TAGO \uC5F0\uACB0\uC774 \uC900\uBE44\uB410\uC2B5\uB2C8\uB2E4. \uC804\uAD6D \uD0D0\uC0C9\uC5D0\uC11C \uC5EC\uD589 \uD6C4\uBCF4\uB97C \uBA3C\uC800 \uC120\uD0DD\uD558\uC138\uC694." : mode === "fixture" ? "\uC2A4\uD0A4\uB9C8 \uAC80\uC99D\uC6A9 FIXTURE\uC785\uB2C8\uB2E4. \uC120\uD0DD \uC5EC\uD589\uC758 \uC2E4\uC2DC\uAC04 \uB3C4\uCC29\uC815\uBCF4\uB098 \uC131\uACF5\uB960\uB85C \uD45C\uC2DC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4." : "\uC11C\uBC84\uB294 \uCF1C\uC838 \uC788\uC9C0\uB9CC \uACF5\uC2DD TAGO \uB370\uC774\uD130 \uC5F0\uACB0\uC774 \uC900\uBE44\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.";
+      setConnection({ mode, label, message, tagoReady: tagoState === "ready", apiMapped: allMapped, mappingSupported: mappingResult.supported, collectionReady, hydrationReady });
       return { status, mappings: nextMappings };
     } catch {
       setStatusPayload(null);
@@ -270,7 +272,7 @@ function App() {
     }
     if (connection.mode !== "live" || !target.apiMapped) {
       const code = connection.mode === "fixture" ? "FIXTURE_NOT_LIVE" : connection.tagoReady ? "MAPPING_REQUIRED" : "TAGO_KEY_REQUIRED";
-      const message = connection.mode === "fixture" ? "DATA_GAP \xB7 FIXTURE \uC751\uB2F5\uC740 \uC120\uD0DD \uC5EC\uD589\uC758 \uC2E4\uC2DC\uAC04 \uB370\uC774\uD130\uB85C \uD45C\uC2DC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4." : connection.tagoReady ? "DATA_GAP \xB7 \uC774 \uAD6C\uAC04\uC758 \uACF5\uC2DD cityCode\xB7nodeId\xB7routeId \uB9E4\uD551\uC774 \uC544\uC9C1 \uAC80\uC99D\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4." : "DATA_GAP \xB7 TAGO \uC11C\uBE44\uC2A4 \uD0A4 \uC5F0\uACB0 \uD6C4 \uC774 \uAD6C\uAC04\uC758 \uACF5\uC2DD \uB3C4\uCC29\uC815\uBCF4\uB97C \uC870\uD68C\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.";
+      const message = connection.mode === "fixture" ? "DATA_GAP \xB7 FIXTURE \uC751\uB2F5\uC740 \uC120\uD0DD \uC5EC\uD589\uC758 \uC2E4\uC2DC\uAC04 \uB370\uC774\uD130\uB85C \uD45C\uC2DC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4." : connection.tagoReady ? "DATA_GAP \xB7 \uC774 \uAD6C\uAC04\uC758 \uACF5\uC2DD cityCode\xB7nodeId\xB7routeId \uB9E4\uD551\uC774 \uC544\uC9C1 \uAC80\uC99D\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4." : "DATA_GAP \xB7 TAGO \uACF5\uC2DD \uB370\uC774\uD130 \uC5F0\uACB0 \uD6C4 \uC774 \uAD6C\uAC04\uC758 \uB3C4\uCC29\uC815\uBCF4\uB97C \uC870\uD68C\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.";
       setArrivals([]);
       setHistory([]);
       setLegCoverage({ ...EMPTY_PASSAGE_COVERAGE, supported: Boolean(statusPayload), code });
@@ -305,7 +307,8 @@ function App() {
       setArrivals([]);
       setHistory([]);
       setLegCoverage({ supported: false, count: 0, eligibleDays: 0, gapCount: 0, dataGap: true, code: "PASSAGE_HISTORY_UNAVAILABLE" });
-      setLiveError(error.status === 503 ? "DATA_GAP \xB7 TAGO \uC11C\uBE44\uC2A4 \uD0A4\uAC00 \uC544\uC9C1 \uC5C6\uC2B5\uB2C8\uB2E4." : "DATA_GAP \xB7 \uC120\uD0DD \uAD6C\uAC04\uC758 \uACF5\uC2DD \uB370\uC774\uD130\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+      const errorCode = error.payload?.error?.code;
+      setLiveError(error.status === 503 && ["TAGO_KEY_REQUIRED", "TAGO_KEY_INVALID"].includes(errorCode) ? "DATA_GAP \xB7 TAGO \uC11C\uBE44\uC2A4 \uD0A4\uAC00 \uC544\uC9C1 \uC5C6\uC2B5\uB2C8\uB2E4." : "DATA_GAP \xB7 \uC120\uD0DD \uAD6C\uAC04\uC758 \uACF5\uC2DD \uB370\uC774\uD130\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
     } finally {
       setLiveLoading(false);
     }
@@ -314,8 +317,8 @@ function App() {
     setLiveLoading(true);
     setLiveError("");
     setLiveNotice("");
-    if (!leg || connection.mode !== "live" || !leg.apiMapped) {
-      setLiveError("DATA_GAP \xB7 TAGO LIVE\uC640 \uACF5\uC2DD \uAD6C\uAC04 \uAC80\uC99D\uC774 \uC644\uB8CC\uB41C \uB4A4\uC5D0\uB9CC \uC774\uB825\uC744 \uC800\uC7A5\uD569\uB2C8\uB2E4.");
+    if (!leg || connection.mode !== "live" || !leg.apiMapped || !connection.collectionReady) {
+      setLiveError("DATA_GAP \xB7 TAGO LIVE, \uACF5\uC2DD \uAD6C\uAC04 \uAC80\uC99D, \uACF5\uC720 \uC774\uB825 \uC800\uC7A5\uC18C\uAC00 \uBAA8\uB450 \uC900\uBE44\uB41C \uB4A4\uC5D0\uB9CC \uC800\uC7A5\uD569\uB2C8\uB2E4.");
       setLiveLoading(false);
       return;
     }

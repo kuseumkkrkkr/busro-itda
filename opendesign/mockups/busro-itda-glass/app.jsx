@@ -278,16 +278,19 @@ function App() {
       const mappedCount = Object.values(nextMappings).filter((item) => item.state === "verified").length;
       const total = legsSnapshot.length;
       const allMapped = total > 0 && mappedCount === total;
+      const collectionReady = status.capabilities?.snapshot_collection === true
+        && status.capabilities?.position_snapshot_collection === true;
+      const hydrationReady = Boolean(status.capabilities?.verified_route_hydration);
       const mode = tagoState === "fixture" ? "fixture" : tagoState === "ready" && allMapped ? "live" : tagoState === "ready" ? "ready" : "offline";
-      const label = mode === "live" ? "TAGO LIVE" : mode === "ready" ? (total ? "TAGO 연결 · 매핑 필요" : "TAGO 연결 · 여행 선택 필요") : mode === "fixture" ? "FIXTURE 연결" : "TAGO 키 필요";
+      const label = mode === "live" ? "TAGO LIVE" : mode === "ready" ? (total ? "TAGO 연결 · 매핑 필요" : "TAGO 연결 · 여행 선택 필요") : mode === "fixture" ? "FIXTURE 연결" : "TAGO 연결 필요";
       const message = mode === "live"
-        ? `서비스 키와 선택 여행 ${total}개 구간의 공식 식별자가 모두 검증됐습니다.`
+        ? `공식 TAGO 연결과 선택 여행 ${total}개 구간의 공식 식별자가 모두 검증됐습니다.`
         : mode === "ready"
-          ? (total ? `서비스 키는 확인됐지만 선택 여행 매핑은 ${mappedCount}/${total}개입니다. LIVE로 표시하지 않습니다.` : "서비스 키는 확인됐습니다. 전국 탐색에서 여행 후보를 먼저 선택하세요.")
+          ? (total ? `공식 TAGO 연결은 준비됐지만 선택 여행 매핑은 ${mappedCount}/${total}개입니다. LIVE로 표시하지 않습니다.` : "공식 TAGO 연결이 준비됐습니다. 전국 탐색에서 여행 후보를 먼저 선택하세요.")
           : mode === "fixture"
             ? "스키마 검증용 FIXTURE입니다. 선택 여행의 실시간 도착정보나 성공률로 표시하지 않습니다."
-            : "서버는 켜져 있지만 TAGO 서비스 키가 설정되지 않았습니다.";
-      setConnection({ mode, label, message, tagoReady: tagoState === "ready", apiMapped: allMapped, mappingSupported: mappingResult.supported });
+            : "서버는 켜져 있지만 공식 TAGO 데이터 연결이 준비되지 않았습니다.";
+      setConnection({ mode, label, message, tagoReady: tagoState === "ready", apiMapped: allMapped, mappingSupported: mappingResult.supported, collectionReady, hydrationReady });
       return { status, mappings: nextMappings };
     } catch {
       setStatusPayload(null);
@@ -307,7 +310,7 @@ function App() {
         ? "DATA_GAP · FIXTURE 응답은 선택 여행의 실시간 데이터로 표시하지 않습니다."
         : connection.tagoReady
           ? "DATA_GAP · 이 구간의 공식 cityCode·nodeId·routeId 매핑이 아직 검증되지 않았습니다."
-          : "DATA_GAP · TAGO 서비스 키 연결 후 이 구간의 공식 도착정보를 조회할 수 있습니다.";
+          : "DATA_GAP · TAGO 공식 데이터 연결 후 이 구간의 도착정보를 조회할 수 있습니다.";
       setArrivals([]); setHistory([]); setLegCoverage({ ...EMPTY_PASSAGE_COVERAGE, supported: Boolean(statusPayload), code }); setLiveError(message); setLiveLoading(false); return;
     }
     try {
@@ -337,14 +340,17 @@ function App() {
       setArrivals([]);
       setHistory([]);
       setLegCoverage({ supported: false, count: 0, eligibleDays: 0, gapCount: 0, dataGap: true, code: "PASSAGE_HISTORY_UNAVAILABLE" });
-      setLiveError(error.status === 503 ? "DATA_GAP · TAGO 서비스 키가 아직 없습니다." : "DATA_GAP · 선택 구간의 공식 데이터를 불러오지 못했습니다.");
+      const errorCode = error.payload?.error?.code;
+      setLiveError(error.status === 503 && ["TAGO_KEY_REQUIRED", "TAGO_KEY_INVALID"].includes(errorCode)
+        ? "DATA_GAP · TAGO 서비스 키가 아직 없습니다."
+        : "DATA_GAP · 선택 구간의 공식 데이터를 불러오지 못했습니다.");
     } finally { setLiveLoading(false); }
   }
 
   async function collectSnapshot() {
     setLiveLoading(true); setLiveError(""); setLiveNotice("");
-    if (!leg || connection.mode !== "live" || !leg.apiMapped) {
-      setLiveError("DATA_GAP · TAGO LIVE와 공식 구간 검증이 완료된 뒤에만 이력을 저장합니다.");
+    if (!leg || connection.mode !== "live" || !leg.apiMapped || !connection.collectionReady) {
+      setLiveError("DATA_GAP · TAGO LIVE, 공식 구간 검증, 공유 이력 저장소가 모두 준비된 뒤에만 저장합니다.");
       setLiveLoading(false);
       return;
     }

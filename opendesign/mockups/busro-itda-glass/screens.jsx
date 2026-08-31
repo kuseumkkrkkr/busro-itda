@@ -63,7 +63,7 @@ function LiveScreen({ journey, connection, legs, selectedLeg, setSelectedLeg, ar
   return (
     <main className="screen content-screen">
       <ScreenHeading eyebrow="실시간" title="도착정보" detail="현재 도착정보와 저장된 관측 기록을 확인합니다." action={<button className={`refresh-button ${loading ? "spinning" : ""}`} type="button" onClick={onRefresh} disabled={loading} aria-label="도착정보 새로고침"><Icon name="arrows-clockwise" /></button>} />
-      <InlineNotice tone={connection.mode === "live" ? "success" : "warning"} icon={connection.mode === "live" ? "cloud-check" : "key"} title={connection.mode === "live" ? "TAGO 공식 응답 연결됨" : connection.mode === "ready" ? "키 연결됨 · LIVE 아님" : connection.mode === "fixture" ? "현재는 FIXTURE 모드" : "공식 데이터 연결 대기"}>{connection.message}</InlineNotice>
+      <InlineNotice tone={connection.mode === "live" ? "success" : "warning"} icon={connection.mode === "live" ? "cloud-check" : "key"} title={connection.mode === "live" ? "TAGO 공식 응답 연결됨" : connection.mode === "ready" ? "공식 데이터 연결됨 · LIVE 아님" : connection.mode === "fixture" ? "현재는 FIXTURE 모드" : "공식 데이터 연결 대기"}>{connection.message}</InlineNotice>
       <CoverageStrip mappingSummary={mappingSummary} coverage={passageCoverage} />
 
       <div className="stop-chips" role="list" aria-label="조회할 여정 구간">
@@ -87,7 +87,7 @@ function LiveScreen({ journey, connection, legs, selectedLeg, setSelectedLeg, ar
             )) : <div className="empty-mini"><Icon name="bus" /><p>현재 제공된 도착정보가 없습니다.</p></div>}
           </div>
         )}
-        <div className="board-actions"><button type="button" onClick={onCollect} disabled={connection.mode !== "live" || !leg.apiMapped}><Icon name="database" /> 도착·차량 위치 이력 저장</button><small>명시적으로 누른 TAGO LIVE 응답만 관측시각·원문 해시와 함께 저장합니다.</small></div>
+        <div className="board-actions"><button type="button" onClick={onCollect} disabled={connection.mode !== "live" || !leg.apiMapped || !connection.collectionReady}><Icon name="database" /> 도착·차량 위치 이력 저장</button><small>{connection.collectionReady ? "명시적으로 누른 TAGO LIVE 응답만 관측시각·원문 해시와 함께 저장합니다." : "공유 이력 저장소가 검증된 로컬 서버에서만 저장할 수 있습니다."}</small></div>
       </GlassCard>
 
       <GlassCard className="history-card">
@@ -535,7 +535,7 @@ function SettingsSheet({ open, onClose, apiBase, setApiBase, connection, journey
         <div className="sheet-grabber" /><div className="sheet-title"><div><p className="eyebrow">데이터 연결</p><h2 id="settings-title">공식 교통 데이터</h2></div><button type="button" onClick={onClose} aria-label="닫기"><Icon name="x" /></button></div>
         <InlineNotice tone={connection.mode === "live" ? "success" : "warning"} icon={connection.mode === "live" ? "cloud-check" : "key"} title={connection.label}>{connection.message}</InlineNotice>
         <label className="api-field"><span>로컬 데이터 서비스 주소</span><input value={apiBase} onChange={(event) => setApiBase(event.target.value)} placeholder="http://127.0.0.1:8791/api" /></label>
-        <p className="privacy-note"><Icon name="shield-check" /> TAGO 서비스 키는 브라우저에 입력하거나 저장하지 않습니다. 서버 환경변수에서만 읽습니다.</p>
+        <p className="privacy-note"><Icon name="shield-check" /> TAGO 서비스 키는 브라우저에 입력하거나 저장하지 않습니다. 로컬 데이터 서비스 또는 연결된 upstream에서만 관리합니다.</p>
 
         {!journey || legs.length === 0 ? (
           <section className="mapping-settings" aria-labelledby="mapping-title">
