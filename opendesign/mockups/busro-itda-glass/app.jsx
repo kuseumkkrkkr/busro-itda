@@ -205,6 +205,7 @@ function loadUiState() {
 }
 
 function App() {
+  const adminEnabled = new URLSearchParams(window.location.search).get("admin") === "1";
   const initial = useMemo(loadUiState, []);
   const [tab, setTab] = useState(initial.tab);
   const [activeJourney, setActiveJourney] = useState(null);
@@ -522,7 +523,7 @@ function App() {
   return (
     <div className="stage">
       <main className={`app-shell tab-${tab}`} aria-label="버스로 잇다">
-        <AppHeader connection={connection} onSettings={() => setSettingsOpen(true)} />
+        <AppHeader connection={connection} onSettings={adminEnabled ? () => setSettingsOpen(true) : null} />
         <div className="screen-scroll">
           {tab === "explore" && <NationwideScreen connection={connection} onChooseJourney={openJourney} />}
           {tab === "live" && <LiveScreen journey={activeJourney} connection={connection} legs={effectiveLiveLegs} selectedLeg={selectedLeg} setSelectedLeg={setSelectedLeg} arrivals={arrivals} history={history} passageCoverage={legCoverage} mappingSummary={liveMappingSummary} loading={liveLoading} error={liveError} notice={liveNotice} onRefresh={() => loadLive(leg)} onCollect={collectSnapshot} onExplore={() => changeTab("explore")} />}
@@ -530,7 +531,7 @@ function App() {
           {tab === "journey" && <JourneyScreen journey={activeJourney} connection={connection} onExplore={() => changeTab("explore")} />}
         </div>
         <BottomDock tab={tab} onChange={changeTab} />
-        <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} apiBase={apiBase} setApiBase={setApiBase} connection={connection} journey={activeJourney} mappings={mappings} legs={effectiveOperationalLegs} mappingSummary={operationalMappingSummary} settingsError={settingsError} onMappingChange={updateMapping} onVerifyMapping={verifyMapping} onReconnect={saveConnection} />
+        {adminEnabled && <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} apiBase={apiBase} setApiBase={setApiBase} connection={connection} journey={activeJourney} mappings={mappings} legs={effectiveOperationalLegs} mappingSummary={operationalMappingSummary} settingsError={settingsError} onMappingChange={updateMapping} onVerifyMapping={verifyMapping} onReconnect={saveConnection} />}
       </main>
     </div>
   );

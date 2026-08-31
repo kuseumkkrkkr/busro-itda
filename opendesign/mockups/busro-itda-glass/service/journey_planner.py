@@ -403,7 +403,12 @@ class JourneyPlanner:
                     for edge in path:
                         penalties[edge.edge_id] += 1
                 if found is None:
-                    break
+                    # One search criterion can exhaust its distinct options
+                    # while a later criterion still has a meaningfully
+                    # different (often higher-transfer) route.  Keep trying
+                    # the remaining bounded slots instead of truncating the
+                    # whole alternative search.
+                    continue
                 candidate_paths.append((found, criterion))
                 for edge in found:
                     penalties[edge.edge_id] += 1

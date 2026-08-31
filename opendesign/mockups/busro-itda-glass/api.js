@@ -234,12 +234,21 @@
       }
     },
     generateJourneys(payload = {}) {
-      const serviceDate = journeyServiceDate(payload.service_date);
-      const departureTime = journeyDepartureTime(payload.departure_time);
+      const hasServiceDate = payload.service_date !== undefined && payload.service_date !== null && String(payload.service_date).trim() !== "";
+      const hasDepartureTime = payload.departure_time !== undefined && payload.departure_time !== null && String(payload.departure_time).trim() !== "";
+      if (hasServiceDate !== hasDepartureTime) throw new Error("날짜와 출발 시각을 함께 선택해 주세요.");
+      const body = { ...payload };
+      if (hasServiceDate) {
+        body.service_date = journeyServiceDate(payload.service_date);
+        body.departure_time = journeyDepartureTime(payload.departure_time);
+      } else {
+        delete body.service_date;
+        delete body.departure_time;
+      }
       return request("/journeys/generate", {
         method: "POST",
         timeout: 20000,
-        body: { ...payload, service_date: serviceDate, departure_time: departureTime },
+        body,
       });
     },
     hydrateRoute(cityCode, routeId) {

@@ -25,14 +25,14 @@ function GlassCard({ className = "", children, as = "section", ...props }) {
   return /* @__PURE__ */ React.createElement(Element, { className: `glass-card ${className}`.trim(), ...props }, children);
 }
 function AppHeader({ connection, onSettings }) {
-  return /* @__PURE__ */ React.createElement("header", { className: "app-header" }, /* @__PURE__ */ React.createElement("div", { className: "brand-lockup" }, /* @__PURE__ */ React.createElement("span", { className: "brand-mark" }, /* @__PURE__ */ React.createElement(Icon, { name: "bus" })), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", null, "\uC804\uAD6D \uBC84\uC2A4 \uC5EC\uD589"), /* @__PURE__ */ React.createElement("strong", null, "\uBC84\uC2A4\uB85C \uC787\uB2E4"))), /* @__PURE__ */ React.createElement("button", { className: "glass-icon-button", type: "button", onClick: onSettings, "aria-label": `\uB370\uC774\uD130 \uC5F0\uACB0 \uC124\uC815 \xB7 ${connection.label}`, title: connection.label }, /* @__PURE__ */ React.createElement(Icon, { name: connection.mode === "live" ? "cloud-check" : "sliders-horizontal" })));
+  return /* @__PURE__ */ React.createElement("header", { className: "app-header" }, /* @__PURE__ */ React.createElement("div", { className: "brand-lockup" }, /* @__PURE__ */ React.createElement("span", { className: "brand-mark" }, /* @__PURE__ */ React.createElement(Icon, { name: "bus" })), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", null, "\uC2DC\uB0B4\uBC84\uC2A4\uB85C \uC774\uC5B4\uAC00\uB294 \uC5EC\uD589"), /* @__PURE__ */ React.createElement("strong", null, "\uBC84\uC2A4\uB85C \uC787\uB2E4"))), onSettings && /* @__PURE__ */ React.createElement("button", { className: "glass-icon-button", type: "button", onClick: onSettings, "aria-label": "\uC6B4\uC601 \uC124\uC815" }, /* @__PURE__ */ React.createElement(Icon, { name: "sliders-horizontal" })));
 }
 function BottomDock({ tab, onChange }) {
   const items = [
-    ["explore", "map-trifold", "\uC804\uAD6D \uD0D0\uC0C9"],
-    ["live", "broadcast", "\uB3C4\uCC29 \uC815\uBCF4"],
-    ["simulation", "chart-line-up", "\uC131\uACF5 \uAE30\uB85D"],
-    ["journey", "ticket", "\uB0B4 \uC5EC\uC815"]
+    ["explore", "house", "\uD648"],
+    ["live", "broadcast", "\uC5EC\uD589 \uC911"],
+    ["simulation", "chart-line-up", "\uC6B4\uD589 \uAE30\uB85D"],
+    ["journey", "ticket", "\uB0B4 \uACBD\uB85C"]
   ];
   return /* @__PURE__ */ React.createElement("nav", { className: "bottom-dock", "aria-label": "\uC8FC\uC694 \uBA54\uB274" }, items.map(([key, icon, label]) => /* @__PURE__ */ React.createElement("button", { key, type: "button", className: tab === key ? "active" : "", onClick: () => onChange(key), "aria-current": tab === key ? "page" : void 0 }, /* @__PURE__ */ React.createElement(Icon, { name: icon }), /* @__PURE__ */ React.createElement("span", null, label))));
 }

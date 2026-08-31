@@ -825,6 +825,7 @@ class BusroService:
                 int(coverage.get("passage_routes") or 0) / total_routes,
             )
             criterion = str(candidate.get("criterion") or "explorer")
+            bus_transfers = max(0, len(routes) - 1)
             candidates.append(
                 {
                     "id": "journey_" + canonical_hash([snapshot.version, index, candidate.get("steps")])[:20],
@@ -839,8 +840,9 @@ class BusroService:
                     "probability_scope": candidate.get("probability_scope"),
                     "reliability": candidate.get("reliability"),
                     "estimated_minutes": candidate.get("estimated_minutes"),
-                    "transfer_count": candidate.get("transfers", 0),
-                    "transfers": candidate.get("transfers", 0),
+                    "transfer_count": bus_transfers,
+                    "transfers": bus_transfers,
+                    "walking_connections": candidate.get("transfers", 0),
                     "walking_m": candidate.get("walking_m", 0),
                     "route_count": len(routes),
                     "route_ids": [item["route_id"] for item in routes],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from collections import Counter
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -302,6 +303,60 @@ class JourneyPlannerCase(unittest.TestCase):
             )
         self.assertEqual(len(result["alternatives"]), 1)
         self.assertEqual(shortest_path.call_count, 3)
+
+    def test_exhausted_criterion_does_not_hide_later_transfer_route(self):
+        self.hydrate(
+            "DIRECT",
+            [self.stop("O", 1, 36.5000, 127.3000), self.stop("D", 2, 36.5200, 127.3200)],
+        )
+        self.hydrate(
+            "LOCAL_A",
+            [self.stop("O", 1, 36.5000, 127.3000), self.stop("X", 2, 36.5100, 127.3100)],
+        )
+        self.hydrate(
+            "LOCAL_B",
+            [self.stop("X", 1, 36.5100, 127.3100), self.stop("D", 2, 36.5200, 127.3200)],
+        )
+        planner = JourneyPlanner()
+        snapshot = self.catalog.snapshot()
+        graph = planner.build_graph(snapshot, transfer_radius_m=50)
+        starts = tuple(graph.node_id_indexes["O"])
+        goals = frozenset(graph.node_id_indexes["D"])
+        direct = planner._shortest_path(
+            graph, starts, goals, "minimum_transfers", Counter(), [planner.max_expansions], 0,
+        )
+        transfer = planner._shortest_path(
+            graph,
+            starts,
+            goals,
+            "explorer",
+            Counter({edge.edge_id: 100 for edge in direct}),
+            [planner.max_expansions],
+            0,
+        )
+        self.assertEqual([edge.route_id for edge in direct if edge.kind == "ride"], ["DIRECT"])
+        self.assertEqual(
+            list(dict.fromkeys(edge.route_id for edge in transfer if edge.kind == "ride")),
+            ["LOCAL_A", "LOCAL_B"],
+        )
+
+        def criterion_paths(_graph, _starts, _goals, criterion, _penalties, _budget, _attempt):
+            return transfer if criterion == "explorer" else direct
+
+        with patch.object(planner, "_shortest_path", side_effect=criterion_paths):
+            result = planner.plan(
+                snapshot,
+                origin_node_id="O",
+                destination_node_id="D",
+                transfer_radius_m=50,
+                alternatives=3,
+                preference="diverse",
+            )
+
+        self.assertEqual(
+            [candidate["route_ids"] for candidate in result["alternatives"]],
+            [["DIRECT"], ["LOCAL_A", "LOCAL_B"]],
+        )
 
     def test_missing_schedule_or_passage_history_never_emits_probability(self):
         self.hydrate_three_paths()

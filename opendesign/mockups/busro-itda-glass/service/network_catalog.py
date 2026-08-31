@@ -3707,12 +3707,18 @@ class NetworkCatalog:
             with self.connect() as connection:
                 sequence_rows = connection.execute(
                     """
-                    SELECT v.* FROM route_sequence_versions v
+                    SELECT v.*,COALESCE(t.route_no,v.route_id) AS public_route_no
+                    FROM route_sequence_versions v
                     JOIN active_route_sequences a ON a.sequence_id=v.sequence_id
+                    LEFT JOIN topology_targets t
+                      ON t.provider='TAGO'
+                     AND t.city_code=v.city_code
+                     AND t.route_id=v.route_id
                     ORDER BY v.city_code,v.route_id
                     """
                 ).fetchall()
                 sequences: list[RouteSequence] = []
+                routes: list[RouteRecord] = []
                 sequence_ids: list[str] = []
                 for row in sequence_rows:
                     stop_rows = connection.execute(
@@ -3740,9 +3746,22 @@ class NetworkCatalog:
                             row["captured_at"], row["sha256"], stops,
                         )
                     )
+                    routes.append(
+                        RouteRecord(
+                            city_code=row["city_code"],
+                            route_id=row["route_id"],
+                            route_no=row["public_route_no"],
+                            start_node_id=stops[0].node_id if stops else "",
+                            end_node_id=stops[-1].node_id if stops else "",
+                            start_stop_name=stops[0].node_name if stops else "",
+                            end_stop_name=stops[-1].node_name if stops else "",
+                            municipality_name="",
+                            source_id=row["source"],
+                        )
+                    )
                     sequence_ids.append(row["sequence_id"])
             version = hashlib.sha256(_canonical(sequence_ids).encode("utf-8")).hexdigest()
-            snapshot = CatalogSnapshot(version, revision, (), (), tuple(sequences))
+            snapshot = CatalogSnapshot(version, revision, (), tuple(routes), tuple(sequences))
             self._planning_cache = snapshot
             return snapshot
 

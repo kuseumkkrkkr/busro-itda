@@ -237,6 +237,122 @@
 .route-admin-tools .osm-map-wrap { width: calc(100% + 12px); height: 290px; margin-inline: -6px; }
 .route-admin-tools .nation-search-card { margin-inline: 5px; }
 
+/* 2026 product pass: route-first, calm white travel UI */
+.nationwide-screen {
+  --route-ink: #172033;
+  --route-muted: #687386;
+  --route-line: #e8ebf0;
+  --route-canvas: #ffffff;
+  --route-blue: #1565d8;
+  --route-blue-soft: #edf4ff;
+  padding-inline: 18px;
+  background: #ffffff;
+}
+.app-shell.tab-explore { background: #ffffff; }
+.tab-explore .app-header { background: rgba(255,255,255,.96); box-shadow: none; }
+.journey-generator { padding-top: 6px; }
+.generator-card {
+  padding: 10px 0 18px;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+.travel-mode-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 15px;
+  background: #f1f3f6;
+}
+.travel-mode-switch button {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 11px;
+  color: #6d7788;
+  font-size: 12px;
+  font-weight: 700;
+  background: transparent;
+  transition: color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+.travel-mode-switch button:hover { color: #172033; }
+.travel-mode-switch button.active {
+  color: #172033;
+  background: #ffffff;
+  box-shadow: 0 2px 8px rgba(20,32,52,.08);
+}
+.travel-mode-switch button:first-child.active { color: #1565d8; }
+.travel-mode-switch button:last-child.active { color: #0d8b72; }
+.generator-heading h1 { max-width: 330px; margin-top: 24px; font-size: 29px; line-height: 1.2; }
+.generator-heading > p:not(.eyebrow) { max-width: 340px; margin-top: 8px; font-size: 13px; }
+.generator-card form { margin-top: 22px; }
+.route-point-sheet { border-radius: 18px; background: #ffffff; box-shadow: 0 4px 18px rgba(24,35,55,.05); }
+.timing-option {
+  margin: 12px 0 2px;
+  padding: 0 12px;
+  border: 1px solid var(--route-line);
+  border-radius: 14px;
+  background: #ffffff;
+}
+.timing-option summary {
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--route-muted);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  list-style: none;
+}
+.timing-option summary::-webkit-details-marker { display: none; }
+.timing-option summary span { display: inline-flex; align-items: center; gap: 6px; }
+.timing-option summary span i { color: var(--route-blue); }
+.timing-option .schedule-input-grid { padding: 0 0 12px; }
+.preference-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+.preference-grid button { border-radius: 12px; background: #f8f9fb; }
+.route-search-primary { margin-top: 4px; box-shadow: none; }
+.generated-journeys { margin-top: 28px; }
+.generated-journeys > article {
+  grid-template-columns: 30px minmax(0,1fr);
+  padding: 15px 12px;
+  border-radius: 12px;
+  box-shadow: none;
+}
+.candidate-rank { width: 28px; height: 28px; border-radius: 50%; }
+.candidate-leg { background: #f7f8fa; }
+.candidate-transfer-note {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 2px 12px;
+  color: var(--route-muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+.candidate-transfer-note i { color: var(--route-green); font-size: 14px; }
+.candidate-copy footer { justify-content: flex-start; gap: 14px; }
+.candidate-copy footer strong { display: none; }
+.open-candidate { min-height: 46px; border-radius: 12px; }
+.timing-help {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 12px 2px 0;
+  color: var(--route-muted);
+  font-size: 11px;
+}
+.timing-help i { color: var(--route-blue); }
+.tab-explore .bottom-dock button.active { color: var(--route-blue); background: var(--route-blue-soft); box-shadow: none; }
+
+@media (min-width: 760px) {
+  .app-shell { border: 1px solid #e5e8ed; border-radius: 28px; box-shadow: 0 24px 70px rgba(24,35,55,.12); }
+}
+
 @media (max-width: 450px) {
   .nationwide-screen { padding-top: calc(84px + env(safe-area-inset-top)); }
   .generator-heading h1 { font-size: 28px; }

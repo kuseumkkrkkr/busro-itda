@@ -40,21 +40,21 @@ function AppHeader({ connection, onSettings }) {
     <header className="app-header">
       <div className="brand-lockup">
         <span className="brand-mark"><Icon name="bus" /></span>
-        <div><p>전국 버스 여행</p><strong>버스로 잇다</strong></div>
+        <div><p>시내버스로 이어가는 여행</p><strong>버스로 잇다</strong></div>
       </div>
-      <button className="glass-icon-button" type="button" onClick={onSettings} aria-label={`데이터 연결 설정 · ${connection.label}`} title={connection.label}>
-        <Icon name={connection.mode === "live" ? "cloud-check" : "sliders-horizontal"} />
-      </button>
+      {onSettings && <button className="glass-icon-button" type="button" onClick={onSettings} aria-label="운영 설정">
+        <Icon name="sliders-horizontal" />
+      </button>}
     </header>
   );
 }
 
 function BottomDock({ tab, onChange }) {
   const items = [
-    ["explore", "map-trifold", "전국 탐색"],
-    ["live", "broadcast", "도착 정보"],
-    ["simulation", "chart-line-up", "성공 기록"],
-    ["journey", "ticket", "내 여정"],
+    ["explore", "house", "홈"],
+    ["live", "broadcast", "여행 중"],
+    ["simulation", "chart-line-up", "운행 기록"],
+    ["journey", "ticket", "내 경로"],
   ];
   return (
     <nav className="bottom-dock" aria-label="주요 메뉴">

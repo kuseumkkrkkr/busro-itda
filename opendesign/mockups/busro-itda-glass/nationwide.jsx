@@ -162,7 +162,7 @@ function StopLookup({ label, value, onChange, selected, onSelect, cityCode }) {
     }, 260);
     return () => { active = false; window.clearTimeout(timer); };
   }, [value, selected, cityCode]);
-  return <div className="stop-lookup"><label><span>{label}</span><div className="stop-input-shell"><Icon name="map-pin" /><input value={selected ? selected.node_name : value} onChange={(event) => { onSelect(null); onChange(event.target.value); }} placeholder="전국 정류장명 2자 이상" autoComplete="off" /><span className={loading ? "lookup-state loading" : "lookup-state"}><Icon name={loading ? "spinner-gap" : selected ? "check-circle" : "magnifying-glass"} /></span></div></label>{results.length > 0 && !selected && <div className="stop-suggestions">{results.map((stop, index) => <button type="button" key={`${stop.city_code}-${stop.node_id}-${index}`} onClick={() => { onSelect(stop); onChange(stop.node_name); setResults([]); }}><strong>{stop.node_name}</strong><small><span>{stop.city_name || stop.city_code || "지역 미상"} · {stop.node_id}</span><em className={stop.graph_ready ? "graph-ready" : "graph-gap"}>{stop.graph_ready ? "여행 경로 연결" : "정류장 정보만"}</em></small></button>)}</div>}</div>;
+  return <div className="stop-lookup"><label><span>{label}</span><div className="stop-input-shell"><Icon name="map-pin" /><input value={selected ? selected.node_name : value} onChange={(event) => { onSelect(null); onChange(event.target.value); }} placeholder="전국 정류장명 2자 이상" autoComplete="off" /><span className={loading ? "lookup-state loading" : "lookup-state"}><Icon name={loading ? "spinner-gap" : selected ? "check-circle" : "magnifying-glass"} /></span></div></label>{results.length > 0 && !selected && <div className="stop-suggestions">{results.map((stop, index) => <button type="button" key={`${stop.city_code}-${stop.node_id}-${index}`} onClick={() => { onSelect(stop); onChange(stop.node_name); setResults([]); }}><strong>{stop.node_name}</strong><small><span>{stop.city_name || "지역 확인 중"}{stop.mobile_short_no ? ` · 정류장 ${stop.mobile_short_no}` : ""}</span>{Number(stop.route_count) > 0 && <em className={stop.graph_ready ? "graph-ready" : "graph-gap"}>노선 {stop.route_count}개</em>}</small></button>)}</div>}</div>;
 }
 
 function formatCount(value) {
@@ -593,12 +593,18 @@ const JOURNEY_CRITERION_LABELS = {
 };
 
 function JourneyCandidateCard({ candidate, index, schedule, structural = false, context, connection, fetchedWindows, onChooseJourney }) {
-  const routeIds = Array.isArray(candidate?.route_ids) ? candidate.route_ids.filter(Boolean) : (Array.isArray(candidate?.routes) ? candidate.routes.map((item) => item?.route_id || item?.routeId).filter(Boolean) : []);
+  const routeRows = Array.isArray(candidate?.routes) ? candidate.routes : [];
+  const routeIds = Array.isArray(candidate?.route_ids) ? candidate.route_ids.filter(Boolean) : routeRows.map((item) => item?.route_id || item?.routeId).filter(Boolean);
+  const displayRoutes = routeRows.map((item, routeIndex) => {
+    const routeId = String(item?.route_id || item?.routeId || "");
+    const cityCode = String(item?.city_code || item?.cityCode || "");
+    const fetched = fetchedWindows?.get(`${cityCode}|${routeId}`)?.route || {};
+    const rawLabel = String(fetched.route_no || fetched.routeNo || item?.route_no || item?.routeNo || "");
+    const label = rawLabel && rawLabel !== routeId && !/^[A-Z]{2,}\d{6,}$/i.test(rawLabel) ? rawLabel : `버스 ${routeIndex + 1}`;
+    return { ...item, route_id: routeId, route_no: label };
+  });
+  const routeLabels = new Map(displayRoutes.map((item) => [item.route_id, item.route_no]));
   const legs = summarizeJourneyLegs(candidate);
-  const coverage = candidate?.coverage && typeof candidate.coverage === "object" ? candidate.coverage : {};
-  const evidence = candidate?.evidence && typeof candidate.evidence === "object" ? candidate.evidence : {};
-  const provenance = scheduleEvidence(schedule, candidate);
-  const successProbability = verifiedSuccessProbability(candidate);
   const departureTime = formatGtfsClock(candidate?.departure_time, candidate?.departure_seconds);
   const arrivalTime = formatGtfsClock(candidate?.arrival_time, candidate?.arrival_seconds);
   const minutes = Number(candidate?.estimated_minutes);
@@ -606,22 +612,19 @@ function JourneyCandidateCard({ candidate, index, schedule, structural = false, 
   return <article className={structural ? "structural-candidate" : "scheduled-candidate"}>
     <div className="candidate-rank">{index + 1}</div>
     <div className="candidate-copy">
-      <div className="candidate-title"><div><p>{JOURNEY_CRITERION_LABELS[candidate?.criterion] || candidate?.criterion || (structural ? "현재 TAGO 경로" : "현재 시간표 경로")}</p><h3>{routeIds.length > 0 ? `${candidate?.transfers || 0}회 환승 · ${routeIds.length}개 노선` : "노선 DATA_GAP"}</h3></div><small className={structural ? "topology-ready" : "schedule-ready"}>{structural ? "TAGO 경로" : "현재 시각 확인"}</small></div>
+      <div className="candidate-title"><div><p>{index === 0 ? "추천 경로" : JOURNEY_CRITERION_LABELS[candidate?.criterion] || "다른 경로"}</p><h3>{routeIds.length > 0 ? `${candidate?.transfers || 0}회 환승 · 버스 ${routeIds.length}대` : "경로 정보 확인 중"}</h3></div>{index === 0 && <small className="topology-ready">추천</small>}</div>
       {!structural && timeSummary.length > 0 && <div className="schedule-summary"><Icon name="clock" /><strong>{timeSummary.join(" · ")}</strong></div>}
-      {structural && <div className="topology-assumption-copy"><Icon name="path" /><span>현재 TAGO 정류장 진행 방향으로 연결했습니다. 정류장별 출발시각이 없어도 경로는 유지합니다.</span></div>}
-      <div className="candidate-leg-list">{legs.map((leg, legIndex) => <div className="candidate-leg" key={`${leg.routeId}-${leg.tripId}-${legIndex}`}>
+      <div className="candidate-leg-list">{legs.map((leg, legIndex) => <React.Fragment key={`${leg.routeId}-${leg.tripId}-${legIndex}`}>
+        {legIndex > 0 && <div className="candidate-transfer-note"><Icon name="person-simple-walk" /> 걸어서 다음 버스로 환승</div>}
+        <div className="candidate-leg">
         <span className="timeline-rail"><i /><b /></span>
-        <div className="leg-copy"><span className="route-pill"><Icon name="bus" /> {leg.routeId}</span><strong>{leg.from?.node_name || leg.from?.node_id || "승차 정류장"}</strong>{!structural && leg.departureTime && <span className="leg-time"><Icon name="clock" /> {leg.departureTime} 출발</span>}<small>총 {leg.edgeCount + 1}개 정류장</small><strong>{leg.to?.node_name || leg.to?.node_id || "하차 정류장"}</strong>{!structural && leg.arrivalTime && <span className="leg-time arrival"><Icon name="clock" /> {leg.arrivalTime} 도착</span>}{!structural && leg.nextDepartureTime && <span className="transfer-time">다음 버스 {leg.nextDepartureTime} 출발</span>}</div>
-      </div>)}</div>
+        <div className="leg-copy"><span className="route-pill"><Icon name="bus" /> {routeLabels.get(leg.routeId) || leg.routeId}</span><strong>{leg.from?.node_name || leg.from?.node_id || "승차 정류장"}</strong>{!structural && leg.departureTime && <span className="leg-time"><Icon name="clock" /> {leg.departureTime} 출발</span>}<small>{leg.edgeCount + 1}개 정류장 이동</small><strong>{leg.to?.node_name || leg.to?.node_id || "하차 정류장"}</strong>{!structural && leg.arrivalTime && <span className="leg-time arrival"><Icon name="clock" /> {leg.arrivalTime} 도착</span>}{!structural && leg.nextDepartureTime && <span className="transfer-time">다음 버스 {leg.nextDepartureTime} 출발</span>}</div>
+      </div></React.Fragment>)}</div>
       <footer>
-        <span><Icon name="arrows-left-right" /> {typeof candidate?.transfers === "number" ? `${candidate.transfers}회 환승` : "환승 DATA_GAP"}</span>
-        <span><Icon name="database" /> 승차 {evidence.ride_edges ?? "—"} · 환승 {evidence.transfer_edges ?? "—"} 간선</span>
-        <strong>{successProbability === null ? "성공률 미산출" : `관측 성공률 ${Math.round(successProbability * 100)}%`}</strong>
+        <span><Icon name="arrows-left-right" /> {typeof candidate?.transfers === "number" ? `${candidate.transfers}회 환승` : "환승 확인 중"}</span>
+        {typeof candidate?.walking_m === "number" && <span><Icon name="person-simple-walk" /> 도보 {Math.round(candidate.walking_m)}m</span>}
       </footer>
-      {!structural && <small className={provenance.ready ? "official-schedule-evidence" : "schedule-evidence-gap"}><Icon name={provenance.ready ? "shield-check" : "warning-circle"} /> {provenance.ready ? provenance.label : "현재 시간표 출처 DATA_GAP"}</small>}
-      {typeof coverage.schedule_routes === "number" && typeof coverage.total_routes === "number" && <small className="evidence-copy">현재 시간표 근거 {coverage.schedule_routes}/{coverage.total_routes}{typeof coverage.passage_routes === "number" ? ` · 실제 통과 이력 ${coverage.passage_routes}/${coverage.total_routes}` : ""}</small>}
-      <JourneyEvidenceStack candidate={candidate} context={context} schedule={schedule} provenance={provenance} timeSummary={timeSummary} connection={connection} fetchedWindows={fetchedWindows} />
-      <button className={structural ? "open-candidate structural" : "open-candidate"} type="button" onClick={() => onChooseJourney?.(prepareJourneyForDetail(candidate, context))}>경로·근거 자세히 보기 <Icon name="arrow-right" /></button>
+      <button className={structural ? "open-candidate structural" : "open-candidate"} type="button" onClick={() => onChooseJourney?.(prepareJourneyForDetail({ ...candidate, routes: displayRoutes }, context))}>지도에서 경로 보기 <Icon name="arrow-right" /></button>
     </div>
   </article>;
 }
@@ -670,24 +673,31 @@ function GraphCoverage({ networkStatus, result }) {
   </div>;
 }
 
+const journeySearchSession = {
+  fromText: "", toText: "", fromStop: null, toStop: null,
+  travelMode: "country", preference: "diverse", result: null,
+};
+
 function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
-  const [fromText, setFromText] = useState(""); const [toText, setToText] = useState("");
-  const [fromStop, setFromStop] = useState(null); const [toStop, setToStop] = useState(null);
-  const [preference, setPreference] = useState("diverse"); const [result, setResult] = useState(null);
+  const [fromText, setFromText] = useState(journeySearchSession.fromText); const [toText, setToText] = useState(journeySearchSession.toText);
+  const [fromStop, setFromStop] = useState(journeySearchSession.fromStop); const [toStop, setToStop] = useState(journeySearchSession.toStop);
+  const [travelMode, setTravelMode] = useState(journeySearchSession.travelMode);
+  const [preference, setPreference] = useState(journeySearchSession.preference); const [result, setResult] = useState(journeySearchSession.result);
+  const [checkTime, setCheckTime] = useState(false);
   const [serviceDate, setServiceDate] = useState(() => localDateValue());
   const [departureTime, setDepartureTime] = useState(() => localTimeValue());
   const [loading, setLoading] = useState(false); const [error, setError] = useState("");
-  const [networkStatus, setNetworkStatus] = useState(null);
   useEffect(() => { if (seededStop) { if (!fromStop) { setFromStop(seededStop); setFromText(seededStop.node_name); } else { setToStop(seededStop); setToText(seededStop.node_name); } } }, [seededStop]);
   useEffect(() => {
-    let active = true;
-    BusroApi.networkStatus().then((payload) => active && setNetworkStatus(payload)).catch(() => active && setNetworkStatus({ ready: false, sources: [] }));
-    return () => { active = false; };
-  }, []);
+    Object.assign(journeySearchSession, { fromText, toText, fromStop, toStop, travelMode, preference, result });
+  }, [fromText, toText, fromStop, toStop, travelMode, preference, result]);
   async function generate(event) {
     event.preventDefault(); if (!fromStop || !toStop) return;
     setLoading(true); setError(""); setResult(null);
-    try { setResult(await BusroApi.generateJourneys({ from_stop_id: fromStop.node_id, to_stop_id: toStop.node_id, from_city_code: fromStop.city_code || undefined, to_city_code: toStop.city_code || undefined, service_date: serviceDate, departure_time: departureTime, preference, max_alternatives: 3 })); }
+    try {
+      const timing = checkTime ? { service_date: serviceDate, departure_time: departureTime } : {};
+      setResult(await BusroApi.generateJourneys({ from_stop_id: fromStop.node_id, to_stop_id: toStop.node_id, from_city_code: fromStop.city_code || undefined, to_city_code: toStop.city_code || undefined, ...timing, preference, max_alternatives: 5 }));
+    }
     catch (reason) { setError(reason.message || "현재 적재된 노선 그래프로 여행을 만들지 못했습니다."); }
     finally { setLoading(false); }
   }
@@ -722,9 +732,12 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
     <section className="journey-generator">
       <GlassCard className="generator-card">
         <div className="generator-heading">
-          <div className="generator-kicker"><p className="eyebrow">전국 버스 여행</p><SourceBadge mode={connection.mode} label={connection.label} /></div>
-          <h1>어디까지 가세요?</h1>
-          <p>현재 TAGO 진행 방향을 먼저 찾고, 확보된 최신 정적 시간표와 실시간 도착정보를 단계별로 확인해요.</p>
+          <div className="travel-mode-switch" role="group" aria-label="여행 방식">
+            <button type="button" className={travelMode === "country" ? "active" : ""} onClick={() => { setTravelMode("country"); setPreference("diverse"); }}><Icon name="flag-banner" /> 국토종주</button>
+            <button type="button" className={travelMode === "outing" ? "active" : ""} onClick={() => { setTravelMode("outing"); setPreference("low_transfer"); }}><Icon name="map-pin" /> 동네 나들이</button>
+          </div>
+          <h1>{travelMode === "country" ? "시내버스로 어디까지 가볼까요?" : "가까운 곳도 버스로 이어가요"}</h1>
+          <p>{travelMode === "country" ? "출발과 도착을 고르면 전국 버스 노선을 이어 여러 경로를 찾아드려요." : "출발과 도착을 고르면 환승이 적고 걷기 편한 경로부터 보여드려요."}</p>
         </div>
         <form onSubmit={generate}>
           <div className="route-point-sheet">
@@ -736,20 +749,18 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
             </div>
             <button className="generator-swap" type="button" onClick={() => { setFromStop(toStop); setToStop(fromStop); setFromText(toText); setToText(fromText); }} aria-label="출발과 도착 바꾸기"><Icon name="arrows-down-up" /></button>
           </div>
-          <fieldset className="schedule-fieldset"><legend>언제 떠날까요?</legend><div className="schedule-input-grid">
+          <details className="timing-option" open={checkTime}><summary onClick={(event) => { event.preventDefault(); setCheckTime((value) => !value); }}><span><Icon name="clock" /> 출발 시간도 확인하기</span><Icon name={checkTime ? "caret-up" : "caret-down"} /></summary>{checkTime && <div className="schedule-input-grid">
             <label><span><Icon name="calendar-blank" /> 여행 날짜</span><input type="date" value={serviceDate} onChange={(event) => setServiceDate(event.target.value)} required /></label>
             <label><span><Icon name="clock" /> 출발 시각</span><input type="time" value={departureTime} onChange={(event) => setDepartureTime(event.target.value)} step="60" required /></label>
-          </div><small>날짜·시각은 현재 공식 정적 시간표와 TAGO 실시간 보정에 사용합니다. 과거 GTFS 시각은 오늘 시간표로 쓰지 않습니다.</small></fieldset>
-          <fieldset><legend>어떤 길로 갈까요?</legend><div className="preference-grid">{[["diverse","추천","sparkle"],["low_transfer","최소 환승","arrows-left-right"],["reliable","근거 우선","shield-check"],["challenge","국토종주","flag-banner"]].map(([value,label,icon]) => <button type="button" key={value} className={preference === value ? "active" : ""} onClick={() => setPreference(value)}><Icon name={icon} />{label}</button>)}</div></fieldset>
-          <button className="liquid-button route-search-primary" type="submit" disabled={!fromStop || !toStop || !serviceDate || !departureTime || loading}>{loading ? "현재 TAGO 경로 찾는 중…" : "현재 버스 경로 찾기"}<Icon name="arrow-right" /></button>
+          </div>}</details>
+          <fieldset><legend>경로 기준</legend><div className="preference-grid">{(travelMode === "country" ? [["diverse","추천","sparkle"],["low_transfer","환승 적게","arrows-left-right"],["challenge","버스 많이","flag-banner"]] : [["low_transfer","환승 적게","arrows-left-right"],["diverse","여러 경로","map-trifold"]]).map(([value,label,icon]) => <button type="button" key={value} className={preference === value ? "active" : ""} onClick={() => setPreference(value)}><Icon name={icon} />{label}</button>)}</div></fieldset>
+          <button className="liquid-button route-search-primary" type="submit" disabled={!fromStop || !toStop || loading}>{loading ? "버스 길을 잇는 중…" : "여행 경로 찾기"}<Icon name="arrow-right" /></button>
           {(!fromStop || !toStop) && <small className="search-help">정류장명을 입력하고 전국 목록에서 출발·도착을 각각 선택하세요.</small>}
         </form>
       </GlassCard>
-      <GraphCoverage networkStatus={networkStatus} result={result} />
-      {error && <InlineNotice tone="warning" icon="warning-circle" title="DATA_GAP">{error} 검증된 노선 경유 정류장이 적재되어야 경로에 포함됩니다.</InlineNotice>}
+      {error && <InlineNotice tone="warning" icon="warning-circle" title="경로를 찾지 못했어요">{error}</InlineNotice>}
       {structuralCandidates.length > 0 && <div className="generated-journeys structural-results">
-        <div className="catalog-heading"><div><p className="eyebrow">현재 TAGO 경로</p><h2>{structuralCandidates.length}가지 길을 찾았어요</h2></div><span>경로 우선</span></div>
-        <p className="alternative-hint">현재 공식 정류장 순서로 연결했습니다. 정류장별 출발시각이 없으면 시간은 비워 두고 경로는 숨기지 않습니다.</p>
+        <div className="catalog-heading"><div><p className="eyebrow">여행 경로</p><h2>{structuralCandidates.length}가지 길을 찾았어요</h2></div></div>
         {structuralCandidates.map((candidate, index) => <JourneyCandidateCard key={`structural-${candidate.id || candidate.criterion || "candidate"}-${index}`} candidate={candidate} index={index} schedule={schedule} structural context={journeyContext} connection={connection} fetchedWindows={fetchedWindows} onChooseJourney={onChooseJourney} />)}
       </div>}
       {scheduled.length > 0 && <div className="generated-journeys scheduled-results">
@@ -757,8 +768,8 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
         <p className="alternative-hint">표시된 현재 공식 시간표 범위만 사용합니다. 과거 GTFS 시각이나 임의 성공률은 섞지 않습니다.</p>
         {scheduled.map((candidate, index) => <JourneyCandidateCard key={`scheduled-${candidate.id || candidate.criterion || "candidate"}-${index}`} candidate={candidate} index={index} schedule={schedule} context={journeyContext} connection={connection} fetchedWindows={fetchedWindows} onChooseJourney={onChooseJourney} />)}
       </div>}
-      {result && !schedule.ready && <InlineNotice tone="neutral" icon={schedule.historical ? "flask" : "clock"} title={schedule.historical ? "GTFS · 모델 근거 전용" : "현재 시간표 범위"}>{gapReasons[schedule.reason] || gapReasons[result.reason] || "정류장별 현재 출발시각은 아직 없습니다. 현재 TAGO 경로는 위에 계속 표시합니다."}</InlineNotice>}
-      {result && schedule.ready && scheduled.length === 0 && <InlineNotice tone="warning" icon="clock" title={result.status || "CURRENT_TIMETABLE_DATA_GAP"}>{gapReasons[result.reason] || "현재 시간표에서 해당 시각 이후 출발편을 확인하지 못했습니다. TAGO 방향 경로는 별도로 유지합니다."}</InlineNotice>}
+      {result && structuralCandidates.length === 0 && scheduled.length === 0 && <InlineNotice tone="warning" icon="map-trifold" title="이어지는 버스 경로가 없어요">현재 연결된 노선 안에서 경로를 찾지 못했습니다. 출발·도착 정류장을 바꾸어 다시 찾아보세요.</InlineNotice>}
+      {checkTime && result && !schedule.ready && structuralCandidates.length > 0 && <p className="timing-help"><Icon name="clock" /> 경로는 찾았지만 이 구간의 출발 시간은 아직 확인 중이에요.</p>}
     </section>
   );
 }
@@ -766,5 +777,6 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
 function NationwideScreen({ connection, onChooseJourney }) {
   const [seededStop, setSeededStop] = useState(null);
   const [toolsOpen, setToolsOpen] = useState(false);
-  return <main className="screen nationwide-screen"><JourneyGenerator seededStop={seededStop} onChooseJourney={onChooseJourney} connection={connection} /><details className="route-admin-tools" open={toolsOpen} onToggle={(event) => setToolsOpen(event.currentTarget.open)}><summary><span><Icon name="wrench" /><strong>노선 데이터 도구</strong><small>운영·검증용</small></span><Icon name="caret-down" /></summary>{toolsOpen && <><div className="route-admin-intro"><p>개별 TAGO 노선 조회·OSM 형상·경유순서 적재는 데이터 점검용입니다. 여행자는 위 전국 경로 검색만 사용하면 됩니다.</p></div><RouteBrowser connection={connection} onUseStop={setSeededStop} /></>}</details></main>;
+  const adminEnabled = new URLSearchParams(window.location.search).get("admin") === "1";
+  return <main className="screen nationwide-screen"><JourneyGenerator seededStop={seededStop} onChooseJourney={onChooseJourney} connection={connection} />{adminEnabled && <details className="route-admin-tools" open={toolsOpen} onToggle={(event) => setToolsOpen(event.currentTarget.open)}><summary><span><Icon name="wrench" /><strong>노선 데이터 도구</strong><small>운영·검증용</small></span><Icon name="caret-down" /></summary>{toolsOpen && <><div className="route-admin-intro"><p>개별 노선 조회와 경유 순서 점검용 화면입니다.</p></div><RouteBrowser connection={connection} onUseStop={setSeededStop} /></>}</details>}</main>;
 }

@@ -401,11 +401,11 @@ function journeyMapPresentation(state, stopCount) {
     detail: `노선별 OSM 관계 또는 도로 추정 형상을 이어 표시합니다. 실제 차량 GPS 궤적은 아닙니다.`,
   };
   return {
-    title: "공식 정류장 연결선",
-    badge: state.status === "loading" ? "도로 형상 확인 중" : "도로 형상 DATA_GAP",
+    title: "버스 이동 경로",
+    badge: state.status === "loading" ? "도로 경로 불러오는 중" : "대략적인 경로",
     icon: state.status === "loading" ? "spinner-gap" : "path",
     tone: state.status === "loading" ? "loading" : "gap",
-    detail: `${state.status === "loading" ? "현재는" : "공개 도로 형상을 가져오지 못해"} 공식 경유 정류장 좌표 ${stopCount}개를 운행 순서대로 연결했습니다. 도로 주행궤적은 아닙니다.`,
+    detail: state.status === "loading" ? "도로를 따라가는 경로를 불러오고 있어요." : `${stopCount}개 정류장을 지나는 대략적인 이동 경로예요.`,
   };
 }
 
@@ -436,7 +436,7 @@ function JourneyRouteMap({ sections, fromName, toName }) {
     : mapPayload.geometry;
   const presentation = journeyMapPresentation(geometryState, mapPayload.stops.length);
   if (!mapPayload.geometry) {
-    return <InlineNotice tone="warning" icon="map-trifold" title="지도 DATA_GAP">선택 경로의 공식 정류장 좌표가 없어 이동선을 표시할 수 없습니다.</InlineNotice>;
+    return <InlineNotice tone="warning" icon="map-trifold" title="지도를 표시할 수 없어요">이 경로의 정류장 위치를 다시 확인해 주세요.</InlineNotice>;
   }
   return <section className={`journey-route-map ${presentation.tone}`} aria-labelledby="journey-map-title">
     <OSMRouteMap
@@ -456,20 +456,21 @@ function JourneyScreen({ journey, connection, onExplore }) {
   if (!journey) {
     return (
       <main className="screen content-screen journey-screen">
-        <ScreenHeading eyebrow="선택한 여정" title="선택된 버스 여행이 없습니다" detail="전국 탐색에서 출발·도착 정류장을 고르고 생성된 후보를 선택하세요." />
+        <ScreenHeading eyebrow="내 경로" title="아직 고른 경로가 없어요" detail="홈에서 출발·도착 정류장을 고르고 여행 경로를 선택하세요." />
         <GlassCard className="ticket-card">
-          <InlineNotice tone="neutral" icon="map-trifold" title="전국 경로 탐색">공식 정류장 순서가 적재된 노선만 여행 후보로 사용합니다.</InlineNotice>
+          <InlineNotice tone="neutral" icon="map-trifold" title="여행 경로 찾기">전국 정류장을 검색해 시내버스를 이어 보세요.</InlineNotice>
         </GlassCard>
-        <button className="liquid-button sticky-action" type="button" onClick={onExplore}>전국 탐색으로 가기 <Icon name="arrow-right" /></button>
+        <button className="liquid-button sticky-action" type="button" onClick={onExplore}>경로 찾으러 가기 <Icon name="arrow-right" /></button>
       </main>
     );
   }
 
   const fromStop = journey.from_stop || journey.from || {};
   const toStop = journey.to_stop || journey.to || {};
-  const fromName = fromStop.node_name || fromStop.stop_name || fromStop.node_id || "DATA_GAP";
-  const toName = toStop.node_name || toStop.stop_name || toStop.node_id || "DATA_GAP";
+  const fromName = fromStop.node_name || fromStop.stop_name || fromStop.node_id || "출발 정류장";
+  const toName = toStop.node_name || toStop.stop_name || toStop.node_id || "도착 정류장";
   const routeIds = Array.isArray(journey.route_ids) ? journey.route_ids.filter(Boolean) : [];
+  const routeLabels = new Map((Array.isArray(journey.routes) ? journey.routes : []).map((item) => [String(item?.route_id || item?.routeId || ""), String(item?.route_no || item?.routeNo || item?.route_id || item?.routeId || "버스")]));
   const steps = Array.isArray(journey.steps) ? journey.steps : [];
   const sections = summarizeJourneySections(journey);
   const reasons = Array.isArray(journey.reasons) ? journey.reasons.filter(Boolean) : [];
@@ -487,18 +488,17 @@ function JourneyScreen({ journey, connection, onExplore }) {
 
   return (
     <main className="screen content-screen journey-screen">
-      <ScreenHeading eyebrow="선택한 여정" title={`${fromName} → ${toName}`} detail="현재 TAGO 경유 정류장으로 생성한 경로입니다. 시간표·실시간·과거 모델 근거를 구분해 표시합니다." />
+      <ScreenHeading eyebrow="내 경로" title={`${fromName} → ${toName}`} detail={`${journey.transfers || 0}번 환승하는 시내버스 여행 경로예요.`} />
       <JourneyRouteMap sections={sections} fromName={fromName} toName={toName} />
       <GlassCard className="ticket-card">
-        <div className="ticket-route"><div><small>출발 정류장</small><strong>{fromName}</strong><span>{fromStop.node_id || "ID DATA_GAP"}</span></div><div className="ticket-line"><span /><Icon name="bus" /><span /></div><div><small>도착 정류장</small><strong>{toName}</strong><span>{toStop.node_id || "ID DATA_GAP"}</span></div></div>
+        <div className="ticket-route"><div><small>출발</small><strong>{fromName}</strong></div><div className="ticket-line"><span /><Icon name="bus" /><span /></div><div><small>도착</small><strong>{toName}</strong></div></div>
         <div className="ticket-meta">
-          <span><Icon name="bus" /> 노선 {routeIds.length || "DATA_GAP"}</span>
+          <span><Icon name="bus" /> 버스 {routeIds.length || 0}대</span>
           {typeof journey.transfers === "number" && <span><Icon name="arrows-left-right" /> {journey.transfers}회 환승</span>}
           {typeof journey.walking_m === "number" && <span><Icon name="person-simple-walk" /> {Math.round(journey.walking_m)}m</span>}
         </div>
-        {routeIds.length > 0 && <div className="ticket-meta">{routeIds.map((routeId) => <span key={routeId}><Icon name="path" /> {routeId}</span>)}</div>}
+        {routeIds.length > 0 && <div className="ticket-meta">{routeIds.map((routeId) => <span key={routeId}><Icon name="bus" /> {routeLabels.get(routeId) || routeId}</span>)}</div>}
       </GlassCard>
-      <JourneyEvidenceStack candidate={journey} context={journey} schedule={schedule} provenance={provenance} timeSummary={timeSummary} connection={connection} fetchedWindows={selectedFetchedWindows} />
       <section className="leg-timeline">
         {sections.map((section, index) => {
           const stepFrom = section.from || {};
@@ -506,32 +506,25 @@ function JourneyScreen({ journey, connection, onExplore }) {
           const isTransfer = section.kind === "transfer";
           const stopCount = section.edgeCount + 1;
           const intermediateCount = Math.max(0, stopCount - 2);
-          const stepLabel = isTransfer ? "환승" : (section.routeId || "노선 DATA_GAP");
+          const stepLabel = isTransfer ? "환승" : (routeLabels.get(section.routeId) || section.routeId || "버스");
           return (
           <article key={`${section.kind || "step"}-${section.routeId || "none"}-${index}`} className={index === 0 ? "current" : ""}>
             <div className="leg-rail"><span>{index + 1}</span><i /></div>
-            <div className="leg-card"><div><p><span className="line-chip blue">{stepLabel}</span>{isTransfer ? "정류장 간 이동" : "버스 승차 구간"}</p><h3>{stepFrom.node_name || stepFrom.node_id || "DATA_GAP"} → {stepTo.node_name || stepTo.node_id || "DATA_GAP"}</h3><small>{isTransfer ? `도보 연결 · ${formatJourneyDistance(section.distanceM)}` : `총 ${stopCount}개 정류장 · 중간 경유 ${intermediateCount}개 · 좌표 간 ${formatJourneyDistance(section.distanceM)}`}</small></div></div>
+            <div className="leg-card"><div><p><span className="line-chip blue">{stepLabel}</span>{isTransfer ? "걸어서 환승" : "버스 이동"}</p><h3>{stepFrom.node_name || stepFrom.node_id || "승차 정류장"} → {stepTo.node_name || stepTo.node_id || "하차 정류장"}</h3><small>{isTransfer ? `도보 ${formatJourneyDistance(section.distanceM)}` : `${stopCount}개 정류장 · 중간 정류장 ${intermediateCount}개`}</small></div></div>
           </article>
           );
         })}
       </section>
-      {steps.length === 0 && <InlineNotice tone="warning" icon="warning-circle" title="DATA_GAP">이 후보에 표시할 경로 단계가 없습니다.</InlineNotice>}
+      {steps.length === 0 && <InlineNotice tone="warning" icon="warning-circle" title="상세 경로를 불러오지 못했어요">다른 경로를 선택해 주세요.</InlineNotice>}
       {sources.length > 0 && <details className="journey-evidence">
-        <summary><span><Icon name="seal-check" /><span><strong>공식 경로 근거</strong><small>{sources.length}개 출처 · 원문 정보는 여기서 한 번만 표시합니다.</small></span></span><Icon name="caret-down" /></summary>
+        <summary><span><Icon name="seal-check" /><span><strong>데이터 출처</strong><small>노선 정보가 어디에서 왔는지 확인할 수 있어요.</small></span></span><Icon name="caret-down" /></summary>
         <div className="journey-evidence-list">{sources.map((source) => <article key={source.key}>
           <span>{source.type}</span><strong>{source.label}</strong>
-          <small>{source.date ? `기준일 ${source.date}` : "기준일 DATA_GAP"}{source.hash ? ` · SHA-256 ${source.hash.slice(0, 12)}…` : ""}</small>
+          {source.date && <small>기준일 {source.date}</small>}
           {source.url && <a href={source.url} target="_blank" rel="noreferrer">공식 원문 보기 <Icon name="arrow-square-out" /></a>}
         </article>)}</div>
       </details>}
-      <InlineNotice tone={topologyReady ? "success" : "warning"} icon={topologyReady ? "path" : "warning-circle"} title={topologyReady ? "현재 TAGO 경로" : status}>
-        {reasons.length > 0 ? reasons.map(journeyReasonLabel).join(" · ") : "추가 결측 사유 없음"}
-        {` · ${successProbability === null ? "성공률 미산출" : `관측 성공률 ${Math.round(successProbability * 100)}%`}`}
-        {typeof coverage.schedule_routes === "number" && typeof coverage.total_routes === "number" ? ` · 현재 시간표 근거 ${coverage.schedule_routes}/${coverage.total_routes}` : ""}
-        {typeof coverage.passage_routes === "number" && typeof coverage.total_routes === "number" ? ` · 실제 통과 이력 ${coverage.passage_routes}/${coverage.total_routes}` : ""}
-        {evidence.topology ? " · 검증된 단방향 경유 순서" : ""}
-      </InlineNotice>
-      <button className="liquid-button sticky-action" type="button" onClick={onExplore}>다른 전국 여행 찾기 <Icon name="arrow-right" /></button>
+      <button className="liquid-button sticky-action" type="button" onClick={onExplore}>다른 경로 찾기 <Icon name="arrow-right" /></button>
     </main>
   );
 }
