@@ -1565,6 +1565,31 @@ class HTTPCase(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(payload["error"]["code"], "ORIGIN_NOT_ALLOWED")
 
+    def test_same_origin_post_uses_the_actual_listener_port(self) -> None:
+        same_origin = f"http://127.0.0.1:{self.port}"
+        status, payload, headers = self.request(
+            "POST",
+            "/api/journeys/generate",
+            body={
+                "from_stop_id": "DJB_FIXTURE_STOP_001",
+                "to_stop_id": "DJB_FIXTURE_STOP_003",
+                "service_date": "2026-08-31",
+                "departure_time": "09:30",
+            },
+            headers={"Origin": same_origin},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertNotIn("Access-Control-Allow-Origin", headers)
+
+        denied_status, denied_payload, _ = self.request(
+            "GET",
+            "/api/status",
+            headers={"Origin": "http://127.0.0.1:65534"},
+        )
+        self.assertEqual(denied_status, 403)
+        self.assertEqual(denied_payload["error"]["code"], "ORIGIN_NOT_ALLOWED")
+
     def test_json_body_limit_is_enforced(self) -> None:
         status, payload, _ = self.request(
             "POST",

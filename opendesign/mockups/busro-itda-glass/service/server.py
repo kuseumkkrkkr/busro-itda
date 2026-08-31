@@ -248,10 +248,30 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if not origin:
             return True
-        if origin not in self.service.settings.allowed_origins:
+        if origin not in self.service.settings.allowed_origins and not self._origin_matches_host(origin):
             self._json_response(403, {"ok": False, "error": {"code": "ORIGIN_NOT_ALLOWED", "message": "Origin is not allowed"}})
             return False
         return True
+
+    def _origin_matches_host(self, origin: str) -> bool:
+        """Allow the web UI served by this HTTP listener on any configured port.
+
+        Browsers attach an Origin header to same-origin JSON POSTs.  Comparing
+        the serialized origin to the already-validated Host header keeps a
+        configurable local port usable without widening cross-origin access.
+        """
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme != "http"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            return False
+        request_host = self.headers.get("Host", "").strip().lower()
+        return bool(request_host and parsed.netloc.lower() == request_host)
 
     def _client_is_loopback(self) -> bool:
         try:
