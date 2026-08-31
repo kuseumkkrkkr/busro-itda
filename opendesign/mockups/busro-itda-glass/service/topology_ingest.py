@@ -478,8 +478,8 @@ class IngestConfig:
     def validate(self) -> None:
         if not 1 <= self.request_budget <= 100_000:
             raise ValueError("request_budget must be 1..100000")
-        if not 0 <= self.requests_per_second <= 20:
-            raise ValueError("requests_per_second must be 0..20")
+        if self.requests_per_second != 0 and not 0.1 <= self.requests_per_second <= 20:
+            raise ValueError("requests_per_second must be 0 or 0.1..20")
         if not 1 <= self.page_size <= 100:
             raise ValueError("page_size must be 1..100")
         if not 1 <= self.max_route_pages <= 100:
@@ -553,9 +553,13 @@ class TopologyIngestor:
         # Network I/O remains outside the gate so up to `workers` calls can
         # overlap without producing a start burst.
         with self._request_start_lock:
-            stopped = self._stopped_status()
-            if stopped is not None:
-                raise IngestStopped(stopped)
+            with self._stop_lock:
+                stopped = self._stop_status
+                if stopped is not None:
+                    raise IngestStopped(stopped)
+                if self.requests_used >= self.config.request_budget:
+                    self._set_stop("BUDGET_EXHAUSTED")
+                    raise RequestBudgetExhausted("request budget exhausted")
             if self.config.requests_per_second > 0 and self._last_request_started is not None:
                 interval = 1.0 / self.config.requests_per_second
                 remaining = interval - (self.monotonic() - self._last_request_started)

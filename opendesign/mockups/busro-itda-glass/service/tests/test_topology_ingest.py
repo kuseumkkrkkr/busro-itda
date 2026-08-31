@@ -441,6 +441,26 @@ class TopologyIngestTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(in_progress, 0)
 
+    def test_exhausted_budget_never_waits_for_the_next_rate_slot(self):
+        self.seed_targets(2)
+        sleeps = []
+        ingestor = TopologyIngestor(
+            catalog=self.catalog,
+            fetcher=lambda operation, parameters: self.one_page(parameters),
+            config=self.config(
+                request_budget=1,
+                requests_per_second=0.1,
+                target_source="catalog",
+                trust_catalog_identifiers=True,
+            ),
+            clock=lambda: FIXED_NOW,
+            monotonic=lambda: 0.0,
+            sleeper=sleeps.append,
+        )
+        result = ingestor.run()
+        self.assertEqual(result["run"]["status"], "BUDGET_EXHAUSTED")
+        self.assertEqual(sleeps, [])
+
     def test_workers_respect_global_target_limit_below_worker_count(self):
         self.seed_targets(40)
         first_wave = threading.Barrier(5)
@@ -740,6 +760,8 @@ class LocalLiveApiTests(unittest.TestCase):
             IngestConfig(workers=0).validate()
         with self.assertRaises(ValueError):
             IngestConfig(workers=9).validate()
+        with self.assertRaises(ValueError):
+            IngestConfig(requests_per_second=0.09).validate()
 
     def test_local_origin_is_literal_loopback_http_without_url_components(self):
         self.assertEqual(
