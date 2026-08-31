@@ -143,8 +143,12 @@ class DataGoKrMunicipalDiscovery:
         query = _safe_query(query)
         page = _bounded_int(page, "page", 1, MAX_PAGES)
         per_page = _bounded_int(per_page, "per_page", 1, MAX_PER_PAGE)
+        # An empty type filter is intentional: municipal feeds are published
+        # both as Open APIs and as static file datasets.  Restricting this to
+        # ``API`` silently misses the static timetables and stop lists needed
+        # for the planner's verified snapshot catalog.
         params = urlencode(
-            {"dType": "API", "keyword": query, "currentPage": page, "perPage": per_page}
+            {"dType": "", "keyword": query, "currentPage": page, "perPage": per_page}
         )
         request = Request(
             f"{ORIGIN}{SEARCH_PATH}?{params}",

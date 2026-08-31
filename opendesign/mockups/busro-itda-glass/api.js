@@ -188,6 +188,14 @@
     arrivals: (leg) => request(`/arrivals?city_code=${encodeURIComponent(leg.cityCode)}&node_id=${encodeURIComponent(leg.nodeId)}&leg_id=${encodeURIComponent(leg.id)}`),
     positions: (route) => request(`/positions?city_code=${encodeURIComponent(route.cityCode || route.city_code)}&route_id=${encodeURIComponent(route.routeId || route.route_id)}`),
     networkStatus: () => request("/network/status", { timeout: COLD_START_TIMEOUT_MS }),
+    discoverMunicipalSources(query, options = {}) {
+      const params = new URLSearchParams({
+        q: String(query || "").trim(),
+        pages: String(Math.min(2, Math.max(1, Number(options.pages) || 1))),
+        per_page: String(Math.min(50, Math.max(1, Number(options.perPage ?? options.per_page) || 20))),
+      });
+      return request(`/sources/discover?${params.toString()}`, { timeout: COLD_START_TIMEOUT_MS });
+    },
     cities: () => request("/cities"),
     routes(cityCode, routeNo = "") {
       const params = new URLSearchParams({ city_code: String(cityCode), page: "1", limit: "100" });

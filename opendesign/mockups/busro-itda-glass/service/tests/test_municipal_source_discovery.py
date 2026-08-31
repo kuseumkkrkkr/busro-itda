@@ -62,7 +62,7 @@ class MunicipalDiscoveryCase(unittest.TestCase):
         client = DataGoKrMunicipalDiscovery(opener=opener)
         rows = client.search("부산 버스", page=1, per_page=20)
         self.assertEqual(len(rows), 1)
-        self.assertIn("dType=API", opener.urls[0])
+        self.assertIn("dType=", opener.urls[0])
         self.assertIn("%EB%B6%80%EC%82%B0", opener.urls[0])
         with self.assertRaises(DiscoveryError):
             client.search("x" * 81)

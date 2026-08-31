@@ -251,7 +251,7 @@ python -B multi_collector.py `
 - `GET /api/network/stops?q=서울역&limit=20`
 - `GET /api/network/routes?q=601&limit=20`
 - `GET /api/sources?status=VERIFIED_ROUTE_ONLY&limit=25` (`status`는 호환용이며 응답은 `origin_status`와 `ingestion_status`를 분리합니다.)
-- `GET /api/sources/discover?q=춘천%20버스&pages=1&per_page=20` — 공공데이터포털의 공식 지자체 후보만 검색합니다. 결과는 `DISCOVERED_ONLY`/`activation_allowed=false`로 반환되며 자동 다운로드·그래프 반영은 하지 않습니다.
+- `GET /api/sources/discover?q=춘천%20버스&pages=1&per_page=20` — 공공데이터포털의 공식 오픈 API·파일데이터 후보를 검색합니다. 결과는 `DISCOVERED_ONLY`/`activation_allowed=false`로 반환되며 자동 다운로드·그래프 반영은 하지 않습니다.
 - `GET /api/arrivals?city_code=25&node_id=DJB8001793`
 - `GET /api/history?route_id=DJB30300002&from=2026-08-01&to=2026-08-31`
 - `GET /api/positions?city_code=25&route_id=DJB30300052`
