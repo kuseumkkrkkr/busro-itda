@@ -20,6 +20,14 @@ from busro_vercel_runtime import RuntimeResponse, dispatch_request  # noqa: E402
 
 HOST_RE = re.compile(r"^[A-Za-z0-9.-]+(?::[0-9]{1,5})?$")
 MAX_BODY_BYTES = 65_536
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+RESPONSE_TOO_LARGE_PAYLOAD = {
+    "ok": False,
+    "error": {
+        "code": "RESPONSE_TOO_LARGE",
+        "message": "Response exceeds the allowed size",
+    },
+}
 
 
 class handler(BaseHTTPRequestHandler):
@@ -52,7 +60,12 @@ class handler(BaseHTTPRequestHandler):
             response = dispatch_request(method, path, query, body)
         except ValueError as exc:
             response = RuntimeResponse(400, {"ok": False, "error": {"code": "INVALID_REQUEST", "message": str(exc)}})
-        self._write_json(response.status, response.payload, cache_control=response.cache_control)
+        self._write_json(
+            response.status,
+            response.payload,
+            cache_control=response.cache_control,
+            retry_after_seconds=response.retry_after_seconds,
+        )
 
     def _request_target(self) -> tuple[str, dict[str, str]]:
         parsed = urlsplit(self.path)
@@ -103,11 +116,29 @@ class handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
 
-    def _write_json(self, status: int, payload: dict, *, cache_control: str = "private, no-store") -> None:
+    def _write_json(
+        self,
+        status: int,
+        payload: dict,
+        *,
+        cache_control: str = "private, no-store",
+        retry_after_seconds: int | None = None,
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(body) > MAX_RESPONSE_BYTES:
+            status = 413
+            cache_control = "private, no-store"
+            retry_after_seconds = None
+            body = json.dumps(
+                RESPONSE_TOO_LARGE_PAYLOAD,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
         self.send_response(status)
         self._common_headers()
         self.send_header("Cache-Control", cache_control)
+        if retry_after_seconds is not None:
+            self.send_header("Retry-After", str(retry_after_seconds))
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

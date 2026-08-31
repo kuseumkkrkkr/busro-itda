@@ -26,6 +26,12 @@ import time
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import urlparse
 
+from route_topology_anomalies import (
+    SINGLE_POINT_ROUTE_SPIKE_ERROR_CODE,
+    SinglePointRouteSpike,
+    single_point_route_spike,
+)
+
 
 STOP_COLUMNS = (
     "정류장번호",
@@ -161,6 +167,11 @@ class CatalogSnapshot:
     stops: tuple[StopRecord, ...]
     routes: tuple[RouteRecord, ...]
     route_sequences: tuple[RouteSequence, ...]
+    catalog_route_count: int | None = None
+    topology_target_count: int | None = None
+    topology_complete_count: int | None = None
+    topology_discovery_complete: bool | None = None
+    topology_hydrated_count: int | None = None
 
 
 def _route_stop_payload(stop: RouteStopRecord) -> dict[str, Any]:
@@ -196,6 +207,36 @@ def _safe_code(value: Any, field: str) -> str:
     if not _CODE.fullmatch(text):
         raise CatalogValidationError(f"{field} has an invalid identifier")
     return text
+
+
+def _public_route_label(source: Any, fallback: Any) -> str:
+    """Read an optional official label from bounded provenance JSON.
+
+    Municipal sequences do not necessarily have a matching TAGO target row.
+    Their importer retains the published route name in immutable provenance,
+    so presentation can use it without inventing a cross-provider ID join.
+    Malformed and legacy sources safely keep the route-ID fallback.
+    """
+
+    default = str(fallback or "")
+    try:
+        payload = json.loads(str(source))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return default
+    if not isinstance(payload, dict):
+        return default
+    candidates: list[Any] = [payload.get("route_no"), payload.get("route_name")]
+    route_numbers = payload.get("route_numbers")
+    if isinstance(route_numbers, list):
+        candidates.extend(route_numbers[:20])
+    for candidate in candidates:
+        try:
+            label = _safe_text(candidate, "route label", maximum=80)
+        except CatalogError:
+            continue
+        if label:
+            return label
+    return default
 
 
 def _safe_transport_identifier(value: Any, field: str) -> str:
@@ -443,6 +484,13 @@ class NetworkCatalog:
                     sequence_id TEXT NOT NULL REFERENCES route_sequence_versions(sequence_id),
                     PRIMARY KEY(city_code,route_id)
                 );
+                CREATE INDEX IF NOT EXISTS idx_active_route_sequences_sequence
+                    ON active_route_sequences(sequence_id,city_code,route_id);
+                CREATE INDEX IF NOT EXISTS idx_route_sequence_stops_node_lookup
+                    ON route_sequence_stops(node_id,sequence_id,node_order);
+                CREATE INDEX IF NOT EXISTS idx_route_sequence_stops_coordinate_lookup
+                    ON route_sequence_stops(latitude,longitude,sequence_id,node_order)
+                    WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
                 CREATE TABLE IF NOT EXISTS gtfs_feed_versions (
                     feed_id TEXT PRIMARY KEY,
                     provider TEXT NOT NULL,
@@ -1007,6 +1055,23 @@ class NetworkCatalog:
             )
             captured = _timestamp(item.get("captured_at"))
             stops = self._route_stop_records(city, route, item.get("ordered_stops") or ())
+            spike = next(
+                (
+                    evidence
+                    for stop_index in range(2, len(stops))
+                    if (
+                        evidence := single_point_route_spike(
+                            stops[stop_index - 2],
+                            stops[stop_index - 1],
+                            stops[stop_index],
+                        )
+                    )
+                    is not None
+                ),
+                None,
+            )
+            if spike is not None:
+                raise CatalogValidationError(spike.bounded_evidence())
             canonical_stops = [_route_stop_payload(stop) for stop in stops]
             digest = hashlib.sha256(
                 _canonical(canonical_stops).encode("utf-8")
@@ -3135,18 +3200,245 @@ class NetworkCatalog:
                 "LEFT JOIN completed_by_city c ON c.city_code=p.city_code "
                 "WHERE p.provider=? AND p.status IN ('PENDING','FAILED','DEFERRED','IN_PROGRESS') "
                 "AND (p.status<>'FAILED' OR p.attempts<3) "
+                "AND (p.status<>'FAILED' OR COALESCE(p.error_code,'')<>?) "
                 "AND (p.last_run_id IS NULL OR p.last_run_id<>?) "
                 "ORDER BY CASE p.status WHEN 'IN_PROGRESS' THEN 0 WHEN 'DEFERRED' THEN 1 WHEN 'FAILED' THEN 2 ELSE 3 END,"
                 "COALESCE(c.completed_count,0),p.city_code,p.route_id LIMIT 1",
-                (provider_id, provider_id, run),
+                (
+                    provider_id,
+                    provider_id,
+                    SINGLE_POINT_ROUTE_SPIKE_ERROR_CODE,
+                    run,
+                ),
             ).fetchone()
             if row is not None:
+                retrying_failed = str(row["status"]) == "FAILED"
+                if retrying_failed:
+                    # A failed provider attempt is not a resumable checkpoint.
+                    # Reusing its pages can combine two different upstream
+                    # responses (for example an empty page 1 with a later page
+                    # 2), producing a permanently incomplete sequence.
+                    connection.execute(
+                        "DELETE FROM topology_pages "
+                        "WHERE provider=? AND city_code=? AND route_id=?",
+                        (provider_id, row["city_code"], row["route_id"]),
+                    )
                 connection.execute(
-                    "UPDATE topology_progress SET status='IN_PROGRESS',attempts=attempts+1,last_run_id=?,error_code=NULL,error_message=NULL,updated_at=? WHERE provider=? AND city_code=? AND route_id=?",
+                    "UPDATE topology_progress SET status='IN_PROGRESS',attempts=attempts+1,last_run_id=?,"
+                    "next_page=CASE WHEN status='FAILED' THEN 1 ELSE next_page END,"
+                    "total_count=CASE WHEN status='FAILED' THEN NULL ELSE total_count END,"
+                    "pages_fetched=CASE WHEN status='FAILED' THEN 0 ELSE pages_fetched END,"
+                    "staged_count=CASE WHEN status='FAILED' THEN 0 ELSE staged_count END,"
+                    "error_code=NULL,error_message=NULL,updated_at=? "
+                    "WHERE provider=? AND city_code=? AND route_id=?",
                     (run, now, provider_id, row["city_code"], row["route_id"]),
                 )
             connection.commit()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        claimed = dict(row)
+        if str(row["status"]) == "FAILED":
+            claimed.update(
+                {
+                    "next_page": 1,
+                    "total_count": None,
+                    "pages_fetched": 0,
+                    "staged_count": 0,
+                }
+            )
+        return claimed
+
+    def claim_specific_topology_target(
+        self,
+        *,
+        provider: str,
+        run_id: str,
+        city_code: str,
+        route_id: str,
+        refresh_complete: bool = False,
+    ) -> dict[str, Any] | None:
+        """Atomically claim one operator-selected topology target.
+
+        A completed target is a successful no-op unless ``refresh_complete``
+        is explicit. Missing targets, exhausted failures, invalid states, and a
+        second claim by the same run fail closed instead of falling through to
+        a different route.
+        """
+        provider_id = _safe_code(provider, "provider")
+        run = _safe_code(run_id, "run_id")
+        city = _safe_code(city_code, "city_code")
+        route = _safe_transport_identifier(route_id, "route_id")
+        now = self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            active_run = connection.execute(
+                "SELECT 1 FROM topology_runs "
+                "WHERE run_id=? AND provider=? AND status='RUNNING'",
+                (run, provider_id),
+            ).fetchone()
+            if active_run is None:
+                connection.rollback()
+                raise CatalogValidationError("topology run is not active")
+            row = connection.execute(
+                "SELECT p.*,t.route_no,t.discovery_source "
+                "FROM topology_targets t "
+                "JOIN topology_progress p USING(provider,city_code,route_id) "
+                "WHERE t.provider=? AND t.city_code=? AND t.route_id=?",
+                (provider_id, city, route),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise CatalogValidationError(
+                    f"requested topology target does not exist: {city}:{route}"
+                )
+
+            status = str(row["status"])
+            attempts = int(row["attempts"])
+            last_run_id = row["last_run_id"]
+            if status in {"COMPLETE", "UNCHANGED"} and not refresh_complete:
+                connection.commit()
+                return None
+            if (
+                status == "FAILED"
+                and attempts >= 3
+                and str(row["error_code"] or "")
+                != SINGLE_POINT_ROUTE_SPIKE_ERROR_CODE
+            ):
+                connection.rollback()
+                raise CatalogValidationError(
+                    f"requested topology target exhausted retry attempts: {city}:{route}"
+                )
+            if status not in {
+                "PENDING",
+                "FAILED",
+                "DEFERRED",
+                "IN_PROGRESS",
+                "COMPLETE",
+                "UNCHANGED",
+            }:
+                connection.rollback()
+                raise CatalogValidationError(
+                    f"requested topology target has invalid status: {city}:{route}"
+                )
+            if last_run_id == run:
+                connection.rollback()
+                raise CatalogValidationError(
+                    f"requested topology target is already owned by this run: {city}:{route}"
+                )
+
+            refreshing = status in {"COMPLETE", "UNCHANGED"}
+            restarting = refreshing or status == "FAILED"
+            if restarting:
+                connection.execute(
+                    "DELETE FROM topology_pages "
+                    "WHERE provider=? AND city_code=? AND route_id=?",
+                    (provider_id, city, route),
+                )
+                changed = connection.execute(
+                    "UPDATE topology_progress SET "
+                    "status='IN_PROGRESS',attempts=attempts+1,last_run_id=?,"
+                    "next_page=1,total_count=NULL,pages_fetched=0,staged_count=0,"
+                    "error_code=NULL,error_message=NULL,updated_at=?,completed_at=NULL "
+                    "WHERE provider=? AND city_code=? AND route_id=? "
+                    "AND status=? AND attempts=? AND last_run_id IS ?",
+                    (
+                        run,
+                        now,
+                        provider_id,
+                        city,
+                        route,
+                        status,
+                        attempts,
+                        last_run_id,
+                    ),
+                ).rowcount
+            else:
+                changed = connection.execute(
+                    "UPDATE topology_progress SET "
+                    "status='IN_PROGRESS',attempts=attempts+1,last_run_id=?,"
+                    "error_code=NULL,error_message=NULL,updated_at=? "
+                    "WHERE provider=? AND city_code=? AND route_id=? "
+                    "AND status=? AND attempts=? AND last_run_id IS ?",
+                    (
+                        run,
+                        now,
+                        provider_id,
+                        city,
+                        route,
+                        status,
+                        attempts,
+                        last_run_id,
+                    ),
+                ).rowcount
+            if changed != 1:
+                connection.rollback()
+                raise CatalogValidationError("topology target claim lost ownership")
+            connection.commit()
+
+        claimed = dict(row)
+        if restarting:
+            claimed.update(
+                {
+                    "next_page": 1,
+                    "total_count": None,
+                    "pages_fetched": 0,
+                    "staged_count": 0,
+                }
+            )
+        return claimed
+
+    def repair_corrupt_topology_retries(self, *, provider: str) -> int:
+        """Requeue only failures proven to contain mixed retry pages.
+
+        The old retry path could retain an empty ``page 1 / total 0`` response
+        and append a later page reporting a positive total.  That combination
+        cannot describe one upstream snapshot.  Genuine zero- or one-stop
+        routes do not match this predicate and remain failed for audit.
+        """
+        provider_id = _safe_code(provider, "provider")
+        now = self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT p.city_code,p.route_id FROM topology_progress p "
+                "WHERE p.provider=? AND p.status='FAILED' "
+                "AND p.error_code='INVALID_ROUTE_TOPOLOGY' "
+                "AND p.error_message IN ("
+                "  'complete route-stop sequence was not staged',"
+                "  'ordered_stops must contain 2..10000 rows') "
+                "AND EXISTS (SELECT 1 FROM topology_pages first_page "
+                "  WHERE first_page.provider=p.provider "
+                "  AND first_page.city_code=p.city_code "
+                "  AND first_page.route_id=p.route_id "
+                "  AND first_page.page_no=1 "
+                "  AND first_page.item_count=0 "
+                "  AND first_page.total_count=0) "
+                "AND EXISTS (SELECT 1 FROM topology_pages later_page "
+                "  WHERE later_page.provider=p.provider "
+                "  AND later_page.city_code=p.city_code "
+                "  AND later_page.route_id=p.route_id "
+                "  AND later_page.page_no>1 "
+                "  AND later_page.total_count>0) "
+                "ORDER BY p.city_code,p.route_id",
+                (provider_id,),
+            ).fetchall()
+            targets = [(row["city_code"], row["route_id"]) for row in rows]
+            connection.executemany(
+                "DELETE FROM topology_pages "
+                "WHERE provider=? AND city_code=? AND route_id=?",
+                [(provider_id, city, route) for city, route in targets],
+            )
+            connection.executemany(
+                "UPDATE topology_progress SET "
+                "status='PENDING',next_page=1,total_count=NULL,pages_fetched=0,"
+                "attempts=0,staged_count=0,error_code=NULL,error_message=NULL,"
+                "last_run_id=NULL,updated_at=?,completed_at=NULL "
+                "WHERE provider=? AND city_code=? AND route_id=? "
+                "AND status='FAILED'",
+                [(now, provider_id, city, route) for city, route in targets],
+            )
+            connection.commit()
+        return len(targets)
 
     def queue_topology_refresh(self, *, provider: str) -> int:
         """Explicitly queue already-complete targets for a fresh hash check."""
@@ -3315,6 +3607,89 @@ class NetworkCatalog:
             )
             connection.commit()
 
+    def quarantine_topology_route_spike(
+        self,
+        *,
+        provider: str,
+        city_code: str,
+        route_id: str,
+        expected_sequence_id: str | None,
+        evidence: SinglePointRouteSpike,
+    ) -> dict[str, Any]:
+        """Fail one target and remove only its expected active pointer.
+
+        Immutable sequence versions, stops, provenance, and hashes remain in
+        place for audit.  A stale caller cannot remove a newly activated
+        corrected sequence because the delete includes ``expected_sequence_id``.
+        """
+
+        provider_id = _safe_code(provider, "provider")
+        city = _safe_code(city_code, "city_code")
+        route = _safe_transport_identifier(route_id, "route_id")
+        expected = (
+            _safe_code(expected_sequence_id, "expected_sequence_id")
+            if expected_sequence_id is not None
+            else None
+        )
+        if not isinstance(evidence, SinglePointRouteSpike):
+            raise CatalogValidationError("single-point spike evidence is required")
+        message = evidence.bounded_evidence()
+        now = self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        pointer_removed = False
+        guard_matched = False
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            active = connection.execute(
+                "SELECT sequence_id FROM active_route_sequences "
+                "WHERE city_code=? AND route_id=?",
+                (city, route),
+            ).fetchone()
+            actual = str(active["sequence_id"]) if active is not None else None
+            guard_matched = actual == expected
+            if expected is not None and guard_matched:
+                pointer_removed = (
+                    connection.execute(
+                        "DELETE FROM active_route_sequences "
+                        "WHERE city_code=? AND route_id=? AND sequence_id=?",
+                        (city, route, expected),
+                    ).rowcount
+                    == 1
+                )
+            changed = connection.execute(
+                "UPDATE topology_progress SET status='FAILED',"
+                "content_sha256=NULL,sequence_id=NULL,error_code=?,error_message=?,"
+                "updated_at=?,completed_at=NULL "
+                "WHERE provider=? AND city_code=? AND route_id=?",
+                (
+                    SINGLE_POINT_ROUTE_SPIKE_ERROR_CODE,
+                    message,
+                    now,
+                    provider_id,
+                    city,
+                    route,
+                ),
+            ).rowcount
+            if changed != 1:
+                connection.rollback()
+                raise CatalogValidationError("topology target does not exist")
+            if pointer_removed:
+                revision = self._bump_revision(connection)
+            else:
+                revision_row = connection.execute(
+                    "SELECT value FROM catalog_meta WHERE key='revision'"
+                ).fetchone()
+                revision = int(revision_row[0] if revision_row else 0)
+            connection.commit()
+        if pointer_removed:
+            self._invalidate_cache()
+        return {
+            "pointer_removed": pointer_removed,
+            "expected_sequence_id_matched": guard_matched,
+            "revision": revision,
+            "error_code": SINGLE_POINT_ROUTE_SPIKE_ERROR_CODE,
+            "error_message": message,
+        }
+
     def defer_or_fail_topology_target(
         self,
         *,
@@ -3349,6 +3724,7 @@ class NetworkCatalog:
                 "SELECT COUNT(*) FROM active_route_sequences a JOIN topology_targets t ON t.city_code=a.city_code AND t.route_id=a.route_id WHERE t.provider=?",
                 (provider_id,),
             ).fetchone()[0]
+            discovery = self._topology_discovery_summary(connection, provider_id)
         statuses = {row["status"]: int(row["count"]) for row in rows}
         total = sum(statuses.values())
         complete = statuses.get("COMPLETE", 0) + statuses.get("UNCHANGED", 0)
@@ -3359,6 +3735,50 @@ class NetworkCatalog:
             "hydrated_active_sequences": int(hydrated),
             "coverage_ratio": (complete / total) if total else 0.0,
             "statuses": statuses,
+            "discovery": discovery,
+        }
+
+    @staticmethod
+    def _topology_discovery_summary(
+        connection: sqlite3.Connection, provider_id: str
+    ) -> dict[str, Any]:
+        rows = connection.execute(
+            "SELECT scope_key,status FROM topology_discovery_progress "
+            "WHERE provider=? ORDER BY scope_key",
+            (provider_id,),
+        ).fetchall()
+        city_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM topology_discovered_cities WHERE provider=?",
+                (provider_id,),
+            ).fetchone()[0]
+        )
+        status_counts: dict[str, int] = {}
+        city_scope_complete = False
+        route_scope_count = 0
+        complete_route_scopes = 0
+        for row in rows:
+            status = str(row["status"])
+            status_counts[status] = status_counts.get(status, 0) + 1
+            scope = str(row["scope_key"])
+            if scope == "cities":
+                city_scope_complete = status == "COMPLETE"
+            elif scope.startswith("routes:"):
+                route_scope_count += 1
+                if status == "COMPLETE":
+                    complete_route_scopes += 1
+        complete = (
+            city_scope_complete
+            and city_count > 0
+            and route_scope_count == city_count
+            and complete_route_scopes == city_count
+        )
+        return {
+            "complete": complete,
+            "cities_discovered": city_count,
+            "route_scopes": route_scope_count,
+            "complete_route_scopes": complete_route_scopes,
+            "statuses": status_counts,
         }
 
     def active_topology_summary(self) -> dict[str, Any]:
@@ -3461,9 +3881,9 @@ class NetworkCatalog:
                 WITH matched AS (
                     SELECT v.city_code,v.route_id,v.source,s.node_id,s.node_name,
                            s.latitude,s.longitude
-                    FROM active_route_sequences a
-                    JOIN route_sequence_versions v ON v.sequence_id=a.sequence_id
-                    JOIN route_sequence_stops s ON s.sequence_id=a.sequence_id
+                    FROM route_sequence_stops s NOT INDEXED
+                    JOIN route_sequence_versions v ON v.sequence_id=s.sequence_id
+                    JOIN active_route_sequences a ON a.sequence_id=s.sequence_id
                     WHERE """
                 + " AND ".join(clauses)
                 + """
@@ -3525,7 +3945,7 @@ class NetworkCatalog:
                          JOIN route_sequence_stops s ON s.sequence_id=a.sequence_id
                          WHERE v.city_code=cs.city_code AND s.node_id=cs.node_id
                        ) route_count
-                FROM catalog_stops cs WHERE """
+                FROM catalog_stops cs NOT INDEXED WHERE """
                 + " AND ".join(clauses)
                 + " ORDER BY cs.city_name,cs.node_name,cs.node_id LIMIT ?",
                 params,
@@ -3560,6 +3980,72 @@ class NetworkCatalog:
             )
         )
         return combined[:bounded]
+
+    def planning_stop_reference(
+        self, *, node_id: str, city_code: str | None = None
+    ) -> dict[str, Any] | None:
+        """Resolve one selected stop without materializing the nationwide catalog.
+
+        The returned coordinate may be used only as an explicit walking
+        access/egress point. It never aliases a route identifier or invents a
+        ride edge.
+        """
+        node = _safe_transport_identifier(node_id, "node_id")
+        city = _safe_code(city_code, "city_code") if city_code else None
+        with self.connect() as connection:
+            clauses = [
+                "source_id=(SELECT value FROM catalog_meta WHERE key='active_stops_source_id')",
+                "node_id=?",
+            ]
+            params: list[Any] = [node]
+            if city:
+                clauses.append("city_code=?")
+                params.append(city)
+            row = connection.execute(
+                "SELECT city_code,node_id,node_name,latitude,longitude "
+                "FROM catalog_stops WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY city_code,node_id LIMIT 1",
+                params,
+            ).fetchone()
+            if row is None:
+                hydrated_clauses = ["s.node_id=?"]
+                hydrated_params: list[Any] = [node]
+                if city:
+                    hydrated_clauses.append("v.city_code=?")
+                    hydrated_params.append(city)
+                row = connection.execute(
+                    "SELECT v.city_code,s.node_id,MIN(s.node_name) node_name,"
+                    "MIN(s.latitude) latitude,MIN(s.longitude) longitude "
+                    "FROM active_route_sequences a "
+                    "JOIN route_sequence_versions v ON v.sequence_id=a.sequence_id "
+                    "JOIN route_sequence_stops s ON s.sequence_id=a.sequence_id "
+                    "WHERE "
+                    + " AND ".join(hydrated_clauses)
+                    + " GROUP BY v.city_code,s.node_id ORDER BY v.city_code LIMIT 1",
+                    hydrated_params,
+                ).fetchone()
+        if row is None:
+            return None
+        latitude_value = row["latitude"]
+        longitude_value = row["longitude"]
+        # Active route topology can legitimately identify a stop before the
+        # provider publishes coordinates.  Preserve that exact identity for
+        # directed routing, but expose coordinates only as a complete pair so
+        # callers cannot accidentally perform a half-defined nearby lookup.
+        if latitude_value is None or longitude_value is None:
+            latitude = None
+            longitude = None
+        else:
+            latitude = float(latitude_value)
+            longitude = float(longitude_value)
+        return {
+            "city_code": str(row["city_code"]),
+            "node_id": str(row["node_id"]),
+            "node_name": str(row["node_name"]),
+            "latitude": latitude,
+            "longitude": longitude,
+        }
 
     def search_routes(self, query: str = "", *, city_code: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         text, bounded = self._bounded_query(query, limit)
@@ -3690,6 +4176,70 @@ class NetworkCatalog:
             self._snapshot_cache = snapshot
             return snapshot
 
+    def planning_route_context(
+        self, route_keys: Iterable[tuple[str, str]] = ()
+    ) -> CatalogSnapshot:
+        """Return planner identity and requested route labels without topology rows.
+
+        The on-demand SQLite journey planner owns route-stop traversal.  API
+        presentation still needs a catalog-wide revision and public route
+        numbers, but loading every active sequence for those two values would
+        recreate the nationwide in-memory graph this path is designed to
+        avoid.
+        """
+        normalized = sorted(
+            {
+                (
+                    _safe_code(city_code, "city_code"),
+                    _safe_transport_identifier(route_id, "route_id"),
+                )
+                for city_code, route_id in route_keys
+            }
+        )
+        if len(normalized) > 400:
+            raise CatalogLimitError("planning route context exceeds 400 routes")
+        with self.connect() as connection:
+            revision_row = connection.execute(
+                "SELECT value FROM catalog_meta WHERE key='revision'"
+            ).fetchone()
+            revision = int(revision_row[0] if revision_row else 0)
+            rows: list[sqlite3.Row] = []
+            if normalized:
+                where = " OR ".join(
+                    "(a.city_code=? AND a.route_id=?)" for _item in normalized
+                )
+                parameters = [value for item in normalized for value in item]
+                rows = connection.execute(
+                    "SELECT a.city_code,a.route_id,"
+                    "COALESCE(t.route_no,a.route_id) public_route_no,v.source "
+                    "FROM active_route_sequences a "
+                    "JOIN route_sequence_versions v ON v.sequence_id=a.sequence_id "
+                    "LEFT JOIN topology_targets t ON t.provider='TAGO' "
+                    "AND t.city_code=a.city_code AND t.route_id=a.route_id "
+                    f"WHERE {where} ORDER BY a.city_code,a.route_id",
+                    parameters,
+                ).fetchall()
+        routes = tuple(
+            RouteRecord(
+                city_code=str(row["city_code"]),
+                route_id=str(row["route_id"]),
+                route_no=_public_route_label(
+                    row["source"], row["public_route_no"]
+                ),
+                start_node_id="",
+                end_node_id="",
+                start_stop_name="",
+                end_stop_name="",
+                municipality_name="",
+                source_id=str(row["source"]),
+            )
+            for row in rows
+        )
+        version = hashlib.sha256(
+            _canonical(["catalog_revision", revision]).encode("utf-8")
+        ).hexdigest()
+        return CatalogSnapshot(version, revision, (), routes, ())
+
     def planning_snapshot(self) -> CatalogSnapshot:
         """Load only hydrated topology for bounded journey requests.
 
@@ -3705,6 +4255,35 @@ class NetworkCatalog:
             if self._planning_cache is not None and self._planning_cache.revision == revision:
                 return self._planning_cache
             with self.connect() as connection:
+                catalog_route_count_row = connection.execute(
+                    "SELECT COUNT(*) FROM catalog_routes WHERE source_id=(SELECT value FROM catalog_meta WHERE key='active_routes_source_id')"
+                ).fetchone()
+                catalog_route_count = int(
+                    catalog_route_count_row[0] if catalog_route_count_row else 0
+                )
+                topology_rows = connection.execute(
+                    "SELECT status,COUNT(*) count FROM topology_progress "
+                    "WHERE provider='TAGO' GROUP BY status"
+                ).fetchall()
+                topology_statuses = {
+                    str(row["status"]): int(row["count"]) for row in topology_rows
+                }
+                topology_target_count = sum(topology_statuses.values())
+                topology_complete_count = (
+                    topology_statuses.get("COMPLETE", 0)
+                    + topology_statuses.get("UNCHANGED", 0)
+                )
+                topology_hydrated_row = connection.execute(
+                    "SELECT COUNT(*) FROM active_route_sequences a "
+                    "JOIN topology_targets t ON t.provider='TAGO' "
+                    "AND t.city_code=a.city_code AND t.route_id=a.route_id"
+                ).fetchone()
+                topology_hydrated_count = int(
+                    topology_hydrated_row[0] if topology_hydrated_row else 0
+                )
+                topology_discovery = self._topology_discovery_summary(
+                    connection, "TAGO"
+                )
                 sequence_rows = connection.execute(
                     """
                     SELECT v.*,COALESCE(t.route_no,v.route_id) AS public_route_no
@@ -3750,7 +4329,9 @@ class NetworkCatalog:
                         RouteRecord(
                             city_code=row["city_code"],
                             route_id=row["route_id"],
-                            route_no=row["public_route_no"],
+                            route_no=_public_route_label(
+                                row["source"], row["public_route_no"]
+                            ),
                             start_node_id=stops[0].node_id if stops else "",
                             end_node_id=stops[-1].node_id if stops else "",
                             start_stop_name=stops[0].node_name if stops else "",
@@ -3761,7 +4342,18 @@ class NetworkCatalog:
                     )
                     sequence_ids.append(row["sequence_id"])
             version = hashlib.sha256(_canonical(sequence_ids).encode("utf-8")).hexdigest()
-            snapshot = CatalogSnapshot(version, revision, (), tuple(routes), tuple(sequences))
+            snapshot = CatalogSnapshot(
+                version,
+                revision,
+                (),
+                tuple(routes),
+                tuple(sequences),
+                catalog_route_count=catalog_route_count,
+                topology_target_count=topology_target_count,
+                topology_complete_count=topology_complete_count,
+                topology_discovery_complete=bool(topology_discovery["complete"]),
+                topology_hydrated_count=topology_hydrated_count,
+            )
             self._planning_cache = snapshot
             return snapshot
 

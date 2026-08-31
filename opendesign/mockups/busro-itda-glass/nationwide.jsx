@@ -536,15 +536,22 @@ function summarizeJourneyLegs(candidate) {
     if (step?.kind !== "ride" || !step.route_id) continue;
     const routeId = String(step.route_id);
     const tripId = String(step.trip_id || "");
+    const explicitStopCount = Number(step.stop_count);
+    const orderDelta = Number(step.stop_order_delta);
+    const edgeCount = Number.isFinite(explicitStopCount) && explicitStopCount >= 2
+      ? Math.max(1, Math.round(explicitStopCount) - 1)
+      : Number.isFinite(orderDelta) && orderDelta >= 1
+        ? Math.round(orderDelta)
+        : 1;
     const departureTime = formatGtfsClock(step.departure_time ?? step.from?.departure_time, step.departure_seconds ?? step.from?.departure_seconds);
     const arrivalTime = formatGtfsClock(step.arrival_time ?? step.to?.arrival_time, step.arrival_seconds ?? step.to?.arrival_seconds);
     const previous = legs[legs.length - 1];
     if (previous && previous.routeId === routeId && (!previous.tripId || !tripId || previous.tripId === tripId)) {
       previous.to = step.to || previous.to;
-      previous.edgeCount += 1;
+      previous.edgeCount += edgeCount;
       previous.arrivalTime = arrivalTime || previous.arrivalTime;
     } else {
-      legs.push({ routeId, tripId, from: step.from || {}, to: step.to || {}, edgeCount: 1, departureTime, arrivalTime });
+      legs.push({ routeId, tripId, from: step.from || {}, to: step.to || {}, edgeCount, departureTime, arrivalTime });
     }
   }
   const replayRows = Array.isArray(candidate?.replay_legs) ? candidate.replay_legs : [];
@@ -698,7 +705,12 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
       const timing = checkTime ? { service_date: serviceDate, departure_time: departureTime } : {};
       setResult(await BusroApi.generateJourneys({ from_stop_id: fromStop.node_id, to_stop_id: toStop.node_id, from_city_code: fromStop.city_code || undefined, to_city_code: toStop.city_code || undefined, ...timing, preference, max_alternatives: 5 }));
     }
-    catch (reason) { setError(reason.message || "현재 적재된 노선 그래프로 여행을 만들지 못했습니다."); }
+    catch (reason) {
+      const errorCode = reason?.payload?.error?.code || "";
+      setError(errorCode === "SEARCH_BUDGET_REACHED"
+        ? "이번 검색은 처리 범위 제한에 도달했습니다. 출발·도착 또는 경로 기준을 바꾸어 다시 검색해 주세요."
+        : reason.message || "현재 적재된 노선 그래프로 여행을 만들지 못했습니다.");
+    }
     finally { setLoading(false); }
   }
   const schedule = normalizeSchedule(result);
@@ -708,6 +720,11 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
   const staticRows = Array.isArray(result?.static_alternatives) ? result.static_alternatives : [];
   const structuralPool = [...staticRows, ...returnedCandidates.filter((candidate) => candidate?.scheduled !== true && !scheduled.includes(candidate))];
   const structuralCandidates = structuralPool.filter((candidate, index, rows) => rows.findIndex((item) => (item?.id && item.id === candidate?.id) || (!item?.id && JSON.stringify(item?.route_ids || []) === JSON.stringify(candidate?.route_ids || []) && item?.criterion === candidate?.criterion)) === index);
+  const resultGraph = result?.graph && typeof result.graph === "object" ? result.graph : {};
+  const shownCandidateCount = structuralCandidates.length + scheduled.length;
+  const alternativesTruncated = resultGraph.alternatives_truncated === true && shownCandidateCount > 0;
+  const returnedAlternativeCount = Number.isFinite(Number(resultGraph.alternatives_returned)) ? Number(resultGraph.alternatives_returned) : shownCandidateCount;
+  const requestedAlternativeCount = Number.isFinite(Number(resultGraph.alternatives_requested)) ? Number(resultGraph.alternatives_requested) : 5;
   const fetchedWindows = useCandidateRouteWindows([...structuralCandidates, ...scheduled]);
   const journeyContext = {
     from_stop: fromStop,
@@ -723,11 +740,22 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
   };
   const gapReasons = {
     STOP_NOT_IN_HYDRATED_SEQUENCE: "선택한 정류장은 전국 목록에 있지만 검증된 노선 순서 그래프에는 아직 포함되지 않았습니다.",
+    STOP_NOT_IN_ACTIVE_SEQUENCE: "선택한 정류장은 전국 목록에 있지만 현재 적재된 TAGO 운행 순서에는 아직 포함되지 않았습니다.",
+    STOP_NOT_ROUTABLE_NEARBY: "선택한 정류장과 300m 안에서 실제 승차 가능한 버스 정류장을 찾지 못했습니다.",
     NO_DIRECTED_PATH_IN_HYDRATED_GRAPH: "현재 검증 그래프에서 출발 방향부터 도착 방향까지 이어지는 경로가 없습니다. 역방향 간선을 임의로 만들지 않습니다.",
+    NO_DIRECTED_PATH_IN_SQLITE_GRAPH: "현재 적재된 TAGO 방향 노선에서 출발지부터 도착지까지 이어지는 경로가 없습니다. 상·하행을 임의로 이어 붙이지 않습니다.",
+    SEARCH_BUDGET_REACHED: "이번 검색은 처리 범위 제한에 도달해 경로 확인을 마치지 못했습니다. 출발·도착 또는 경로 기준을 바꾸어 다시 검색해 주세요.",
     EVIDENCE_INCOMPLETE: "현재 TAGO 경로는 찾았지만 정류장별 시간표 또는 실제 통과 이력이 부족합니다.",
     SCHEDULE_DATA_GAP: "정류장별 현재 출발시각은 확보되지 않았습니다. TAGO 방향 경로와 확보된 노선 운행창은 계속 표시합니다.",
     HISTORICAL_GTFS_PRIOR_ONLY: "과거 GTFS는 신뢰도 모델 근거로만 사용하며 오늘 시간표로 투영하지 않습니다.",
   };
+  const emptyReason = result?.reason || result?.schedule?.reason || "";
+  const emptyMessage = gapReasons[emptyReason] || "현재 검증된 방향 노선 안에서 출발지부터 도착지까지 이어지는 경로를 찾지 못했습니다.";
+  const emptyTitle = emptyReason === "SEARCH_BUDGET_REACHED"
+    ? "이번 검색 범위를 모두 확인하지 못했어요"
+    : ["STOP_NOT_IN_HYDRATED_SEQUENCE", "STOP_NOT_IN_ACTIVE_SEQUENCE", "STOP_NOT_ROUTABLE_NEARBY"].includes(emptyReason)
+      ? "이 정류장의 노선 데이터를 준비하고 있어요"
+      : "이어지는 버스 경로가 없어요";
   return (
     <section className="journey-generator">
       <GlassCard className="generator-card">
@@ -759,6 +787,7 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
         </form>
       </GlassCard>
       {error && <InlineNotice tone="warning" icon="warning-circle" title="경로를 찾지 못했어요">{error}</InlineNotice>}
+      {alternativesTruncated && <p className="alternative-hint">검증을 마친 즉시 결과 {formatCount(returnedAlternativeCount)}/{formatCount(requestedAlternativeCount)}건만 먼저 표시합니다.</p>}
       {structuralCandidates.length > 0 && <div className="generated-journeys structural-results">
         <div className="catalog-heading"><div><p className="eyebrow">여행 경로</p><h2>{structuralCandidates.length}가지 길을 찾았어요</h2></div></div>
         {structuralCandidates.map((candidate, index) => <JourneyCandidateCard key={`structural-${candidate.id || candidate.criterion || "candidate"}-${index}`} candidate={candidate} index={index} schedule={schedule} structural context={journeyContext} connection={connection} fetchedWindows={fetchedWindows} onChooseJourney={onChooseJourney} />)}
@@ -768,7 +797,7 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
         <p className="alternative-hint">표시된 현재 공식 시간표 범위만 사용합니다. 과거 GTFS 시각이나 임의 성공률은 섞지 않습니다.</p>
         {scheduled.map((candidate, index) => <JourneyCandidateCard key={`scheduled-${candidate.id || candidate.criterion || "candidate"}-${index}`} candidate={candidate} index={index} schedule={schedule} context={journeyContext} connection={connection} fetchedWindows={fetchedWindows} onChooseJourney={onChooseJourney} />)}
       </div>}
-      {result && structuralCandidates.length === 0 && scheduled.length === 0 && <InlineNotice tone="warning" icon="map-trifold" title="이어지는 버스 경로가 없어요">현재 연결된 노선 안에서 경로를 찾지 못했습니다. 출발·도착 정류장을 바꾸어 다시 찾아보세요.</InlineNotice>}
+      {result && structuralCandidates.length === 0 && scheduled.length === 0 && <InlineNotice tone="warning" icon="map-trifold" title={emptyTitle}>{emptyMessage}</InlineNotice>}
       {checkTime && result && !schedule.ready && structuralCandidates.length > 0 && <p className="timing-help"><Icon name="clock" /> 경로는 찾았지만 이 구간의 출발 시간은 아직 확인 중이에요.</p>}
     </section>
   );

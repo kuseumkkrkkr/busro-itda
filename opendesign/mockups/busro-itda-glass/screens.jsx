@@ -176,37 +176,63 @@ function journeyStopsMatch(left, right) {
 function summarizeJourneySections(journey) {
   const sections = [];
   let currentRide = null;
+  const routeRefs = new Map((Array.isArray(journey?.routes) ? journey.routes : []).map((route) => [
+    String(route?.route_id || route?.routeId || ""),
+    String(route?.route_no || route?.routeNo || route?.route_id || route?.routeId || ""),
+  ]));
   for (const step of Array.isArray(journey?.steps) ? journey.steps : []) {
     const from = step?.from || {};
     const to = step?.to || {};
     const distance = Number(step?.distance_m);
     if (step?.kind === "ride" && step.route_id) {
       const routeId = String(step.route_id);
+      const segmentStops = Array.isArray(step.segment_stops) && step.segment_stops.length >= 2
+        ? step.segment_stops
+        : [from, to];
+      const explicitStopCount = Number(step.stop_count);
+      const orderDelta = Number(step.stop_order_delta);
+      const stepStopCount = Number.isFinite(explicitStopCount) && explicitStopCount >= 2
+        ? Math.round(explicitStopCount)
+        : Number.isFinite(orderDelta) && orderDelta >= 1
+          ? Math.round(orderDelta) + 1
+          : Math.max(2, segmentStops.length);
+      const stepEdgeCount = Math.max(1, stepStopCount - 1);
       const continues = currentRide
         && currentRide.routeId === routeId
         && journeyStopsMatch(currentRide.to, from);
       if (continues) {
         currentRide.to = to;
-        currentRide.edgeCount += 1;
+        currentRide.edgeCount += stepEdgeCount;
+        currentRide.stopCount += stepEdgeCount;
         currentRide.distanceM += Number.isFinite(distance) ? distance : 0;
-        currentRide.stops.push(to);
+        currentRide.stops.push(...segmentStops.slice(1));
       } else {
         currentRide = {
           kind: "ride",
           routeId,
+          routeRef: routeRefs.get(routeId) || routeId,
           from,
           to,
-          edgeCount: 1,
+          edgeCount: stepEdgeCount,
+          stopCount: stepStopCount,
           distanceM: Number.isFinite(distance) ? distance : 0,
-          stops: [from, to],
+          stops: segmentStops,
         };
         sections.push(currentRide);
       }
       continue;
     }
     currentRide = null;
+    const accessKind = String(step?.access_kind || "").toLowerCase();
+    const sectionKind = step?.kind === "transfer"
+      ? "transfer"
+      : step?.kind === "walk" && accessKind === "access"
+        ? "access"
+        : step?.kind === "walk" && accessKind === "egress"
+          ? "egress"
+          : "walk";
     sections.push({
-      kind: "transfer",
+      kind: sectionKind,
       routeId: "",
       from,
       to,
@@ -220,23 +246,25 @@ function summarizeJourneySections(journey) {
 
 function buildJourneyMapPayload(sections) {
   const lines = [];
+  const walkingLines = [];
   const stops = [];
   for (const section of sections) {
-    if (section.kind !== "ride") continue;
-    const routeStops = section.stops.filter(validJourneyCoordinate).map(normalizeJourneyMapStop);
-    if (routeStops.length < 2) continue;
-    lines.push(routeStops.map((stop) => [stop.longitude, stop.latitude]));
-    routeStops.forEach((stop) => {
+    const sectionStops = section.stops.filter(validJourneyCoordinate).map(normalizeJourneyMapStop);
+    sectionStops.forEach((stop) => {
       const previous = stops[stops.length - 1];
       if (!previous || previous.node_id !== stop.node_id || previous.node_order !== stop.node_order) stops.push(stop);
     });
+    if (sectionStops.length < 2) continue;
+    const line = sectionStops.map((stop) => [stop.longitude, stop.latitude]);
+    if (!line.some((point, index) => index > 0 && (point[0] !== line[0][0] || point[1] !== line[0][1]))) continue;
+    lines.push(line);
+    if (section.kind !== "ride") walkingLines.push(line);
   }
-  const geometry = lines.length === 1
-    ? { type: "LineString", coordinates: lines[0] }
-    : lines.length > 1
-      ? { type: "MultiLineString", coordinates: lines }
-      : null;
-  return { geometry, stops };
+  return {
+    geometry: journeyGeometryFromLines(lines),
+    walkingGeometry: journeyGeometryFromLines(walkingLines),
+    stops,
+  };
 }
 
 const JOURNEY_GEOMETRY_REQUEST_CACHE = new Map();
@@ -278,9 +306,24 @@ function journeyGeometryLines(geometry) {
   return geometry?.type === "MultiLineString" ? geometry.coordinates : [];
 }
 
+function journeyGeometryFromLines(lines) {
+  if (!Array.isArray(lines) || lines.length === 0) return null;
+  return lines.length === 1
+    ? { type: "LineString", coordinates: lines[0] }
+    : { type: "MultiLineString", coordinates: lines };
+}
+
+function mergeJourneyGeometry(primary, supplemental) {
+  return journeyGeometryFromLines([
+    ...journeyGeometryLines(primary),
+    ...journeyGeometryLines(supplemental),
+  ]);
+}
+
 function buildJourneyGeometryRequests(sections) {
   return sections.filter((section) => section.kind === "ride" && section.routeId).map((section) => ({
     routeId: section.routeId,
+    routeRef: section.routeRef || section.routeId,
     stops: section.stops.filter(validJourneyCoordinate).map(normalizeJourneyMapStop),
   })).filter((request) => request.stops.length >= 2);
 }
@@ -289,6 +332,7 @@ function journeyGeometryRequestKey(requests) {
   if (requests.length === 0) return "journey-geometry:none";
   return JSON.stringify(requests.map((request) => [
     request.routeId,
+    request.routeRef,
     request.stops.map((stop) => [stop.node_id, stop.node_order, stop.latitude, stop.longitude]),
   ]));
 }
@@ -298,19 +342,38 @@ function requestJourneyGeometry(requestKey, requests) {
   if (JOURNEY_GEOMETRY_REQUEST_CACHE.size >= MAX_JOURNEY_GEOMETRY_CACHE) {
     JOURNEY_GEOMETRY_REQUEST_CACHE.delete(JOURNEY_GEOMETRY_REQUEST_CACHE.keys().next().value);
   }
-  const request = Promise.allSettled(requests.map((item) => BusroApi.routeGeometry(item.routeId, item.stops))).then((outcomes) => {
-    if (outcomes.some((outcome) => outcome.status !== "fulfilled")) return { status: "gap" };
-    const payloads = outcomes.map((outcome) => outcome.value);
-    const sources = payloads.map((payload) => String(payload?.geometry_source || ""));
-    if (sources.some((source) => !["osm_bus_relation", "osm_road_route_estimate"].includes(source))) return { status: "gap" };
-    const geometries = payloads.map((payload) => normalizeJourneyGeometry(payload?.geometry));
-    if (geometries.some((geometry) => !geometry)) return { status: "gap" };
-    const lines = geometries.flatMap(journeyGeometryLines);
+  const request = Promise.allSettled(requests.map((item) => BusroApi.routeGeometry(item.routeRef, item.stops))).then((outcomes) => {
+    const resolved = [];
+    const fallbackRoutes = [];
+    const lines = [];
+    outcomes.forEach((outcome, index) => {
+      const requestItem = requests[index];
+      const payload = outcome.status === "fulfilled" ? outcome.value : null;
+      const source = String(payload?.geometry_source || "");
+      const geometry = ["osm_bus_relation", "osm_road_route_estimate"].includes(source)
+        ? normalizeJourneyGeometry(payload?.geometry)
+        : null;
+      if (geometry) {
+        lines.push(...journeyGeometryLines(geometry));
+        resolved.push({ routeRef: requestItem.routeRef, source, precision: String(payload?.precision || "") });
+        return;
+      }
+      const fallbackLine = requestItem.stops.filter(validJourneyCoordinate).map((stop) => [Number(stop.longitude), Number(stop.latitude)]);
+      if (fallbackLine.length >= 2) {
+        lines.push(fallbackLine);
+        fallbackRoutes.push(requestItem.routeRef);
+      }
+    });
     if (lines.length === 0) return { status: "gap" };
     const geometry = lines.length === 1
       ? { type: "LineString", coordinates: lines[0] }
       : { type: "MultiLineString", coordinates: lines };
-    const source = sources.every((item) => item === "osm_bus_relation")
+    const sources = resolved.map((item) => item.source);
+    const source = fallbackRoutes.length > 0 && resolved.length > 0
+      ? "partial_osm_geometry"
+      : fallbackRoutes.length > 0
+        ? "ordered_stop_fallback"
+        : sources.every((item) => item === "osm_bus_relation")
       ? "osm_bus_relation"
       : sources.every((item) => item === "osm_road_route_estimate")
         ? "osm_road_route_estimate"
@@ -319,9 +382,15 @@ function requestJourneyGeometry(requestKey, requests) {
       status: "ready",
       geometry,
       source,
-      precision: [...new Set(payloads.map((payload) => String(payload?.precision || "")).filter(Boolean))].join(","),
+      precision: [...new Set(resolved.map((item) => item.precision).filter(Boolean))].join(","),
+      resolvedRoutes: resolved.map((item) => item.routeRef),
+      fallbackRoutes,
+      retryable: fallbackRoutes.length > 0,
     };
-  }).catch(() => ({ status: "gap" }));
+  }).catch(() => ({ status: "gap" })).then((result) => {
+    if (result.status !== "ready" || result.retryable) JOURNEY_GEOMETRY_REQUEST_CACHE.delete(requestKey);
+    return result;
+  });
   JOURNEY_GEOMETRY_REQUEST_CACHE.set(requestKey, request);
   return request;
 }
@@ -400,6 +469,20 @@ function journeyMapPresentation(state, stopCount) {
     tone: "mixed",
     detail: `노선별 OSM 관계 또는 도로 추정 형상을 이어 표시합니다. 실제 차량 GPS 궤적은 아닙니다.`,
   };
+  if (state.source === "partial_osm_geometry") return {
+    title: "OSM 노선 형상 · 정류장 순서 보완",
+    badge: "구간별 검증",
+    icon: "map-trifold",
+    tone: "mixed",
+    detail: `OSM 형상 ${state.resolvedRoutes?.length || 0}개 구간과 공식 정류장 순서 보완 ${state.fallbackRoutes?.length || 0}개 구간을 함께 표시합니다. 실제 차량 GPS 궤적은 아닙니다.`,
+  };
+  if (state.source === "ordered_stop_fallback") return {
+    title: "공식 정류장 순서 경로",
+    badge: "OSM 형상 재시도 가능",
+    icon: "path",
+    tone: "estimate",
+    detail: `공식 경유 정류장 ${stopCount}개의 순서를 연결했습니다. 도로 형상이나 실제 차량 GPS 궤적은 아닙니다.`,
+  };
   return {
     title: "버스 이동 경로",
     badge: state.status === "loading" ? "도로 경로 불러오는 중" : "대략적인 경로",
@@ -432,9 +515,10 @@ function JourneyRouteMap({ sections, fromName, toName }) {
     ? resolvedGeometry
     : { key: requestKey, status: geometryRequests.length ? "loading" : "gap", geometry: null, source: "" };
   const displayedGeometry = geometryState.status === "ready" && geometryState.geometry
-    ? geometryState.geometry
+    ? mergeJourneyGeometry(geometryState.geometry, mapPayload.walkingGeometry)
     : mapPayload.geometry;
-  const presentation = journeyMapPresentation(geometryState, mapPayload.stops.length);
+  const routeStopCount = sections.filter((section) => section.kind === "ride").reduce((sum, section) => sum + Math.max(2, Number(section.stopCount) || section.stops.length), 0);
+  const presentation = journeyMapPresentation(geometryState, routeStopCount || mapPayload.stops.length);
   if (!mapPayload.geometry) {
     return <InlineNotice tone="warning" icon="map-trifold" title="지도를 표시할 수 없어요">이 경로의 정류장 위치를 다시 확인해 주세요.</InlineNotice>;
   }
@@ -504,13 +588,35 @@ function JourneyScreen({ journey, connection, onExplore }) {
           const stepFrom = section.from || {};
           const stepTo = section.to || {};
           const isTransfer = section.kind === "transfer";
-          const stopCount = section.edgeCount + 1;
+          const isAccess = section.kind === "access";
+          const isEgress = section.kind === "egress";
+          const isWalk = section.kind !== "ride";
+          const stopCount = Number(section.stopCount) || section.edgeCount + 1;
           const intermediateCount = Math.max(0, stopCount - 2);
-          const stepLabel = isTransfer ? "환승" : (routeLabels.get(section.routeId) || section.routeId || "버스");
+          const stepLabel = isAccess
+            ? "출발 접근"
+            : isEgress
+              ? "도착 이탈"
+              : isTransfer
+                ? "환승"
+                : isWalk
+                  ? "도보"
+                  : (routeLabels.get(section.routeId) || section.routeId || "버스");
+          const movementLabel = isAccess
+            ? "첫 승차 정류장까지 걷기"
+            : isEgress
+              ? "하차 후 도착 정류장까지 걷기"
+              : isTransfer
+                ? "걸어서 환승"
+                : isWalk
+                  ? "걸어서 이동"
+                  : "버스 이동";
+          const fromFallback = isAccess ? "선택 출발 정류장" : isEgress ? "마지막 하차 정류장" : "승차 정류장";
+          const toFallback = isAccess ? "첫 승차 정류장" : isEgress ? "선택 도착 정류장" : "하차 정류장";
           return (
           <article key={`${section.kind || "step"}-${section.routeId || "none"}-${index}`} className={index === 0 ? "current" : ""}>
             <div className="leg-rail"><span>{index + 1}</span><i /></div>
-            <div className="leg-card"><div><p><span className="line-chip blue">{stepLabel}</span>{isTransfer ? "걸어서 환승" : "버스 이동"}</p><h3>{stepFrom.node_name || stepFrom.node_id || "승차 정류장"} → {stepTo.node_name || stepTo.node_id || "하차 정류장"}</h3><small>{isTransfer ? `도보 ${formatJourneyDistance(section.distanceM)}` : `${stopCount}개 정류장 · 중간 정류장 ${intermediateCount}개`}</small></div></div>
+            <div className="leg-card"><div><p><span className="line-chip blue">{stepLabel}</span>{movementLabel}</p><h3>{stepFrom.node_name || stepFrom.node_id || fromFallback} → {stepTo.node_name || stepTo.node_id || toFallback}</h3><small>{isWalk ? `도보 ${formatJourneyDistance(section.distanceM)}` : `${stopCount}개 정류장 · 중간 정류장 ${intermediateCount}개`}</small></div></div>
           </article>
           );
         })}

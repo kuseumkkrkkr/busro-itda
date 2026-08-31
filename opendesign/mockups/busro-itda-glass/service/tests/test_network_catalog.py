@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import csv
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 import hashlib
 import io
+import json
 from pathlib import Path
 import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
@@ -379,6 +382,150 @@ class NetworkCatalogCase(unittest.TestCase):
             )
         self.assertEqual(attempts, {"FAILED_ROUTE": 3, "EXHAUSTED_FAILED_ROUTE": 3})
 
+    def test_failed_retry_discards_staging_while_checkpoints_resume(self):
+        self.catalog.upsert_topology_targets(
+            provider="TAGO",
+            routes=[
+                {"city_code": "25", "route_id": route, "route_no": route}
+                for route in ("FAILED", "DEFERRED", "INTERRUPTED")
+            ],
+            discovery_source="TEST",
+        )
+        for route in ("FAILED", "DEFERRED", "INTERRUPTED"):
+            self.catalog.stage_topology_page(
+                provider="TAGO",
+                city_code="25",
+                route_id=route,
+                page_no=1,
+                items=[{"node_id": route + "-A"}],
+                total_count=2,
+            )
+        with self.catalog.connect() as connection:
+            connection.execute(
+                "UPDATE topology_progress SET status='FAILED',attempts=1 "
+                "WHERE route_id='FAILED'"
+            )
+            connection.execute(
+                "UPDATE topology_progress SET status='DEFERRED' "
+                "WHERE route_id='DEFERRED'"
+            )
+            connection.execute(
+                "UPDATE topology_progress SET status='IN_PROGRESS',last_run_id='old-run' "
+                "WHERE route_id='INTERRUPTED'"
+            )
+            connection.commit()
+
+        claimed = [
+            self.catalog.claim_topology_target(provider="TAGO", run_id="new-run")
+            for _ in range(3)
+        ]
+        self.assertEqual(
+            [target["route_id"] for target in claimed],
+            ["INTERRUPTED", "DEFERRED", "FAILED"],
+        )
+        self.assertEqual([target["next_page"] for target in claimed], [2, 2, 1])
+        self.assertEqual([target["staged_count"] for target in claimed], [1, 1, 0])
+        with self.catalog.connect() as connection:
+            pages = dict(
+                connection.execute(
+                    "SELECT route_id,COUNT(*) FROM topology_pages GROUP BY route_id"
+                ).fetchall()
+            )
+        self.assertEqual(pages, {"DEFERRED": 1, "INTERRUPTED": 1})
+
+    def test_repair_requeues_only_proven_mixed_retry_pages(self):
+        routes = (
+            "CORRUPT", "CORRUPT_EMPTY_FINAL", "GENUINE_ZERO", "GENUINE_ONE", "UNPROVEN"
+        )
+        self.catalog.upsert_topology_targets(
+            provider="TAGO",
+            routes=[
+                {"city_code": "25", "route_id": route, "route_no": route}
+                for route in routes
+            ],
+            discovery_source="TEST",
+        )
+        self.catalog.stage_topology_page(
+            provider="TAGO", city_code="25", route_id="CORRUPT",
+            page_no=1, items=[], total_count=0,
+        )
+        self.catalog.stage_topology_page(
+            provider="TAGO", city_code="25", route_id="CORRUPT",
+            page_no=2, items=[], total_count=45,
+        )
+        self.catalog.stage_topology_page(
+            provider="TAGO", city_code="25", route_id="CORRUPT_EMPTY_FINAL",
+            page_no=1, items=[], total_count=0,
+        )
+        self.catalog.stage_topology_page(
+            provider="TAGO", city_code="25", route_id="CORRUPT_EMPTY_FINAL",
+            page_no=2, items=[], total_count=3,
+        )
+        self.catalog.stage_topology_page(
+            provider="TAGO", city_code="25", route_id="GENUINE_ZERO",
+            page_no=1, items=[], total_count=0,
+        )
+        self.catalog.stage_topology_page(
+            provider="TAGO", city_code="25", route_id="GENUINE_ONE",
+            page_no=1, items=[{"node_id": "ONLY"}], total_count=1,
+        )
+        self.catalog.stage_topology_page(
+            provider="TAGO", city_code="25", route_id="UNPROVEN",
+            page_no=1, items=[], total_count=0,
+        )
+        with self.catalog.connect() as connection:
+            connection.execute(
+                "UPDATE topology_progress SET status='FAILED',attempts=3,"
+                "error_code='INVALID_ROUTE_TOPOLOGY',"
+                "error_message='complete route-stop sequence was not staged' "
+                "WHERE route_id IN ('CORRUPT','UNPROVEN')"
+            )
+            connection.execute(
+                "UPDATE topology_progress SET status='FAILED',attempts=3,"
+                "error_code='INVALID_ROUTE_TOPOLOGY',"
+                "error_message='ordered_stops must contain 2..10000 rows' "
+                "WHERE route_id IN ('CORRUPT_EMPTY_FINAL','GENUINE_ZERO','GENUINE_ONE')"
+            )
+            connection.commit()
+
+        self.assertEqual(
+            self.catalog.repair_corrupt_topology_retries(provider="TAGO"), 2
+        )
+        self.assertEqual(
+            self.catalog.repair_corrupt_topology_retries(provider="TAGO"), 0
+        )
+        with self.catalog.connect() as connection:
+            state = {
+                row["route_id"]: (
+                    row["status"], row["attempts"], row["next_page"],
+                    row["pages_fetched"], row["staged_count"], row["error_code"],
+                )
+                for row in connection.execute(
+                    "SELECT route_id,status,attempts,next_page,pages_fetched,"
+                    "staged_count,error_code FROM topology_progress "
+                    "WHERE route_id IN ('CORRUPT','CORRUPT_EMPTY_FINAL',"
+                    "'GENUINE_ZERO','GENUINE_ONE','UNPROVEN')"
+                )
+            }
+            page_counts = dict(
+                connection.execute(
+                    "SELECT route_id,COUNT(*) FROM topology_pages GROUP BY route_id"
+                ).fetchall()
+            )
+        self.assertEqual(state["CORRUPT"], ("PENDING", 0, 1, 0, 0, None))
+        self.assertEqual(
+            state["CORRUPT_EMPTY_FINAL"], ("PENDING", 0, 1, 0, 0, None)
+        )
+        self.assertEqual(state["GENUINE_ZERO"][0:2], ("FAILED", 3))
+        self.assertEqual(state["GENUINE_ONE"][0:2], ("FAILED", 3))
+        self.assertEqual(state["UNPROVEN"][0:2], ("FAILED", 3))
+        self.assertNotIn("CORRUPT", page_counts)
+        self.assertNotIn("CORRUPT_EMPTY_FINAL", page_counts)
+        self.assertEqual(
+            {key: page_counts[key] for key in ("GENUINE_ZERO", "GENUINE_ONE", "UNPROVEN")},
+            {"GENUINE_ZERO": 1, "GENUINE_ONE": 1, "UNPROVEN": 1},
+        )
+
     def test_snapshot_and_cache_are_immutable(self):
         self.catalog.hydrate_route_sequence(
             city_code="25",
@@ -412,6 +559,188 @@ class NetworkCatalogCase(unittest.TestCase):
             self.catalog.search_routes("", limit=101)
         with self.assertRaises(CatalogLimitError):
             self.catalog.search_routes("x" * 101)
+
+    def test_planning_stop_reference_resolves_one_selected_static_stop(self):
+        self.catalog.import_stops_csv(
+            csv_bytes(
+                STOP_COLUMNS,
+                [
+                    stop_row(
+                        **{
+                            "정류장번호": "OCB276000024",
+                            "정류장명": "옥천버스앞",
+                            "도시코드": "33330",
+                            "위도": "36.299573",
+                            "경도": "127.566392",
+                        }
+                    )
+                ],
+            ),
+            source_url="https://data.go.kr/stops.csv",
+            source_date="2026-08-30",
+        )
+
+        reference = self.catalog.planning_stop_reference(
+            node_id="OCB276000024", city_code="33330"
+        )
+
+        self.assertEqual(reference["node_name"], "옥천버스앞")
+        self.assertEqual(reference["latitude"], 36.299573)
+        self.assertIsNone(
+            self.catalog.planning_stop_reference(
+                node_id="OCB276000024", city_code="25"
+            )
+        )
+
+    def test_planning_stop_reference_preserves_exact_topology_stop_without_coordinates(self):
+        self.catalog.hydrate_route_sequence(
+            city_code="25",
+            route_id="NO-COORDINATES",
+            ordered_stops=[
+                {"node_id": "EXACT-A", "node_name": "좌표 미제공 기점", "node_order": 1},
+                {"node_id": "EXACT-B", "node_name": "좌표 미제공 종점", "node_order": 2},
+            ],
+            source="TEST",
+            captured_at="2026-08-31T00:00:00Z",
+        )
+
+        reference = self.catalog.planning_stop_reference(
+            node_id="EXACT-A", city_code="25"
+        )
+
+        self.assertEqual(reference["node_name"], "좌표 미제공 기점")
+        self.assertIsNone(reference["latitude"])
+        self.assertIsNone(reference["longitude"])
+
+    def test_sqlite_planning_context_is_lightweight_and_indexes_are_present(self):
+        self.catalog.hydrate_route_sequence(
+            city_code="25",
+            route_id="ROUTE-A",
+            ordered_stops=[
+                {
+                    "node_id": "NODE-A",
+                    "node_name": "기점",
+                    "node_order": 1,
+                    "latitude": 36.5,
+                    "longitude": 127.3,
+                },
+                {
+                    "node_id": "NODE-B",
+                    "node_name": "종점",
+                    "node_order": 2,
+                    "latitude": 36.51,
+                    "longitude": 127.31,
+                },
+            ],
+            source="TEST",
+            captured_at="2026-08-31T00:00:00Z",
+        )
+
+        context = self.catalog.planning_route_context([("25", "ROUTE-A")])
+
+        self.assertEqual(context.route_sequences, ())
+        self.assertEqual(context.stops, ())
+        self.assertEqual(context.routes[0].route_no, "ROUTE-A")
+        with self.catalog.connect() as connection:
+            indexes = {
+                str(row["name"])
+                for table in ("route_sequence_stops", "active_route_sequences")
+                for row in connection.execute(f"PRAGMA index_list({table})")
+            }
+        self.assertTrue(
+            {
+                "idx_active_route_sequences_sequence",
+                "idx_route_sequence_stops_node_lookup",
+                "idx_route_sequence_stops_coordinate_lookup",
+            }.issubset(indexes)
+        )
+
+    def test_stop_search_uses_sequential_filter_plans_for_contains_queries(self):
+        """Avoid cold-cache random reads through composite PK indexes.
+
+        Stop autocomplete uses a leading-wildcard contains query.  Seeking the
+        active source in ``catalog_stops`` or looping over every sequence via
+        the composite route-stop index causes one table lookup per row.  The
+        explicit scans below are bounded by the catalog size and keep reads
+        sequential; this plan assertion prevents SQLite statistics from
+        silently reintroducing that I/O amplification.
+        """
+
+        plans: dict[str, list[str]] = {}
+        original_connect = self.catalog.connect
+
+        class PlanRecordingConnection:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def execute(self, sql, params=()):
+                label = None
+                if "FROM catalog_stops cs NOT INDEXED WHERE" in sql:
+                    label = "static"
+                elif "FROM route_sequence_stops s NOT INDEXED" in sql:
+                    label = "hydrated"
+                if label:
+                    plans[label] = [
+                        str(row[3])
+                        for row in self.connection.execute(
+                            "EXPLAIN QUERY PLAN " + sql, params
+                        )
+                    ]
+                return self.connection.execute(sql, params)
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+        @contextmanager
+        def recording_connect():
+            with original_connect() as connection:
+                yield PlanRecordingConnection(connection)
+
+        with patch.object(self.catalog, "connect", recording_connect):
+            results = self.catalog.search_stops("역", limit=8)
+
+        self.assertLessEqual(len(results), 8)
+        self.assertIn("static", plans)
+        self.assertIn("hydrated", plans)
+        self.assertTrue(any(detail == "SCAN cs" for detail in plans["static"]))
+        self.assertTrue(any(detail == "SCAN s" for detail in plans["hydrated"]))
+        self.assertFalse(
+            any(
+                "SEARCH cs USING INDEX sqlite_autoindex_catalog_stops_1" in detail
+                for detail in plans["static"]
+            )
+        )
+        self.assertFalse(
+            any(
+                "SEARCH s USING INDEX sqlite_autoindex_route_sequence_stops_2" in detail
+                for detail in plans["hydrated"]
+            )
+        )
+
+    def test_sqlite_planning_context_uses_official_municipal_route_label(self):
+        source = json.dumps(
+            {
+                "dataset": "서울시 버스 노선별 정류소 정보",
+                "route_name": "N61",
+                "source_date": "2026-08-04",
+            },
+            ensure_ascii=False,
+        )
+        self.catalog.hydrate_route_sequence(
+            city_code="11",
+            route_id="100100589",
+            ordered_stops=[
+                {"node_id": "100000001", "node_name": "기점", "node_order": 1},
+                {"node_id": "100000002", "node_name": "종점", "node_order": 2},
+            ],
+            source=source,
+            captured_at="2026-08-04T00:00:00Z",
+        )
+
+        context = self.catalog.planning_route_context([("11", "100100589")])
+
+        self.assertEqual(context.routes[0].route_no, "N61")
+        self.assertEqual(self.catalog.planning_snapshot().routes[0].route_no, "N61")
 
     def test_malicious_or_conflicting_csv_is_rejected_transactionally(self):
         self.catalog.import_stops_csv(

@@ -109,7 +109,7 @@ class CurrentRouteFlowCase(unittest.TestCase):
         with (
             patch.object(
                 self.service.network_catalog,
-                "planning_snapshot",
+                "planning_route_context",
                 return_value=self.snapshot,
             ),
             patch.object(
@@ -127,13 +127,34 @@ class CurrentRouteFlowCase(unittest.TestCase):
                     "coverage_ratio": 1.0,
                 },
             ),
-            patch.object(self.service.journey_planner, "build_graph"),
             patch.object(
-                self.service.journey_planner, "plan", return_value=planned
+                self.service.sqlite_journey_planner,
+                "plan",
+                return_value=planned,
             ) as structural_plan,
         ):
             response = self.service.generate_journeys(self._request())
         return response, schedule_plan, structural_plan
+
+    @staticmethod
+    def _reboarding_steps() -> list[dict[str, object]]:
+        def stop(node_id: str) -> dict[str, str]:
+            return {
+                "city_code": "12",
+                "node_id": node_id,
+                "node_name": node_id,
+            }
+
+        return [
+            {"kind": "ride", "route_id": "A", "route_no": "A호", "from": stop("O"), "to": stop("A1")},
+            {"kind": "ride", "route_id": "A", "route_no": "A호", "from": stop("A1"), "to": stop("J")},
+            {"kind": "transfer", "route_id": None, "from": stop("J"), "to": stop("J")},
+            {"kind": "ride", "route_id": "C", "route_no": "C호", "from": stop("J"), "to": stop("C1")},
+            {"kind": "ride", "route_id": "C", "route_no": "C호", "from": stop("C1"), "to": stop("K")},
+            {"kind": "transfer", "route_id": None, "from": stop("K"), "to": stop("K")},
+            {"kind": "ride", "route_id": "A", "route_no": "A호", "from": stop("K"), "to": stop("A2")},
+            {"kind": "ride", "route_id": "A", "route_no": "A호", "from": stop("A2"), "to": stop("D")},
+        ]
 
     def test_sources_accepts_origin_status_and_keeps_status_alias(self) -> None:
         current = self.service.sources({"origin_status": "VERIFIED_PRIOR_ONLY"})
@@ -252,6 +273,66 @@ class CurrentRouteFlowCase(unittest.TestCase):
         self.assertEqual(response["preference_applied"], "low_transfer")
         self.assertFalse(response["preference_ignored"])
         self.assertEqual(response["graph"]["algorithm"], "directed_dijkstra")
+
+    def test_structural_adapter_preserves_same_route_reboarding(self) -> None:
+        self.structural = {
+            **self.structural,
+            "route_ids": ["A", "C", "A"],
+            "transfers": 2,
+            "steps": self._reboarding_steps(),
+        }
+
+        response, schedule_plan, structural_plan = self._generate()
+
+        schedule_plan.assert_not_called()
+        structural_plan.assert_called_once()
+        candidate = response["candidates"][0]
+        self.assertEqual(candidate["route_ids"], ["A", "C", "A"])
+        self.assertEqual(candidate["route_count"], 3)
+        self.assertEqual(candidate["transfer_count"], 2)
+        self.assertEqual(candidate["title"], "3개 시내버스로 잇기")
+
+    def test_scheduled_adapter_preserves_same_route_reboarding(self) -> None:
+        self.service._source_origins["ktdb-gtfs-2024"] = {
+            **self.service._source_origins["ktdb-gtfs-2024"],
+            "origin_status": "VERIFIED_SCHEDULE_ORIGIN",
+            "ingestion_status": "ACTIVE",
+            "projection_allowed": True,
+        }
+        scheduled = {
+            "status": "READY",
+            "reason": None,
+            "schedule": {"status": "READY", "feed_id": "current-feed"},
+            "graph": {"algorithm": "bounded_time_dependent_dijkstra"},
+            "alternatives": [
+                {
+                    "status": "READY",
+                    "transfers": 2,
+                    "walking_m": 0,
+                    "route_labels": {"A": "A호", "C": "C호"},
+                    "steps": self._reboarding_steps(),
+                    "coverage": {
+                        "structural": 1.0,
+                        "schedule_routes": 3,
+                        "total_routes": 3,
+                    },
+                }
+            ],
+        }
+
+        response, schedule_plan, structural_plan = self._generate(scheduled)
+
+        schedule_plan.assert_called_once()
+        structural_plan.assert_not_called()
+        candidate = response["candidates"][0]
+        self.assertEqual(candidate["route_ids"], ["A", "C", "A"])
+        self.assertEqual(
+            [route["route_no"] for route in candidate["routes"]],
+            ["A호", "C호", "A호"],
+        )
+        self.assertEqual(candidate["route_count"], 3)
+        self.assertEqual(candidate["transfer_count"], 2)
+        self.assertEqual(candidate["title"], "3개 시내버스로 가장 빠르게 잇기")
 
 
 if __name__ == "__main__":

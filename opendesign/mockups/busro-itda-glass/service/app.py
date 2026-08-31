@@ -15,9 +15,10 @@ from typing import Any
 
 from config import Settings
 from db import IdempotencyConflict, Store
-from journey_planner import JourneyPlanner, PlannerError
+from journey_planner import JourneyPlanner, PlannerError, PlannerLimitError
 from network_catalog import CatalogError, NetworkCatalog
 from osm import OSMError, resolve_route_geometry
+from sqlite_journey_planner import PlannerBusyError, SQLiteJourneyPlanner
 from source_registry import RegistryError, load_default_registry
 from tago import (
     TagoError,
@@ -148,7 +149,9 @@ class BusroService:
         self.store = Store(settings.db_path)
         self.network_catalog = NetworkCatalog(settings.network_catalog_path, clock=clock)
         self.journey_planner = JourneyPlanner()
-        self._planner_graph_lock = threading.Lock()
+        self.sqlite_journey_planner = SQLiteJourneyPlanner(
+            settings.network_catalog_path
+        )
         self.source_registry = load_default_registry()
         registry_sources = [
             source
@@ -458,10 +461,14 @@ class BusroService:
         topology_targets = int(topology_coverage.get("targets") or 0)
         topology_complete = int(topology_coverage.get("complete") or 0)
         hydrated_sequences = int(topology_coverage.get("hydrated_active_sequences") or 0)
+        discovery_complete = bool(
+            (topology_coverage.get("discovery") or {}).get("complete")
+        )
         nationwide_graph_complete = (
-            topology_targets > 0
+            discovery_complete
+            and topology_targets > 0
             and topology_complete == topology_targets
-            and hydrated_sequences >= topology_complete
+            and hydrated_sequences == topology_targets
         )
         return {
             "ok": True,
@@ -669,7 +676,6 @@ class BusroService:
             )
             if current_schedule_allowed:
                 try:
-                    snapshot = self.network_catalog.planning_snapshot()
                     scheduled = self.network_catalog.plan_gtfs_schedule(
                         provider=schedule_provider,
                         schedule_source_id=schedule_source_id,
@@ -715,6 +721,20 @@ class BusroService:
                     details={"retry_after_seconds": 1},
                 )
             if scheduled.get("status") == "READY":
+                scheduled_route_keys = {
+                    (
+                        str((step.get("from") or {}).get("city_code") or ""),
+                        str(step.get("route_id") or ""),
+                    )
+                    for candidate in scheduled.get("alternatives") or []
+                    for step in candidate.get("steps") or []
+                    if step.get("kind") == "ride"
+                    and (step.get("from") or {}).get("city_code")
+                    and step.get("route_id")
+                }
+                snapshot = self.network_catalog.planning_route_context(
+                    scheduled_route_keys
+                )
                 scheduled_candidates = self._public_scheduled_candidates(
                     scheduled, snapshot
                 )
@@ -739,13 +759,15 @@ class BusroService:
                     ),
                 }
         try:
-            snapshot = self.network_catalog.planning_snapshot()
-            # One bounded graph build per catalog revision/radius; path searches
-            # can then run concurrently over the immutable cached graph.
-            with self._planner_graph_lock:
-                self.journey_planner.build_graph(snapshot, transfer_radius_m=transfer_radius)
-            planned = self.journey_planner.plan(
-                snapshot,
+            origin_access = self.network_catalog.planning_stop_reference(
+                node_id=body.get("from_stop_id"),
+                city_code=body.get("from_city_code") or None,
+            )
+            destination_access = self.network_catalog.planning_stop_reference(
+                node_id=body.get("to_stop_id"),
+                city_code=body.get("to_city_code") or None,
+            )
+            planned = self.sqlite_journey_planner.plan(
                 origin_node_id=body.get("from_stop_id"),
                 destination_node_id=body.get("to_stop_id"),
                 origin_city_code=body.get("from_city_code") or None,
@@ -753,14 +775,86 @@ class BusroService:
                 transfer_radius_m=transfer_radius,
                 alternatives=alternatives,
                 preference=preference,
-                evidence_loader=lambda route_ids: self.store.journey_evidence(route_ids),
+                origin_access=origin_access,
+                destination_access=destination_access,
             )
+            route_ids = tuple(
+                sorted(
+                    {
+                        str(route_id)
+                        for candidate in planned.get("alternatives", ())
+                        for route_id in candidate.get("route_ids", ())
+                    }
+                )
+            )
+            loaded_service, loaded_passages = self.store.journey_evidence(route_ids)
+            if planned.get("alternatives"):
+                planned["alternatives"] = [
+                    self.journey_planner.decorate_structural_candidate(
+                        candidate,
+                        criterion=str(
+                            candidate.get("criterion") or "minimum_transfers"
+                        ),
+                        service_evidence=loaded_service,
+                        passage_history=loaded_passages,
+                    )
+                    for candidate in planned["alternatives"][:alternatives]
+                ]
+                if any(
+                    candidate.get("status") == "DATA_GAP"
+                    for candidate in planned["alternatives"]
+                ):
+                    planned["status"] = "DATA_GAP"
+                    planned["reason"] = "EVIDENCE_INCOMPLETE"
+            route_keys = {
+                (
+                    str((step.get("from") or {}).get("city_code") or ""),
+                    str(step.get("route_id") or ""),
+                )
+                for candidate in planned.get("alternatives", ())
+                for step in candidate.get("steps", ())
+                if step.get("kind") == "ride"
+                and (step.get("from") or {}).get("city_code")
+                and step.get("route_id")
+            }
+            snapshot = self.network_catalog.planning_route_context(route_keys)
             topology_coverage = self.network_catalog.topology_coverage(provider="TAGO")
+        except PlannerBusyError as exc:
+            raise AppError(
+                "JOURNEY_PLANNER_BUSY",
+                "Journey search capacity is busy; retry shortly",
+                status=503,
+                details={"retry_after_seconds": 1},
+            ) from exc
+        except PlannerLimitError as exc:
+            raise AppError(
+                "SEARCH_BUDGET_REACHED",
+                "Journey search reached its bounded processing limit",
+                status=429,
+            ) from exc
         except (CatalogError, PlannerError) as exc:
             raise AppError("JOURNEY_PLANNER_INPUT_INVALID", str(exc), status=422) from exc
 
         graph_metadata = planned.get("graph")
         if isinstance(graph_metadata, dict):
+            graph_metadata.setdefault("version", snapshot.version)
+            graph_metadata.setdefault("catalog_version", snapshot.version)
+            graph_metadata.setdefault(
+                "topology_scope", "all_active_hydrated_route_sequences"
+            )
+            graph_metadata.setdefault("immutable", True)
+            graph_metadata.setdefault(
+                "scaling",
+                {
+                    "graph_cache": "NONE_ON_DEMAND_SQLITE",
+                    "transfer_index": "SQLITE_COORDINATE_AND_NODE_INDEXES",
+                    "max_queries_per_request": self.sqlite_journey_planner.max_queries,
+                    "max_route_state_expansions": self.sqlite_journey_planner.max_expansions,
+                    "max_parallel_searches": self.sqlite_journey_planner.max_parallel_searches,
+                    "result_cache": "CATALOG_REVISION_SCOPED_PROCESS_LRU",
+                    "max_result_cache_entries": self.sqlite_journey_planner.result_cache_entries,
+                },
+            )
             graph_coverage = graph_metadata.get("coverage")
             if not isinstance(graph_coverage, dict):
                 graph_coverage = {}
@@ -768,6 +862,9 @@ class BusroService:
             topology_targets = int(topology_coverage.get("targets") or 0)
             topology_complete = int(topology_coverage.get("complete") or 0)
             hydrated_sequences = int(topology_coverage.get("hydrated_active_sequences") or 0)
+            discovery_complete = bool(
+                (topology_coverage.get("discovery") or {}).get("complete")
+            )
             graph_coverage.update(
                 {
                     "ingest_targets": topology_targets,
@@ -778,14 +875,19 @@ class BusroService:
             )
             if topology_targets > 0:
                 complete = (
-                    topology_complete == topology_targets
-                    and hydrated_sequences >= topology_complete
+                    discovery_complete
+                    and topology_complete == topology_targets
+                    and hydrated_sequences == topology_targets
                 )
                 graph_coverage.update(
                     {
                         "status": "COMPLETE" if complete else "PARTIAL",
                         "nationwide_topology_complete": complete,
-                        "catalog_routes": topology_targets,
+                        "discovered_targets": topology_targets,
+                        "completed_targets": topology_complete,
+                        "discovery_complete": discovery_complete,
+                        "denominator_routes": topology_targets,
+                        "basis": "TAGO_DISCOVERED_TARGETS",
                         "missing_routes": max(0, topology_targets - hydrated_sequences),
                     }
                 )
@@ -798,17 +900,11 @@ class BusroService:
         }
         candidates: list[dict[str, Any]] = []
         for index, candidate in enumerate(planned.get("alternatives", [])):
-            seen: set[tuple[str, str]] = set()
             routes: list[dict[str, Any]] = []
-            for step in candidate.get("steps", []):
-                if step.get("kind") != "ride" or not step.get("route_id"):
-                    continue
-                city = str(step.get("from", {}).get("city_code") or "")
-                route_id = str(step["route_id"])
+            for step, city, route_id in self._ordered_ride_occurrences(
+                candidate.get("steps", [])
+            ):
                 key = (city, route_id)
-                if key in seen:
-                    continue
-                seen.add(key)
                 catalog_route = route_lookup.get(key)
                 routes.append(
                     {
@@ -904,24 +1000,47 @@ class BusroService:
         return response
 
     @staticmethod
+    def _ordered_ride_occurrences(
+        steps: Any,
+    ) -> list[tuple[dict[str, Any], str, str]]:
+        """Return one entry per boarding while retaining journey order.
+
+        Some planners expose one ride step per stop-to-stop edge.  Adjacent
+        edges on the same route are one boarding, but the same route boarded
+        again after a transfer is a distinct leg and must not be removed.
+        """
+        occurrences: list[tuple[dict[str, Any], str, str]] = []
+        active_key: tuple[str, str] | None = None
+        for step in steps or []:
+            if (
+                not isinstance(step, dict)
+                or step.get("kind") != "ride"
+                or not step.get("route_id")
+            ):
+                active_key = None
+                continue
+            city = str((step.get("from") or {}).get("city_code") or "")
+            route_id = str(step["route_id"])
+            key = (city, route_id)
+            if key == active_key:
+                continue
+            occurrences.append((step, city, route_id))
+            active_key = key
+        return occurrences
+
+    @staticmethod
     def _public_scheduled_candidates(
         scheduled: dict[str, Any], snapshot: Any
     ) -> list[dict[str, Any]]:
         route_lookup = {(item.city_code, item.route_id): item for item in snapshot.routes}
         public: list[dict[str, Any]] = []
         for index, candidate in enumerate(scheduled.get("alternatives") or []):
-            seen: set[tuple[str, str]] = set()
             routes: list[dict[str, Any]] = []
             route_labels = candidate.get("route_labels") or {}
-            for step in candidate.get("steps") or []:
-                if step.get("kind") != "ride" or not step.get("route_id"):
-                    continue
-                city = str((step.get("from") or {}).get("city_code") or "")
-                route_id = str(step["route_id"])
+            for step, city, route_id in BusroService._ordered_ride_occurrences(
+                candidate.get("steps") or []
+            ):
                 key = (city, route_id)
-                if key in seen:
-                    continue
-                seen.add(key)
                 catalog_route = route_lookup.get(key)
                 routes.append(
                     {
@@ -1020,7 +1139,7 @@ class BusroService:
         allow_estimate = body.get("allow_road_estimate", True)
         if not isinstance(allow_estimate, bool):
             raise AppError("INVALID_ALLOW_ESTIMATE", "allow_road_estimate must be boolean")
-        cache_key = "osm:v2:" + canonical_hash([route_ref, sanitized, allow_estimate])
+        cache_key = "osm:v3:" + canonical_hash([route_ref, sanitized, allow_estimate])
         cached = self.store.get_cache(cache_key)
         if cached:
             return {**cached, "cached": True}
@@ -1033,7 +1152,7 @@ class BusroService:
                 result = resolve_route_geometry(
                     route_ref=route_ref,
                     stops=sanitized,
-                    timeout_seconds=min(15.0, max(2.0, self.settings.tago_timeout_seconds * 2)),
+                    timeout_seconds=20.0,
                     allow_road_estimate=allow_estimate,
                 )
             except OSMError as exc:
@@ -1190,7 +1309,15 @@ class BusroService:
                 "arrivals": arrivals,
                 "upstream": metadata,
             }
-            self.store.put_cache(cache_key, result, self.settings.cache_ttl_seconds)
+            # Collection explicitly requests a fresh upstream observation and
+            # persists that observation as a snapshot immediately afterwards.
+            # Writing the same payload to the response cache first doubles the
+            # serialized SQLite write transactions under a 200-request burst.
+            # Match the position path: only ordinary reads populate the cache.
+            if not bypass_cache:
+                self.store.put_cache(
+                    cache_key, result, self.settings.cache_ttl_seconds
+                )
             return result
 
         flight_key = ("fresh:" if bypass_cache else "cached:") + cache_key

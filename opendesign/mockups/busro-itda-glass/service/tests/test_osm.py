@@ -47,6 +47,13 @@ def road_payload(index: int = 0) -> dict:
     }
 
 
+def geometry_points(result: dict) -> list[list[float]]:
+    geometry = result["geometry"]
+    if geometry["type"] == "LineString":
+        return list(geometry["coordinates"])
+    return [point for line in geometry["coordinates"] for point in line]
+
+
 class FakeResponse:
     def __init__(self, payload: dict):
         self.payload = json.dumps(payload).encode("utf-8")
@@ -95,6 +102,123 @@ class OSMCase(unittest.TestCase):
         self.assertEqual(request.full_url, "https://overpass-api.de/api/interpreter")
         self.assertNotIn("serviceKey", request.data.decode("utf-8"))
         self.assertIn("out body geom", parse_qs(request.data.decode("utf-8"))["data"][0])
+
+    @patch("osm.urlopen")
+    def test_bus_relation_is_clipped_to_requested_boarding_corridor(self, mocked) -> None:
+        requested = [STOPS[1], STOPS[2]]
+        mocked.return_value = FakeResponse(
+            {
+                "elements": [
+                    {
+                        "type": "relation",
+                        "id": 991,
+                        "tags": {"name": "long 991", "ref": "991"},
+                        "members": [
+                            {
+                                "type": "way",
+                                "geometry": [
+                                    {"lat": 36.72, "lon": 127.18},
+                                    {"lat": 36.601, "lon": 127.298},
+                                    {"lat": 36.585, "lon": 127.305},
+                                    {"lat": 36.565, "lon": 127.315},
+                                    {"lat": 36.42, "lon": 127.46},
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        result = fetch_bus_relation(route_ref="991", stops=requested)
+
+        self.assertIsNotNone(result)
+        points = geometry_points(result)
+        self.assertEqual(points[0], [127.305, 36.585])
+        self.assertEqual(points[-1], [127.315, 36.565])
+        self.assertGreaterEqual(min(point[0] for point in points), 127.3049)
+        self.assertLessEqual(max(point[0] for point in points), 127.3151)
+        self.assertTrue(result["relation"]["segment_clipped"])
+
+    @patch("osm.urlopen")
+    def test_bus_relation_clipping_handles_reversed_member_direction(self, mocked) -> None:
+        requested = [STOPS[1], STOPS[2]]
+        mocked.return_value = FakeResponse(
+            {
+                "elements": [
+                    {
+                        "type": "relation",
+                        "id": 607,
+                        "tags": {"name": "reverse 607", "ref": "607"},
+                        "members": [
+                            {
+                                "type": "way",
+                                "geometry": [
+                                    {"lat": 36.42, "lon": 127.46},
+                                    {"lat": 36.565, "lon": 127.315},
+                                    {"lat": 36.585, "lon": 127.305},
+                                    {"lat": 36.601, "lon": 127.298},
+                                    {"lat": 36.72, "lon": 127.18},
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        result = fetch_bus_relation(route_ref="607", stops=requested)
+
+        self.assertIsNotNone(result)
+        points = geometry_points(result)
+        self.assertEqual(points[0], [127.305, 36.585])
+        self.assertEqual(points[-1], [127.315, 36.565])
+        self.assertEqual(result["relation"]["segment_direction"], "reverse_relation_order")
+
+    @patch("osm.urlopen")
+    def test_disconnected_relation_fragments_are_not_joined(self, mocked) -> None:
+        requested = [
+            {"latitude": 36.600, "longitude": 127.300},
+            {"latitude": 36.500, "longitude": 127.400},
+        ]
+        mocked.return_value = FakeResponse(
+            {
+                "elements": [
+                    {
+                        "type": "relation",
+                        "id": 1,
+                        "tags": {"ref": "B1"},
+                        "members": [
+                            {
+                                "type": "way",
+                                "geometry": [
+                                    {"lat": 36.600, "lon": 127.300},
+                                    {"lat": 36.595, "lon": 127.305},
+                                ],
+                            },
+                            {
+                                "type": "way",
+                                "geometry": [
+                                    {"lat": 37.200, "lon": 128.000},
+                                    {"lat": 37.205, "lon": 128.005},
+                                ],
+                            },
+                            {
+                                "type": "way",
+                                "geometry": [
+                                    {"lat": 36.505, "lon": 127.395},
+                                    {"lat": 36.500, "lon": 127.400},
+                                ],
+                            },
+                        ],
+                    }
+                ]
+            }
+        )
+
+        result = fetch_bus_relation(route_ref="B1", stops=requested)
+
+        self.assertIsNone(result)
 
     @patch("osm.urlopen")
     def test_empty_relation_falls_back_to_labelled_road_estimate(self, mocked) -> None:
@@ -146,6 +270,23 @@ class OSMCase(unittest.TestCase):
         self.assertEqual(result["geometry_source"], "osm_road_route_estimate")
         self.assertEqual(result["precision"], "ordered_stops_road_estimate")
         self.assertEqual(read_json.call_count, 6)  # one Overpass call and five overlapping OSRM chunks
+
+    def test_relation_lookup_has_a_stage_budget_so_road_fallback_keeps_time(self) -> None:
+        road_result = {
+            "ok": True,
+            "geometry_source": "osm_road_route_estimate",
+            "geometry": {"type": "LineString", "coordinates": [[127.2, 36.5], [127.3, 36.6]]},
+        }
+        with (
+            patch("osm.fetch_bus_relation", return_value=None) as relation,
+            patch("osm.fetch_road_estimate", return_value=road_result) as road,
+        ):
+            result = resolve_route_geometry(
+                route_ref="991", stops=STOPS, timeout_seconds=20.0
+            )
+        self.assertEqual(result, road_result)
+        self.assertEqual(relation.call_args.kwargs["timeout_seconds"], 8.0)
+        self.assertEqual(road.call_args.kwargs["timeout_seconds"], 20.0)
 
     def test_total_deadline_stops_cumulative_osrm_chunks(self) -> None:
         clock = {"now": 100.0}

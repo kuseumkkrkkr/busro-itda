@@ -17,6 +17,7 @@ import getpass
 import ipaddress
 import json
 from pathlib import Path
+import re
 import socket
 import sys
 import threading
@@ -28,6 +29,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 import uuid
 
 from network_catalog import CatalogError, CatalogLimitError, CatalogValidationError, NetworkCatalog
+from route_topology_anomalies import single_point_route_spike
 from tago import TagoError, fetch_catalog, normalize_catalog
 
 
@@ -94,6 +96,14 @@ FATAL_ACCESS_CODES = frozenset(
         "SERVICE_KEY_IS_NOT_REGISTERED_ERROR",
     }
 )
+UPSTREAM_DAILY_QUOTA_CODES = frozenset(
+    {
+        "22",
+        "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR",
+    }
+)
+_ONLY_ROUTE_CITY_CODE = re.compile(r"^[0-9A-Za-z_.-]{1,96}$")
+_ONLY_ROUTE_ID = re.compile(r"^[0-9A-Za-z가-힣_.:-]{1,96}$")
 
 
 class RequestBudgetExhausted(RuntimeError):
@@ -108,6 +118,38 @@ class IngestStopped(RuntimeError):
 
 class TopologyProcessLocked(RuntimeError):
     pass
+
+
+class SinglePointRouteSpikeQuarantined(RuntimeError):
+    """The target's bounded anomaly evidence is already persisted."""
+
+
+def _only_route_target(value: str) -> tuple[str, str]:
+    city_code, separator, route_id = str(value).partition(":")
+    if (
+        not separator
+        or not _ONLY_ROUTE_CITY_CODE.fullmatch(city_code)
+        or not _ONLY_ROUTE_ID.fullmatch(route_id)
+    ):
+        raise argparse.ArgumentTypeError(
+            "--only-route must use CITY_CODE:ROUTE_ID with valid TAGO identifiers"
+        )
+    return city_code, route_id
+
+
+class _AppendUniqueOnlyRoute(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: tuple[str, str],
+        option_string: str | None = None,
+    ) -> None:
+        selected = list(getattr(namespace, self.dest, None) or ())
+        if values in selected:
+            parser.error(f"duplicate --only-route target: {values[0]}:{values[1]}")
+        selected.append(values)
+        setattr(namespace, self.dest, selected)
 
 
 @contextmanager
@@ -457,6 +499,8 @@ def _public_tago_message(code: str) -> str:
     """Return fixed text so an upstream body can never persist a key/query."""
     if code in FATAL_ACCESS_CODES:
         return "TAGO route/station API authorization is unavailable"
+    if code in UPSTREAM_DAILY_QUOTA_CODES:
+        return "TAGO daily request quota is exhausted"
     if code == "TAGO_TIMEOUT":
         return "TAGO request timed out"
     return "TAGO request failed"
@@ -474,6 +518,7 @@ class IngestConfig:
     trust_catalog_identifiers: bool = False
     refresh_complete: bool = False
     workers: int = 1
+    only_routes: tuple[tuple[str, str], ...] = ()
 
     def validate(self) -> None:
         if not 1 <= self.request_budget <= 100_000:
@@ -494,8 +539,46 @@ class IngestConfig:
             raise ValueError(
                 "catalog mode requires --trust-catalog-identifiers after provider-namespace verification"
             )
-        if not 1 <= self.workers <= 8:
-            raise ValueError("workers must be 1..8")
+        if not 1 <= self.workers <= 16:
+            raise ValueError("workers must be 1..16")
+        validated_routes: list[tuple[str, str]] = []
+        for target in self.only_routes:
+            if not isinstance(target, tuple) or len(target) != 2:
+                raise ValueError("only_routes must contain (city_code, route_id) pairs")
+            city_code, route_id = target
+            if not isinstance(city_code, str) or not isinstance(route_id, str):
+                raise ValueError("only_routes identifiers must be strings")
+            if (
+                not _ONLY_ROUTE_CITY_CODE.fullmatch(city_code)
+                or not _ONLY_ROUTE_ID.fullmatch(route_id)
+            ):
+                raise ValueError(
+                    "--only-route must use CITY_CODE:ROUTE_ID with valid TAGO identifiers"
+                )
+            validated_routes.append((city_code, route_id))
+        if len(set(validated_routes)) != len(validated_routes):
+            raise ValueError("duplicate --only-route target")
+        if self.only_routes and self.target_limit is not None:
+            raise ValueError("--target-limit cannot be combined with --only-route")
+
+
+class _SerializedCatalog:
+    """Serialize catalog calls while leaving network fetches concurrent."""
+
+    def __init__(self, catalog: NetworkCatalog, lock: threading.RLock):
+        self._catalog = catalog
+        self._lock = lock
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._catalog, name)
+        if not callable(attribute):
+            return attribute
+
+        def serialized(*args: Any, **kwargs: Any) -> Any:
+            with self._lock:
+                return attribute(*args, **kwargs)
+
+        return serialized
 
 
 class TopologyIngestor:
@@ -510,7 +593,8 @@ class TopologyIngestor:
         sleeper: Callable[[float], None] = time.sleep,
     ):
         config.validate()
-        self.catalog = catalog
+        self._catalog_lock = threading.RLock()
+        self.catalog = _SerializedCatalog(catalog, self._catalog_lock)
         self.fetcher = fetcher
         self.config = config
         self.clock = clock
@@ -588,7 +672,9 @@ class TopologyIngestor:
                 self._set_stop("BUDGET_EXHAUSTED")
                 raise
             except TagoError as exc:
-                if exc.code in FATAL_ACCESS_CODES:
+                if exc.code in UPSTREAM_DAILY_QUOTA_CODES:
+                    self._set_stop("BUDGET_EXHAUSTED")
+                elif exc.code in FATAL_ACCESS_CODES:
                     self._set_stop("DATA_GAP")
                 raise
             except Exception:
@@ -640,16 +726,21 @@ class TopologyIngestor:
                 )
                 raise
             except TagoError as exc:
+                quota_exhausted = exc.code in UPSTREAM_DAILY_QUOTA_CODES
                 self.catalog.update_topology_discovery(
                     provider=PROVIDER,
                     scope_key="cities",
-                    status="FAILED",
+                    status="DEFERRED" if quota_exhausted else "FAILED",
                     next_page=1,
                     total_count=None,
                     request_increment=1,
                     error_code=exc.code,
                     error_message=_public_tago_message(exc.code),
                 )
+                if quota_exhausted:
+                    raise RequestBudgetExhausted(
+                        "TAGO daily request quota exhausted"
+                    ) from exc
                 raise
 
         for city in self.catalog.topology_cities(provider=PROVIDER):
@@ -725,16 +816,21 @@ class TopologyIngestor:
                     )
                     raise
                 except TagoError as exc:
+                    quota_exhausted = exc.code in UPSTREAM_DAILY_QUOTA_CODES
                     self.catalog.update_topology_discovery(
                         provider=PROVIDER,
                         scope_key=scope,
-                        status="FAILED",
+                        status="DEFERRED" if quota_exhausted else "FAILED",
                         next_page=page,
                         total_count=progress.get("total_count"),
                         request_increment=1,
                         error_code=exc.code,
                         error_message=_public_tago_message(exc.code),
                     )
+                    if quota_exhausted:
+                        raise RequestBudgetExhausted(
+                            "TAGO daily request quota exhausted"
+                        ) from exc
                     if exc.code in FATAL_ACCESS_CODES:
                         raise
                     self.discovery_failures += 1
@@ -840,6 +936,33 @@ class TopologyIngestor:
             }
             for item in ordered
         ]
+        spike = next(
+            (
+                evidence
+                for stop_index in range(2, len(sequence_rows))
+                if (
+                    evidence := single_point_route_spike(
+                        sequence_rows[stop_index - 2],
+                        sequence_rows[stop_index - 1],
+                        sequence_rows[stop_index],
+                    )
+                )
+                is not None
+            ),
+            None,
+        )
+        if spike is not None:
+            active = self.catalog.active_route_sequence_info(
+                city_code=city_code, route_id=route_id
+            )
+            self.catalog.quarantine_topology_route_spike(
+                provider=PROVIDER,
+                city_code=city_code,
+                route_id=route_id,
+                expected_sequence_id=(active["sequence_id"] if active else None),
+                evidence=spike,
+            )
+            raise SinglePointRouteSpikeQuarantined
         digest = self.catalog.route_sequence_sha256(
             city_code=city_code, route_id=route_id, ordered_stops=sequence_rows
         )
@@ -885,6 +1008,11 @@ class TopologyIngestor:
             }
             self.catalog.update_topology_run(self.run_id, **counters)
             return "COMPLETE"
+        except SinglePointRouteSpikeQuarantined:
+            self.catalog.update_topology_run(
+                self.run_id, targets_processed=1, failed=1
+            )
+            return "PARTIAL"
         except IngestStopped as exc:
             budget_stop = exc.status == "BUDGET_EXHAUSTED"
             self.catalog.defer_or_fail_topology_target(
@@ -920,6 +1048,19 @@ class TopologyIngestor:
             )
             return "BUDGET_EXHAUSTED"
         except TagoError as exc:
+            if exc.code in UPSTREAM_DAILY_QUOTA_CODES:
+                self.catalog.defer_or_fail_topology_target(
+                    provider=PROVIDER,
+                    city_code=target["city_code"],
+                    route_id=target["route_id"],
+                    deferred=True,
+                    error_code=exc.code,
+                    error_message=_public_tago_message(exc.code),
+                )
+                self.catalog.update_topology_run(
+                    self.run_id, targets_processed=1, deferred=1
+                )
+                return "BUDGET_EXHAUSTED"
             status = "DATA_GAP" if exc.code in FATAL_ACCESS_CODES else "PARTIAL"
             if status == "DATA_GAP":
                 self._set_stop(status)
@@ -967,6 +1108,25 @@ class TopologyIngestor:
 
     def _run_targets_sequential(self) -> str:
         final_status = "COMPLETE"
+        if self.config.only_routes:
+            for city_code, route_id in self.config.only_routes:
+                if self._stop_event.is_set():
+                    break
+                target = self.catalog.claim_specific_topology_target(
+                    provider=PROVIDER,
+                    run_id=self.run_id,
+                    city_code=city_code,
+                    route_id=route_id,
+                    refresh_complete=self.config.refresh_complete,
+                )
+                if target is None:
+                    continue
+                outcome = self._process_target(target)
+                final_status = _stronger_status(final_status, outcome)
+                if self._stop_event.is_set():
+                    break
+            return final_status
+
         claimed = 0
         while self.config.target_limit is None or claimed < self.config.target_limit:
             if self._stop_event.is_set():
@@ -987,6 +1147,7 @@ class TopologyIngestor:
         final_status = "COMPLETE"
         claimed = 0
         exhausted = False
+        selected_targets = iter(self.config.only_routes)
         futures: dict[Any, Mapping[str, Any]] = {}
         with ThreadPoolExecutor(
             max_workers=self.config.workers,
@@ -1003,9 +1164,25 @@ class TopologyIngestor:
                             or claimed < self.config.target_limit
                         )
                     ):
-                        target = self.catalog.claim_topology_target(
-                            provider=PROVIDER, run_id=self.run_id
-                        )
+                        if self.config.only_routes:
+                            try:
+                                city_code, route_id = next(selected_targets)
+                            except StopIteration:
+                                exhausted = True
+                                break
+                            target = self.catalog.claim_specific_topology_target(
+                                provider=PROVIDER,
+                                run_id=self.run_id,
+                                city_code=city_code,
+                                route_id=route_id,
+                                refresh_complete=self.config.refresh_complete,
+                            )
+                            if target is None:
+                                continue
+                        else:
+                            target = self.catalog.claim_topology_target(
+                                provider=PROVIDER, run_id=self.run_id
+                            )
                         if target is None:
                             exhausted = True
                             break
@@ -1035,6 +1212,7 @@ class TopologyIngestor:
             target_limit=self.config.target_limit,
         )
         final_status = "COMPLETE"
+        explicit_error: str | None = None
         try:
             if self.config.target_source == "tago":
                 self._discover_tago_targets()
@@ -1045,7 +1223,7 @@ class TopologyIngestor:
                     provider=PROVIDER,
                     identifiers_verified_for_provider=self.config.trust_catalog_identifiers,
                 )
-            if self.config.refresh_complete:
+            if self.config.refresh_complete and not self.config.only_routes:
                 self.catalog.queue_topology_refresh(provider=PROVIDER)
             target_status = (
                 self._run_targets_sequential()
@@ -1066,6 +1244,10 @@ class TopologyIngestor:
             if status == "DATA_GAP":
                 self._set_stop(status)
             final_status = _stronger_status(final_status, status)
+        except CatalogValidationError as exc:
+            self._set_stop("FAILED")
+            final_status = "FAILED"
+            explicit_error = _safe_error_message(exc)
         except CatalogError:
             self._set_stop("FAILED")
             final_status = "FAILED"
@@ -1076,10 +1258,14 @@ class TopologyIngestor:
         if stopped is not None:
             final_status = _stronger_status(final_status, stopped)
         coverage = self.catalog.topology_coverage(provider=PROVIDER)
-        if final_status == "COMPLETE" and coverage["complete"] < coverage["targets"]:
+        if (
+            final_status == "COMPLETE"
+            and not self.config.only_routes
+            and coverage["complete"] < coverage["targets"]
+        ):
             final_status = "PARTIAL"
         run = self.catalog.finish_topology_run(self.run_id, final_status)
-        return {
+        result = {
             "ok": final_status in {"COMPLETE", "PARTIAL", "BUDGET_EXHAUSTED"},
             "run": run,
             "coverage": coverage,
@@ -1090,6 +1276,9 @@ class TopologyIngestor:
                 else None
             ),
         }
+        if explicit_error is not None:
+            result["error"] = explicit_error
+        return result
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1114,15 +1303,34 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-source", choices=("tago", "catalog"), default="tago")
     parser.add_argument("--trust-catalog-identifiers", action="store_true")
     parser.add_argument(
+        "--only-route",
+        action=_AppendUniqueOnlyRoute,
+        type=_only_route_target,
+        default=[],
+        metavar="CITY_CODE:ROUTE_ID",
+        help=(
+            "after target discovery, claim only this exact TAGO target; "
+            "repeat for multiple routes"
+        ),
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=1,
-        help="parallel route workers inside this one CLI process (1..8)",
+        help="parallel route workers inside this one CLI process (1..16)",
     )
     parser.add_argument(
         "--refresh-complete",
         action="store_true",
         help="re-fetch completed routes and store only changed sequence hashes",
+    )
+    parser.add_argument(
+        "--repair-corrupt-retries",
+        action="store_true",
+        help=(
+            "before ingestion, requeue only failed routes whose staged page metadata "
+            "proves pages from different retry responses were mixed"
+        ),
     )
     parser.add_argument("--timeout-seconds", type=float, default=8.0)
     return parser
@@ -1132,6 +1340,23 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if not 0.5 <= args.timeout_seconds <= 30:
         raise SystemExit("--timeout-seconds must be 0.5..30")
+    config = IngestConfig(
+        request_budget=args.request_budget,
+        requests_per_second=args.requests_per_second,
+        page_size=args.page_size,
+        max_route_pages=args.max_route_pages,
+        max_discovery_pages=args.max_discovery_pages,
+        target_limit=args.target_limit,
+        target_source=args.target_source,
+        trust_catalog_identifiers=args.trust_catalog_identifiers,
+        refresh_complete=args.refresh_complete,
+        workers=args.workers,
+        only_routes=tuple(args.only_route),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     if args.service_key_stdin:
         service_key = getpass.getpass("TAGO decoded service key: ")
         if not service_key:
@@ -1156,24 +1381,19 @@ def main(argv: list[str] | None = None) -> int:
         except TagoError as exc:
             raise SystemExit("Local Busro API is not live and TAGO-ready") from exc
         live_fetch = local_fetch
-    config = IngestConfig(
-        request_budget=args.request_budget,
-        requests_per_second=args.requests_per_second,
-        page_size=args.page_size,
-        max_route_pages=args.max_route_pages,
-        max_discovery_pages=args.max_discovery_pages,
-        target_limit=args.target_limit,
-        target_source=args.target_source,
-        trust_catalog_identifiers=args.trust_catalog_identifiers,
-        refresh_complete=args.refresh_complete,
-        workers=args.workers,
-    )
     try:
         with _catalog_process_lock(args.catalog_db):
             catalog = NetworkCatalog(args.catalog_db)
+            repaired_corrupt_retries = (
+                catalog.repair_corrupt_topology_retries(provider=PROVIDER)
+                if args.repair_corrupt_retries
+                else 0
+            )
             result = TopologyIngestor(
                 catalog=catalog, fetcher=live_fetch, config=config
             ).run()
+            if args.repair_corrupt_retries:
+                result["repaired_corrupt_retries"] = repaired_corrupt_retries
     except TopologyProcessLocked as exc:
         raise SystemExit(str(exc)) from None
     # The summary contains counters/status only; no key, URL, or query values.

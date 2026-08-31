@@ -30,6 +30,12 @@ MAX_OSRM_CHUNKS = 9
 MAX_CONCURRENT_GEOMETRY_REQUESTS = 3
 GEOMETRY_ADMISSION_WAIT_SECONDS = 0.25
 MAX_RESOLVE_TIMEOUT_SECONDS = 20.0
+MAX_RELATION_LOOKUP_SECONDS = 8.0
+MAX_RELATION_MEMBER_GAP_M = 500.0
+MAX_RELATION_ENDPOINT_SNAP_M = 1_200.0
+MAX_RELATION_STOP_SNAP_M = 1_500.0
+MAX_RELATION_ENDPOINT_CANDIDATES = 8
+MAX_RELATION_PAIR_CANDIDATES = 8
 KOREA_LAT_RANGE = (32.0, 39.8)
 KOREA_LON_RANGE = (123.0, 132.5)
 _GEOMETRY_ADMISSION = threading.BoundedSemaphore(MAX_CONCURRENT_GEOMETRY_REQUESTS)
@@ -226,7 +232,12 @@ def _relation_lines(element: dict[str, Any]) -> list[list[list[float]]]:
 
 
 def _relation_score(lines: list[list[list[float]]], ordered: list[tuple[float, float]]) -> float:
-    sampled = [(point[1], point[0]) for line in lines for point in line[:: max(1, len(line) // 100)]]
+    sampled: list[tuple[float, float]] = []
+    for line in lines:
+        stride = max(1, len(line) // 100)
+        sampled.extend((point[1], point[0]) for point in line[::stride])
+        if line and (line[-1][1], line[-1][0]) != sampled[-1]:
+            sampled.append((line[-1][1], line[-1][0]))
     if not sampled:
         return math.inf
     endpoint_distance = min(_haversine_m(ordered[0], point) for point in sampled)
@@ -236,6 +247,247 @@ def _relation_score(lines: list[list[list[float]]], ordered: list[tuple[float, f
     probes = ordered[:: max(1, len(ordered) // 8)]
     stop_distance = sum(min(_haversine_m(stop, point) for point in sampled) for stop in probes)
     return endpoint_distance * 2 + stop_distance
+
+
+def _endpoint_gap_m(left: list[list[float]], right: list[list[float]]) -> float:
+    return min(
+        _haversine_m((left_point[1], left_point[0]), (right_point[1], right_point[0]))
+        for left_point in (left[0], left[-1])
+        for right_point in (right[0], right[-1])
+    )
+
+
+def _orient_relation_group(group: list[list[list[float]]]) -> list[list[list[float]]]:
+    """Orient consecutive relation ways without merging their geometries."""
+    if len(group) <= 1:
+        return [[point[:] for point in line] for line in group]
+    costs: list[dict[int, tuple[float, int | None]]] = [
+        {0: (0.0, None), 1: (0.0, None)}
+    ]
+    for index in range(1, len(group)):
+        choices: dict[int, tuple[float, int | None]] = {}
+        for orientation in (0, 1):
+            current = group[index] if orientation == 0 else list(reversed(group[index]))
+            best: tuple[float, int | None] | None = None
+            for previous_orientation in (0, 1):
+                previous = (
+                    group[index - 1]
+                    if previous_orientation == 0
+                    else list(reversed(group[index - 1]))
+                )
+                cost = costs[index - 1][previous_orientation][0] + _haversine_m(
+                    (previous[-1][1], previous[-1][0]),
+                    (current[0][1], current[0][0]),
+                )
+                candidate = (cost, previous_orientation)
+                if best is None or candidate < best:
+                    best = candidate
+            assert best is not None
+            choices[orientation] = best
+        costs.append(choices)
+    orientation = min((0, 1), key=lambda value: costs[-1][value][0])
+    orientations = [orientation]
+    for index in range(len(group) - 1, 0, -1):
+        previous = costs[index][orientations[-1]][1]
+        assert previous is not None
+        orientations.append(previous)
+    orientations.reverse()
+    return [
+        [point[:] for point in (line if orientation == 0 else reversed(line))]
+        for line, orientation in zip(group, orientations)
+    ]
+
+
+def _relation_chains(lines: list[list[list[float]]]) -> list[list[list[list[float]]]]:
+    """Split a relation at spatially disconnected consecutive way members."""
+    chains: list[list[list[list[float]]]] = []
+    group: list[list[list[float]]] = []
+
+    def append_group() -> None:
+        if not group:
+            return
+        oriented = _orient_relation_group(group)
+        connected: list[list[list[float]]] = []
+        for line in oriented:
+            if connected and _haversine_m(
+                (connected[-1][-1][1], connected[-1][-1][0]),
+                (line[0][1], line[0][0]),
+            ) > MAX_RELATION_MEMBER_GAP_M:
+                chains.append(connected)
+                connected = []
+            connected.append(line)
+        if connected:
+            chains.append(connected)
+
+    for line in lines:
+        if group and _endpoint_gap_m(group[-1], line) > MAX_RELATION_MEMBER_GAP_M:
+            append_group()
+            group = []
+        group.append(line)
+    append_group()
+    return chains
+
+
+def _project_to_segment(
+    stop: tuple[float, float], start: list[float], end: list[float],
+) -> tuple[float, list[float], float]:
+    """Return segment fraction, projected ``[lon, lat]``, and distance."""
+    stop_lat, stop_lon = stop
+    mean_lat = math.radians((stop_lat + start[1] + end[1]) / 3)
+    lon_scale = max(0.01, math.cos(mean_lat))
+    vector_x = (end[0] - start[0]) * lon_scale
+    vector_y = end[1] - start[1]
+    point_x = (stop_lon - start[0]) * lon_scale
+    point_y = stop_lat - start[1]
+    denominator = vector_x * vector_x + vector_y * vector_y
+    fraction = 0.0 if denominator <= 1e-18 else (point_x * vector_x + point_y * vector_y) / denominator
+    fraction = min(1.0, max(0.0, fraction))
+    projected = [
+        start[0] + (end[0] - start[0]) * fraction,
+        start[1] + (end[1] - start[1]) * fraction,
+    ]
+    return fraction, projected, _haversine_m(stop, (projected[1], projected[0]))
+
+
+def _projection_candidates(
+    lines: list[list[list[float]]], stop: tuple[float, float], *, limit: int,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    offset_m = 0.0
+    for line_index, line in enumerate(lines):
+        for segment_index in range(len(line) - 1):
+            start, end = line[segment_index], line[segment_index + 1]
+            segment_m = _haversine_m((start[1], start[0]), (end[1], end[0]))
+            if segment_m <= 0:
+                continue
+            fraction, point, distance_m = _project_to_segment(stop, start, end)
+            candidate = {
+                "distance_m": distance_m,
+                "offset_m": offset_m + segment_m * fraction,
+                "line_index": line_index,
+                "segment_index": segment_index,
+                "point": point,
+            }
+            candidates.append(candidate)
+            candidates.sort(
+                key=lambda item: (
+                    item["distance_m"], item["offset_m"], item["line_index"], item["segment_index"]
+                )
+            )
+            if len(candidates) > limit:
+                candidates.pop()
+            offset_m += segment_m
+    return candidates
+
+
+def _dedupe_line(points: list[list[float]]) -> list[list[float]]:
+    result: list[list[float]] = []
+    for point in points:
+        if not result or point != result[-1]:
+            result.append(point)
+    return result
+
+
+def _clip_oriented_lines(
+    lines: list[list[list[float]]], start: dict[str, Any], end: dict[str, Any],
+) -> list[list[list[float]]]:
+    clipped: list[list[list[float]]] = []
+    start_line, end_line = int(start["line_index"]), int(end["line_index"])
+    for line_index in range(start_line, end_line + 1):
+        line = lines[line_index]
+        if start_line == end_line:
+            points = [start["point"]]
+            points.extend(line[int(start["segment_index"]) + 1 : int(end["segment_index"]) + 1])
+            points.append(end["point"])
+        elif line_index == start_line:
+            points = [start["point"], *line[int(start["segment_index"]) + 1 :]]
+        elif line_index == end_line:
+            points = [*line[: int(end["segment_index"]) + 1], end["point"]]
+        else:
+            points = list(line)
+        points = _dedupe_line(points)
+        if len(points) >= 2:
+            clipped.append(points)
+    return clipped
+
+
+def _probe_stops(ordered: list[tuple[float, float]], limit: int = 9) -> list[tuple[float, float]]:
+    if len(ordered) <= limit:
+        return ordered
+    indexes = {
+        round(index * (len(ordered) - 1) / (limit - 1))
+        for index in range(limit)
+    }
+    return [ordered[index] for index in sorted(indexes)]
+
+
+def _clip_relation_lines(
+    lines: list[list[list[float]]], ordered: list[tuple[float, float]],
+) -> tuple[list[list[list[float]]], float, str] | None:
+    """Clip a relation to the boarding/alighting corridor.
+
+    OSM relation ways remain separate MultiLineString members, so an unmapped
+    gap is never rendered as a fabricated straight connection.  Both traversal
+    directions are considered because relation member order may be opposite to
+    the official stop sequence supplied by the caller.
+    """
+    expected_m = sum(_haversine_m(left, right) for left, right in zip(ordered, ordered[1:]))
+    finalists: list[tuple[float, list[list[list[float]]], str]] = []
+    for chain in _relation_chains(lines):
+        directions = (
+            (chain, "relation_order"),
+            ([list(reversed(line)) for line in reversed(chain)], "reverse_relation_order"),
+        )
+        for oriented, direction in directions:
+            starts = _projection_candidates(
+                oriented, ordered[0], limit=MAX_RELATION_ENDPOINT_CANDIDATES
+            )
+            ends = _projection_candidates(
+                oriented, ordered[-1], limit=MAX_RELATION_ENDPOINT_CANDIDATES
+            )
+            pairs: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
+            for start in starts:
+                if start["distance_m"] > MAX_RELATION_ENDPOINT_SNAP_M:
+                    continue
+                for end in ends:
+                    interval_m = end["offset_m"] - start["offset_m"]
+                    if end["distance_m"] > MAX_RELATION_ENDPOINT_SNAP_M or interval_m <= 1.0:
+                        continue
+                    length_penalty = abs(
+                        math.log((interval_m + 50.0) / (expected_m + 50.0))
+                    ) * 500.0
+                    pairs.append(
+                        (
+                            (start["distance_m"] + end["distance_m"]) * 4.0 + length_penalty,
+                            start,
+                            end,
+                        )
+                    )
+            pairs.sort(key=lambda item: (item[0], item[1]["offset_m"], item[2]["offset_m"]))
+            for pair_score, start, end in pairs[:MAX_RELATION_PAIR_CANDIDATES]:
+                clipped = _clip_oriented_lines(oriented, start, end)
+                if not clipped:
+                    continue
+                probe_projections = [
+                    _projection_candidates(clipped, stop, limit=1)
+                    for stop in _probe_stops(ordered)
+                ]
+                if any(not projections for projections in probe_projections):
+                    continue
+                distances = [projections[0]["distance_m"] for projections in probe_projections]
+                if max(distances) > MAX_RELATION_STOP_SNAP_M:
+                    continue
+                offsets = [projections[0]["offset_m"] for projections in probe_projections]
+                backtrack_m = sum(
+                    max(0.0, previous - current - 100.0)
+                    for previous, current in zip(offsets, offsets[1:])
+                )
+                score = _relation_score(clipped, ordered) + pair_score + backtrack_m * 5.0
+                finalists.append((score, clipped, direction))
+    if not finalists:
+        return None
+    score, clipped, direction = min(finalists, key=lambda item: item[0])
+    return clipped, score, direction
 
 
 def fetch_bus_relation(
@@ -274,18 +526,22 @@ def fetch_bus_relation(
         _deadline=_deadline,
     )
     _check_deadline(_deadline)
-    candidates: list[tuple[float, dict[str, Any], list[list[list[float]]]]] = []
+    candidates: list[tuple[float, dict[str, Any], list[list[list[float]]], str]] = []
     elements = payload.get("elements") if isinstance(payload.get("elements"), list) else []
     for element in elements[:50]:
         if not isinstance(element, dict) or element.get("type") != "relation":
             continue
         lines = _relation_lines(element)
-        if lines:
-            candidates.append((_relation_score(lines, ordered), element, lines))
+        clipped = _clip_relation_lines(lines, ordered) if lines else None
+        if clipped:
+            clipped_lines, score, direction = clipped
+            candidates.append((score, element, clipped_lines, direction))
     _check_deadline(_deadline)
     if not candidates:
         return None
-    score, chosen, lines = min(candidates, key=lambda item: (item[0], int(item[1].get("id") or 0)))
+    score, chosen, lines, direction = min(
+        candidates, key=lambda item: (item[0], int(item[1].get("id") or 0))
+    )
     tags = chosen.get("tags") if isinstance(chosen.get("tags"), dict) else {}
     return {
         "ok": True,
@@ -300,6 +556,8 @@ def fetch_bus_relation(
             "network": str(tags.get("network") or "")[:120],
             "operator": str(tags.get("operator") or "")[:120],
             "match_score_m": round(score, 1),
+            "segment_clipped": True,
+            "segment_direction": direction,
         },
         "attribution": "© OpenStreetMap contributors · ODbL",
         "data_gap": None,
@@ -374,6 +632,7 @@ def resolve_route_geometry(
     allow_road_estimate: bool = True,
 ) -> dict[str, Any]:
     deadline = _resolve_deadline(timeout_seconds)
+    relation_timeout_seconds = min(float(timeout_seconds), MAX_RELATION_LOOKUP_SECONDS)
     admission_wait = min(GEOMETRY_ADMISSION_WAIT_SECONDS, max(0.0, deadline - time.monotonic()))
     if not _GEOMETRY_ADMISSION.acquire(timeout=admission_wait):
         raise OSMError(
@@ -389,7 +648,7 @@ def resolve_route_geometry(
             relation = fetch_bus_relation(
                 route_ref=route_ref,
                 stops=materialized,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=relation_timeout_seconds,
                 _deadline=deadline,
             )
             if relation is not None:

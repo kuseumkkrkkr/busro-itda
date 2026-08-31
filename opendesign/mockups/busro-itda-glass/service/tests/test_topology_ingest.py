@@ -10,7 +10,9 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 
@@ -29,6 +31,7 @@ from topology_ingest import (  # noqa: E402
     TopologyIngestor,
     _catalog_process_lock,
     _local_live_api_origin,
+    _only_route_target,
     _parser,
 )
 
@@ -191,6 +194,190 @@ class TopologyIngestTests(unittest.TestCase):
         self.assertEqual([stop.node_id for stop in sequence.stops], ["DJB_A", "DJB_B", "DJB_C"])
         self.assertEqual([call[0] for call in fake.calls], ["cities", "routes", "route_stops", "route_stops"])
 
+    def test_only_routes_discover_all_targets_but_hydrate_exact_selection(self):
+        calls = []
+        routes = [
+            {"citycode": "25", "routeid": f"ROUTE_{index:03d}", "routeno": str(index)}
+            for index in range(3)
+        ]
+
+        def fetch(operation, parameters):
+            calls.append((operation, dict(parameters)))
+            if operation == "cities":
+                return response([{"citycode": "25", "cityname": "대전광역시"}])
+            if operation == "routes":
+                page = int(parameters["pageNo"])
+                size = int(parameters["numOfRows"])
+                start = (page - 1) * size
+                return response(
+                    routes[start : start + size], total=len(routes), page=page, size=size
+                )
+            if operation == "route_stops":
+                return self.one_page(parameters)
+            raise AssertionError(operation)
+
+        result = self.ingestor(
+            fetch,
+            only_routes=(("25", "ROUTE_001"),),
+        ).run()
+
+        hydrated = [
+            parameters["routeId"]
+            for operation, parameters in calls
+            if operation == "route_stops"
+        ]
+        self.assertEqual(hydrated, ["ROUTE_001"])
+        self.assertEqual(result["run"]["status"], "COMPLETE")
+        self.assertEqual(result["run"]["succeeded"], 1)
+        self.assertEqual(result["coverage"]["targets"], 3)
+        self.assertEqual(result["coverage"]["statuses"], {"COMPLETE": 1, "PENDING": 2})
+
+        calls.clear()
+        parallel = self.ingestor(
+            fetch,
+            only_routes=(("25", "ROUTE_000"), ("25", "ROUTE_002")),
+            workers=2,
+        ).run()
+        parallel_routes = [
+            parameters["routeId"]
+            for operation, parameters in calls
+            if operation == "route_stops"
+        ]
+        self.assertCountEqual(parallel_routes, ["ROUTE_000", "ROUTE_002"])
+        self.assertEqual(parallel["run"]["status"], "COMPLETE")
+        self.assertEqual(parallel["run"]["succeeded"], 2)
+        self.assertEqual(parallel["coverage"]["statuses"], {"COMPLETE": 3})
+
+        calls.clear()
+        refreshed = self.ingestor(
+            fetch,
+            only_routes=(("25", "ROUTE_001"),),
+            refresh_complete=True,
+        ).run()
+        refreshed_routes = [
+            parameters["routeId"]
+            for operation, parameters in calls
+            if operation == "route_stops"
+        ]
+        self.assertEqual(refreshed_routes, ["ROUTE_001"])
+        self.assertEqual(refreshed["run"]["status"], "COMPLETE")
+        self.assertEqual(refreshed["run"]["unchanged"], 1)
+        self.assertEqual(
+            refreshed["coverage"]["statuses"], {"COMPLETE": 2, "UNCHANGED": 1}
+        )
+
+    def test_only_routes_missing_target_fails_explicitly_without_fallback_claim(self):
+        fake = FakeTago()
+        result = self.ingestor(
+            fake,
+            only_routes=(("25", "MISSING_ROUTE"),),
+        ).run()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["run"]["status"], "FAILED")
+        self.assertIn("requested topology target does not exist", result["error"])
+        self.assertIn("25:MISSING_ROUTE", result["error"])
+        self.assertNotIn("route_stops", [operation for operation, _ in fake.calls])
+        self.assertEqual(result["coverage"]["statuses"], {"PENDING": 1})
+
+    def test_specific_claim_validates_run_ownership_and_retry_limit(self):
+        self.seed_targets(2)
+        self.catalog.create_topology_run(
+            run_id="run_owner",
+            provider="TAGO",
+            target_source="tago",
+            request_budget=10,
+            target_limit=None,
+        )
+        claimed = self.catalog.claim_specific_topology_target(
+            provider="TAGO",
+            run_id="run_owner",
+            city_code="25",
+            route_id="ROUTE_001",
+        )
+        self.assertEqual(claimed["route_id"], "ROUTE_001")
+        with self.assertRaisesRegex(CatalogValidationError, "already owned"):
+            self.catalog.claim_specific_topology_target(
+                provider="TAGO",
+                run_id="run_owner",
+                city_code="25",
+                route_id="ROUTE_001",
+            )
+        with self.assertRaisesRegex(CatalogValidationError, "does not exist"):
+            self.catalog.claim_specific_topology_target(
+                provider="TAGO",
+                run_id="run_owner",
+                city_code="25",
+                route_id="MISSING_ROUTE",
+            )
+        self.catalog.stage_topology_page(
+            provider="TAGO",
+            city_code="25",
+            route_id="ROUTE_001",
+            page_no=1,
+            items=[],
+            total_count=0,
+        )
+        self.catalog.defer_or_fail_topology_target(
+            provider="TAGO",
+            city_code="25",
+            route_id="ROUTE_001",
+            deferred=False,
+            error_code="TEST_FAILURE",
+            error_message="test failure",
+        )
+        self.catalog.finish_topology_run("run_owner", "PARTIAL")
+
+        for index in range(2):
+            run_id = f"run_retry_{index}"
+            self.catalog.create_topology_run(
+                run_id=run_id,
+                provider="TAGO",
+                target_source="tago",
+                request_budget=10,
+                target_limit=None,
+            )
+            retried = self.catalog.claim_specific_topology_target(
+                provider="TAGO",
+                run_id=run_id,
+                city_code="25",
+                route_id="ROUTE_001",
+            )
+            if index == 0:
+                self.assertEqual(retried["next_page"], 1)
+                self.assertEqual(retried["pages_fetched"], 0)
+                with self.catalog.connect() as connection:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM topology_pages WHERE route_id='ROUTE_001'"
+                        ).fetchone()[0],
+                        0,
+                    )
+            self.catalog.defer_or_fail_topology_target(
+                provider="TAGO",
+                city_code="25",
+                route_id="ROUTE_001",
+                deferred=False,
+                error_code="TEST_FAILURE",
+                error_message="test failure",
+            )
+            self.catalog.finish_topology_run(run_id, "PARTIAL")
+
+        self.catalog.create_topology_run(
+            run_id="run_retry_exhausted",
+            provider="TAGO",
+            target_source="tago",
+            request_budget=10,
+            target_limit=None,
+        )
+        with self.assertRaisesRegex(CatalogValidationError, "exhausted retry attempts"):
+            self.catalog.claim_specific_topology_target(
+                provider="TAGO",
+                run_id="run_retry_exhausted",
+                city_code="25",
+                route_id="ROUTE_001",
+            )
+
     def test_budget_checkpoint_resumes_at_next_unfetched_page(self):
         first = FakeTago()
         first_result = self.ingestor(first, request_budget=3).run()
@@ -206,6 +393,185 @@ class TopologyIngestTests(unittest.TestCase):
         route_pages = [params["pageNo"] for operation, params in second.calls if operation == "route_stops"]
         self.assertEqual(route_pages, ["2"])
         self.assertEqual(second_result["coverage"]["complete"], 1)
+
+    def test_failed_validation_retry_restarts_from_page_one(self):
+        self.seed_targets(1)
+        first_calls = []
+
+        def empty_first_page(operation, parameters):
+            self.assertEqual(operation, "route_stops")
+            first_calls.append(parameters["pageNo"])
+            return response([], total=0, page=1, size=2)
+
+        first = self.ingestor(
+            empty_first_page,
+            request_budget=2,
+            target_limit=1,
+            target_source="catalog",
+            trust_catalog_identifiers=True,
+        ).run()
+        self.assertEqual(first["run"]["status"], "PARTIAL")
+        self.assertEqual(first_calls, ["1"])
+
+        second_calls = []
+
+        def valid_retry(operation, parameters):
+            self.assertEqual(operation, "route_stops")
+            second_calls.append(parameters["pageNo"])
+            return self.one_page(parameters)
+
+        second = self.ingestor(
+            valid_retry,
+            request_budget=2,
+            target_limit=1,
+            target_source="catalog",
+            trust_catalog_identifiers=True,
+        ).run()
+        self.assertEqual(second["run"]["status"], "COMPLETE")
+        self.assertEqual(second_calls, ["1"])
+        self.assertEqual(second["coverage"]["complete"], 1)
+        with self.catalog.connect() as connection:
+            pages = connection.execute(
+                "SELECT COUNT(*) FROM topology_pages"
+            ).fetchone()[0]
+        self.assertEqual(pages, 0)
+
+    def test_single_point_spike_is_quarantined_before_sequence_hash_or_activation(self):
+        self.seed_targets(1)
+        with self.catalog.connect() as connection:
+            connection.execute(
+                "INSERT INTO route_sequence_versions VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "seq_existing_spike",
+                    "25",
+                    "ROUTE_000",
+                    "ORIGINAL_SOURCE",
+                    "2026-08-30T00:00:00Z",
+                    "b" * 64,
+                    3,
+                    "2026-08-31T00:00:00Z",
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO route_sequence_stops("
+                "sequence_id,node_order,node_id,node_name,latitude,longitude,"
+                "direction,can_board,can_alight) VALUES(?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        "seq_existing_spike",
+                        1,
+                        "OLD_A",
+                        "A",
+                        36.000,
+                        127.0,
+                        "0",
+                        1,
+                        1,
+                    ),
+                    (
+                        "seq_existing_spike",
+                        2,
+                        "OLD_B",
+                        "B",
+                        36.300,
+                        127.0,
+                        "0",
+                        1,
+                        1,
+                    ),
+                    (
+                        "seq_existing_spike",
+                        3,
+                        "OLD_C",
+                        "C",
+                        36.001,
+                        127.0,
+                        "0",
+                        1,
+                        1,
+                    ),
+                ],
+            )
+            connection.execute(
+                "INSERT INTO active_route_sequences VALUES(?,?,?)",
+                ("25", "ROUTE_000", "seq_existing_spike"),
+            )
+            connection.commit()
+
+        def spike_route(operation, parameters):
+            self.assertEqual(operation, "route_stops")
+            route_id = parameters["routeId"]
+            page = int(parameters["pageNo"])
+            size = int(parameters["numOfRows"])
+            items = [
+                {
+                    "citycode": "25",
+                    "routeid": route_id,
+                    "nodeid": "NODE_A",
+                    "nodenm": "A",
+                    "nodeord": 1,
+                    "gpslati": 36.000,
+                    "gpslong": 127.0,
+                    "updowncd": "0",
+                },
+                {
+                    "citycode": "25",
+                    "routeid": route_id,
+                    "nodeid": "NODE_B",
+                    "nodenm": "B",
+                    "nodeord": 2,
+                    "gpslati": 36.300,
+                    "gpslong": 127.0,
+                    "updowncd": "0",
+                },
+                {
+                    "citycode": "25",
+                    "routeid": route_id,
+                    "nodeid": "NODE_C",
+                    "nodenm": "C",
+                    "nodeord": 3,
+                    "gpslati": 36.001,
+                    "gpslong": 127.0,
+                    "updowncd": "0",
+                },
+            ]
+            start = (page - 1) * size
+            return response(
+                items[start : start + size], total=3, page=page, size=size
+            )
+
+        with patch.object(
+            self.catalog,
+            "route_sequence_sha256",
+            side_effect=AssertionError("sequence hash must not run"),
+        ) as sequence_hash:
+            result = self.ingestor(
+                spike_route,
+                request_budget=4,
+                target_limit=1,
+                target_source="catalog",
+                trust_catalog_identifiers=True,
+            ).run()
+
+        sequence_hash.assert_not_called()
+        self.assertEqual(result["run"]["status"], "PARTIAL")
+        self.assertEqual(result["run"]["failed"], 1)
+        with self.catalog.connect() as connection:
+            versions = connection.execute(
+                "SELECT COUNT(*) FROM route_sequence_versions"
+            ).fetchone()[0]
+            active = connection.execute(
+                "SELECT COUNT(*) FROM active_route_sequences"
+            ).fetchone()[0]
+            progress = connection.execute(
+                "SELECT status,error_code,error_message FROM topology_progress "
+                "WHERE provider='TAGO' AND city_code='25' AND route_id='ROUTE_000'"
+            ).fetchone()
+        self.assertEqual(versions, 1)
+        self.assertEqual(active, 0)
+        self.assertEqual(progress["status"], "FAILED")
+        self.assertEqual(progress["error_code"], "SINGLE_POINT_ROUTE_SPIKE")
+        self.assertLessEqual(len(progress["error_message"]), 240)
 
     def test_local_http_429_defers_claimed_target_as_budget_exhausted(self):
         payloads = {
@@ -530,6 +896,124 @@ class TopologyIngestTests(unittest.TestCase):
         self.assertEqual(tuple(attempts), (1, 1, 32))
         self.assertEqual(integrity, "ok")
 
+    def test_workers_keep_fetches_parallel_but_serialize_all_catalog_calls(self):
+        self.seed_targets(4)
+        call_lock = threading.Lock()
+        fetch_barrier = threading.Barrier(4)
+        active_fetches = 0
+        max_active_fetches = 0
+        active_catalog_calls = 0
+        max_active_catalog_calls = 0
+        catalog_call_count = 0
+        inner_catalog = self.catalog
+
+        class TrackingCatalog:
+            def __getattr__(tracking_self, name):
+                nonlocal active_catalog_calls
+                nonlocal max_active_catalog_calls
+                nonlocal catalog_call_count
+                attribute = getattr(inner_catalog, name)
+                if not callable(attribute):
+                    return attribute
+
+                def tracked(*args, **kwargs):
+                    nonlocal active_catalog_calls
+                    nonlocal max_active_catalog_calls
+                    nonlocal catalog_call_count
+                    with call_lock:
+                        active_catalog_calls += 1
+                        catalog_call_count += 1
+                        max_active_catalog_calls = max(
+                            max_active_catalog_calls, active_catalog_calls
+                        )
+                    try:
+                        # Hold the call open long enough that unlocked workers
+                        # deterministically overlap before entering SQLite.
+                        time.sleep(0.005)
+                        return attribute(*args, **kwargs)
+                    finally:
+                        with call_lock:
+                            active_catalog_calls -= 1
+
+                return tracked
+
+        def fetch(operation, parameters):
+            nonlocal active_fetches, max_active_fetches
+            with call_lock:
+                active_fetches += 1
+                max_active_fetches = max(max_active_fetches, active_fetches)
+            try:
+                fetch_barrier.wait(timeout=3)
+                return self.one_page(parameters)
+            finally:
+                with call_lock:
+                    active_fetches -= 1
+
+        result = TopologyIngestor(
+            catalog=TrackingCatalog(),
+            fetcher=fetch,
+            config=self.config(
+                request_budget=8,
+                target_source="catalog",
+                trust_catalog_identifiers=True,
+                workers=4,
+            ),
+            clock=lambda: FIXED_NOW,
+            monotonic=lambda: 0.0,
+            sleeper=lambda _: None,
+        ).run()
+
+        self.assertEqual(result["run"]["status"], "COMPLETE")
+        self.assertEqual(result["run"]["succeeded"], 4)
+        self.assertEqual(max_active_fetches, 4)
+        self.assertGreater(catalog_call_count, 0)
+        self.assertEqual(max_active_catalog_calls, 1)
+
+    def test_unknown_worker_exception_remains_fatal_for_parallel_run(self):
+        self.seed_targets(12)
+        first_wave = threading.Barrier(4)
+        call_lock = threading.Lock()
+        calls = 0
+        holder = {}
+
+        def fetch(operation, parameters):
+            nonlocal calls
+            with call_lock:
+                calls += 1
+                ordinal = calls
+            first_wave.wait(timeout=3)
+            if ordinal == 1:
+                raise RuntimeError("internal-secret-marker")
+            self.assertTrue(holder["ingestor"]._stop_event.wait(timeout=3))
+            return self.one_page(parameters)
+
+        ingestor = self.ingestor(
+            fetch,
+            request_budget=20,
+            target_source="catalog",
+            trust_catalog_identifiers=True,
+            workers=4,
+        )
+        holder["ingestor"] = ingestor
+        result = ingestor.run()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["run"]["status"], "FAILED")
+        self.assertEqual(calls, 4)
+        with self.catalog.connect() as connection:
+            in_progress = connection.execute(
+                "SELECT COUNT(*) FROM topology_progress WHERE status='IN_PROGRESS'"
+            ).fetchone()[0]
+            failure = connection.execute(
+                "SELECT error_code,error_message FROM topology_progress "
+                "WHERE error_code='UNEXPECTED_COLLECTOR_ERROR'"
+            ).fetchone()
+        self.assertEqual(in_progress, 0)
+        self.assertEqual(dict(failure), {
+            "error_code": "UNEXPECTED_COLLECTOR_ERROR",
+            "error_message": "Unexpected collector failure",
+        })
+
     def test_parallel_budget_resume_starts_at_each_targets_next_page(self):
         self.seed_targets(4)
         first_wave = threading.Barrier(4)
@@ -699,6 +1183,50 @@ class TopologyIngestTests(unittest.TestCase):
         self.assertEqual(in_progress, 0)
         self.assertEqual(fatal, 1)
 
+    def test_daily_quota_stops_after_inflight_wave_and_defers_target(self):
+        self.seed_targets(40)
+        first_wave = threading.Barrier(4)
+        lock = threading.Lock()
+        calls = 0
+        holder = {}
+
+        def fetch(operation, parameters):
+            nonlocal calls
+            with lock:
+                calls += 1
+                ordinal = calls
+            first_wave.wait(timeout=3)
+            if ordinal == 1:
+                raise TagoError(
+                    "22", "LIMITED NUMBER OF SERVICE REQUESTS EXCEEDS ERROR"
+                )
+            self.assertTrue(holder["ingestor"]._stop_event.wait(timeout=3))
+            return self.one_page(parameters)
+
+        ingestor = self.ingestor(
+            fetch,
+            request_budget=40,
+            target_source="catalog",
+            trust_catalog_identifiers=True,
+            workers=4,
+        )
+        holder["ingestor"] = ingestor
+        result = ingestor.run()
+
+        self.assertEqual(result["run"]["status"], "BUDGET_EXHAUSTED")
+        self.assertEqual(result["run"]["failed"], 0)
+        self.assertEqual(calls, 4)
+        with self.catalog.connect() as connection:
+            in_progress = connection.execute(
+                "SELECT COUNT(*) FROM topology_progress WHERE status='IN_PROGRESS'"
+            ).fetchone()[0]
+            quota = connection.execute(
+                "SELECT status,error_code FROM topology_progress "
+                "WHERE error_code='22'"
+            ).fetchone()
+        self.assertEqual(in_progress, 0)
+        self.assertEqual(tuple(quota), ("DEFERRED", "22"))
+
     def test_os_lock_rejects_a_second_cli_and_releases_for_next_run(self):
         catalog_path = Path(self.temp.name) / "catalog.sqlite3"
         with _catalog_process_lock(catalog_path):
@@ -756,10 +1284,59 @@ class LocalLiveApiTests(unittest.TestCase):
             ]
         )
         self.assertEqual(worker_args.workers, 7)
+        selected_args = _parser().parse_args(
+            base
+            + [
+                "--local-live-api",
+                "http://127.0.0.1:8791",
+                "--only-route",
+                "12:SJB293000331",
+                "--only-route",
+                "25:DJB30300128",
+                "--only-route",
+                "25:DJB30300074",
+                "--repair-corrupt-retries",
+            ]
+        )
+        self.assertEqual(
+            selected_args.only_route,
+            [
+                ("12", "SJB293000331"),
+                ("25", "DJB30300128"),
+                ("25", "DJB30300074"),
+            ],
+        )
+        self.assertTrue(selected_args.repair_corrupt_retries)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            _parser().parse_args(
+                base
+                + [
+                    "--local-live-api",
+                    "http://127.0.0.1:8791",
+                    "--only-route",
+                    "25:DJB30300128",
+                    "--only-route",
+                    "25:DJB30300128",
+                ]
+            )
+        self.assertEqual(_only_route_target("25:GMB수점10"), ("25", "GMB수점10"))
+        for value in ["25", ":ROUTE", "25:", "25:BAD/ROUTE", "2 5:ROUTE"]:
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                _only_route_target(value)
+        with self.assertRaisesRegex(ValueError, "duplicate --only-route"):
+            IngestConfig(
+                only_routes=(("25", "DJB30300128"), ("25", "DJB30300128"))
+            ).validate()
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            IngestConfig(
+                target_limit=1,
+                only_routes=(("25", "DJB30300128"),),
+            ).validate()
         with self.assertRaises(ValueError):
             IngestConfig(workers=0).validate()
+        IngestConfig(workers=16).validate()
         with self.assertRaises(ValueError):
-            IngestConfig(workers=9).validate()
+            IngestConfig(workers=17).validate()
         with self.assertRaises(ValueError):
             IngestConfig(requests_per_second=0.09).validate()
 

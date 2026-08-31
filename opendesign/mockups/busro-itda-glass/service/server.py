@@ -82,6 +82,13 @@ class BusroHTTPServer(ThreadingHTTPServer):
         self._request_slots = threading.BoundedSemaphore(self.max_concurrent_requests)
         super().__init__(address, handler)
         self.service = service
+        self._store_writer_pinned = False
+        try:
+            self.service.store.pin_writer()
+            self._store_writer_pinned = True
+        except BaseException:
+            super().server_close()
+            raise
         self.live_api = live_api
         self.shared_live_storage = bool(shared_live_storage)
         self.shared_storage_baseline_consistent = bool(shared_storage_baseline_consistent)
@@ -92,6 +99,14 @@ class BusroHTTPServer(ThreadingHTTPServer):
         self.live_upstream_attested_at = 0.0
         self.live_upstream_attestation_revision = 0
         self._live_attestation_lock = threading.Lock()
+
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            if getattr(self, "_store_writer_pinned", False):
+                self.service.store.unpin_writer()
+                self._store_writer_pinned = False
 
     def get_request(self):
         request, client_address = super().get_request()
@@ -263,7 +278,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise AppError("NOT_FOUND", "API endpoint not found", status=404)
         except (AppError, LoopbackApiError) as exc:
             retry_after = None
-            if exc.status == 429 and isinstance(exc.details, dict):
+            if exc.status in {429, 503} and isinstance(exc.details, dict):
                 try:
                     retry_after = min(
                         86_400,

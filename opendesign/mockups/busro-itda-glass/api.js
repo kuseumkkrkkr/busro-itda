@@ -4,6 +4,7 @@
   const DEFAULT_BASE = global.location && ["http:", "https:"].includes(global.location.protocol)
     ? `${global.location.origin}/api`
     : "http://127.0.0.1:8791/api";
+  const COLD_START_TIMEOUT_MS = 45000;
 
   function getBase() {
     const configured = global.BUSRO_API_BASE || global.localStorage.getItem("busro-api-base");
@@ -121,7 +122,7 @@
       else global.localStorage.removeItem("busro-api-base");
       return clean || DEFAULT_BASE;
     },
-    status: () => request("/status"),
+    status: () => request("/status", { timeout: COLD_START_TIMEOUT_MS }),
     async mappingStatus(statusPayload, mappings, options = {}) {
       const requested = (mappings || []).slice(0, 12).map((item) => ({
         id: String(item.id || ""),
@@ -186,7 +187,7 @@
     },
     arrivals: (leg) => request(`/arrivals?city_code=${encodeURIComponent(leg.cityCode)}&node_id=${encodeURIComponent(leg.nodeId)}&leg_id=${encodeURIComponent(leg.id)}`),
     positions: (route) => request(`/positions?city_code=${encodeURIComponent(route.cityCode || route.city_code)}&route_id=${encodeURIComponent(route.routeId || route.route_id)}`),
-    networkStatus: () => request("/network/status"),
+    networkStatus: () => request("/network/status", { timeout: COLD_START_TIMEOUT_MS }),
     cities: () => request("/cities"),
     routes(cityCode, routeNo = "") {
       const params = new URLSearchParams({ city_code: String(cityCode), page: "1", limit: "100" });
@@ -212,9 +213,13 @@
       return { ...last, stops, count: stops.length, truncated: total > stops.length };
     },
     routeGeometry(routeRef, stops) {
+      const sourceStops = Array.isArray(stops) ? stops : [];
+      const sampledStops = sourceStops.length <= 160
+        ? sourceStops
+        : Array.from({ length: 160 }, (_, index) => sourceStops[Math.round(index * (sourceStops.length - 1) / 159)]);
       return request("/osm/geometry", { method: "POST", timeout: 24000, body: {
         route_ref: String(routeRef || ""),
-        stops: (stops || []).slice(0, 160).map((stop) => ({
+        stops: sampledStops.map((stop) => ({
           node_id: String(stop.node_id || ""),
           node_name: String(stop.node_name || ""),
           node_order: Number(stop.node_order || 0),
@@ -226,7 +231,7 @@
     async searchStops(query, cityCode = "") {
       const params = new URLSearchParams({ q: String(query || "").trim(), limit: "8" });
       if (cityCode) params.set("city_code", String(cityCode));
-      try { return await request(`/network/stops?${params.toString()}`); }
+      try { return await request(`/network/stops?${params.toString()}`, { timeout: COLD_START_TIMEOUT_MS }); }
       catch (error) {
         if (![404, 501, 503].includes(error.status) || !cityCode) throw error;
         const official = new URLSearchParams({ city_code: String(cityCode), node_name: String(query || "").trim(), page: "1", limit: "8" });
@@ -247,7 +252,7 @@
       }
       return request("/journeys/generate", {
         method: "POST",
-        timeout: 20000,
+        timeout: COLD_START_TIMEOUT_MS,
         body,
       });
     },

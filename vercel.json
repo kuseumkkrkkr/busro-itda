@@ -5,7 +5,8 @@
   "functions": {
     "api/index.py": {
       "maxDuration": 60,
-      "includeFiles": "opendesign/mockups/busro-itda-glass/service/**"
+      "includeFiles": "opendesign/mockups/busro-itda-glass/service/**",
+      "excludeFiles": "opendesign/mockups/busro-itda-glass/service/{data/*.sqlite3,data/*.sqlite3-*,data/*.lock,tests/**,benchmarks/**,__pycache__/**}"
     }
   },
   "rewrites": [

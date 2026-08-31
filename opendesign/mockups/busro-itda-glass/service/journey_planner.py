@@ -31,7 +31,8 @@ DEFAULT_MAX_PARALLEL_SEARCHES = 8
 MAX_ALTERNATIVES = 5
 MAX_ALTERNATIVE_ATTEMPTS = 2
 PURE_TRANSFER_REUSE_PENALTY = 16
-MAX_WALK_TARGET_STOPS = 24
+MAX_WALK_TARGET_STOPS = 128
+ENDPOINT_ACCESS_RADIUS_M = 300
 MAX_ROUTE_STATES_PER_STOP = 256
 MAX_SPATIAL_BUCKET = 4_096
 MIN_PASSAGE_SAMPLES = 8
@@ -100,6 +101,10 @@ class GraphSnapshot:
     spatial_cell_degrees: float
     hydrated_route_count: int
     catalog_route_count: int
+    topology_target_count: int
+    topology_complete_count: int
+    topology_discovery_complete: bool | None
+    topology_hydrated_count: int
     city_count: int
 
 
@@ -130,6 +135,23 @@ def _coordinate_distance(a: tuple[float, float], b: tuple[float, float]) -> floa
     dlon = lon2 - lon1
     value = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
     return 6_371_000.0 * 2 * math.asin(min(1.0, math.sqrt(value)))
+
+
+def _is_direction_boundary(
+    before: RouteStopRecord, after: RouteStopRecord
+) -> bool:
+    """Return true only for an explicit change between two direction codes.
+
+    TAGO documents ``updowncd`` as the up/down direction code.  A passenger
+    through-ride across different non-empty values is therefore not asserted
+    without trip/block evidence.  Empty values mean the provider supplied no
+    direction evidence and preserve the existing ordered sequence.  Unknown
+    non-empty values are still distinct codes; distance alone never splits a
+    route because rural/express adjacent stops can legitimately be far apart.
+    """
+    left = str(before.direction or "").strip()
+    right = str(after.direction or "").strip()
+    return bool(left and right and left != right)
 
 
 class JourneyPlanner:
@@ -233,10 +255,19 @@ class JourneyPlanner:
             edges.append(edge)
             adjacency_lists[source_index].append(edge.index)
 
-        # Direction is authoritative: only consecutive ascending node_order is rideable.
+        # Ascending order is authoritative only inside one explicit direction
+        # segment.  Do not invent passenger through-service across an
+        # up/down-code boundary; blank direction evidence remains contiguous.
         for sequence in sequences:
             indexes = sequence_indexes[(sequence.city_code, sequence.route_id)]
-            for before_index, after_index in zip(indexes, indexes[1:]):
+            for before_stop, after_stop, before_index, after_index in zip(
+                sequence.stops,
+                sequence.stops[1:],
+                indexes,
+                indexes[1:],
+            ):
+                if _is_direction_boundary(before_stop, after_stop):
+                    continue
                 distance = _haversine(nodes[before_index], nodes[after_index])
                 add_edge(before_index, after_index, "ride", distance or 0.0, "hydrated_route_sequence")
 
@@ -304,7 +335,19 @@ class JourneyPlanner:
             spatial_buckets=immutable_buckets,
             spatial_cell_degrees=cell_degrees,
             hydrated_route_count=len(sequences),
-            catalog_route_count=len({(item.city_code, item.route_id) for item in catalog.routes}),
+            catalog_route_count=(
+                catalog.catalog_route_count
+                if catalog.catalog_route_count is not None
+                else len({(item.city_code, item.route_id) for item in catalog.routes})
+            ),
+            topology_target_count=int(catalog.topology_target_count or 0),
+            topology_complete_count=int(catalog.topology_complete_count or 0),
+            topology_discovery_complete=catalog.topology_discovery_complete,
+            topology_hydrated_count=(
+                int(catalog.topology_hydrated_count)
+                if catalog.topology_hydrated_count is not None
+                else len(sequences)
+            ),
             city_count=len({item.city_code for item in sequences}),
         )
         with self._cache_lock:
@@ -331,6 +374,8 @@ class JourneyPlanner:
             [tuple[str, ...]],
             tuple[Mapping[str, Any], Mapping[str, Any]],
         ] | None = None,
+        origin_access: Mapping[str, Any] | None = None,
+        destination_access: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         origin = _identifier(origin_node_id, "origin_node_id")
         destination = _identifier(destination_node_id, "destination_node_id")
@@ -350,6 +395,14 @@ class JourneyPlanner:
             raise PlannerValidationError("preference is not supported")
 
         graph = self.build_graph(catalog, transfer_radius_m=transfer_radius_m)
+        normalized_origin_access = self._normalize_access_point(
+            origin_access, expected_node_id=origin, expected_city_code=origin_city_code
+        )
+        normalized_destination_access = self._normalize_access_point(
+            destination_access,
+            expected_node_id=destination,
+            expected_city_code=destination_city_code,
+        )
         origin_indexes = tuple(
             index for index in graph.node_id_indexes.get(origin, ())
             if not origin_city_code or graph.nodes[index].city_code == origin_city_code
@@ -361,8 +414,31 @@ class JourneyPlanner:
                 or graph.nodes[index].city_code == destination_city_code
             )
         )
+        origin_snapped = False
+        destination_snapped = False
+        if not origin_indexes and normalized_origin_access is not None:
+            origin_indexes = self._endpoint_indexes(
+                graph, normalized_origin_access, require_board=True
+            )
+            origin_snapped = bool(origin_indexes)
+        if not destination_indexes and normalized_destination_access is not None:
+            destination_indexes = self._endpoint_indexes(
+                graph, normalized_destination_access, require_board=False
+            )
+            destination_snapped = bool(destination_indexes)
         if not origin_indexes or not destination_indexes:
-            return self._gap_result(graph, "STOP_NOT_IN_HYDRATED_SEQUENCE")
+            reason = (
+                "STOP_NOT_ROUTABLE_NEARBY"
+                if (
+                    (not origin_indexes and normalized_origin_access is not None)
+                    or (
+                        not destination_indexes
+                        and normalized_destination_access is not None
+                    )
+                )
+                else "STOP_NOT_IN_HYDRATED_SEQUENCE"
+            )
+            return self._gap_result(graph, reason)
         starts = tuple(index for index in origin_indexes if graph.nodes[index].can_board)
         goals = frozenset(
             index for index in destination_indexes if graph.nodes[index].can_alight
@@ -432,6 +508,10 @@ class JourneyPlanner:
                 criterion=criterion,
                 service_evidence=loaded_service,
                 passage_history=loaded_passages,
+                origin_access=(normalized_origin_access if origin_snapped else None),
+                destination_access=(
+                    normalized_destination_access if destination_snapped else None
+                ),
             )
             for path, criterion in candidate_paths
         ]
@@ -498,6 +578,134 @@ class JourneyPlanner:
         ride_edges = [graph.edges[index] for index in graph.adjacency[node_index]]
         return tuple(sorted((*ride_edges, *self._transfer_edges(graph, node_index)), key=lambda edge: edge.edge_id))
 
+    @staticmethod
+    def _normalize_access_point(
+        value: Mapping[str, Any] | None,
+        *,
+        expected_node_id: str,
+        expected_city_code: str | None,
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise PlannerValidationError("endpoint access must be an object")
+        node_id = _identifier(value.get("node_id"), "endpoint_access.node_id")
+        city_code = _identifier(
+            value.get("city_code"), "endpoint_access.city_code"
+        )
+        if node_id != expected_node_id:
+            raise PlannerValidationError("endpoint access node does not match request")
+        if expected_city_code and city_code != expected_city_code:
+            raise PlannerValidationError("endpoint access city does not match request")
+        try:
+            latitude = float(value.get("latitude"))
+            longitude = float(value.get("longitude"))
+        except (TypeError, ValueError) as exc:
+            raise PlannerValidationError(
+                "endpoint access coordinates are invalid"
+            ) from exc
+        if (
+            not math.isfinite(latitude)
+            or not math.isfinite(longitude)
+            or not -90 <= latitude <= 90
+            or not -180 <= longitude <= 180
+        ):
+            raise PlannerValidationError("endpoint access coordinates are invalid")
+        return {
+            "city_code": city_code,
+            "node_id": node_id,
+            "node_name": str(value.get("node_name") or node_id)[:160],
+            "latitude": latitude,
+            "longitude": longitude,
+        }
+
+    def _endpoint_indexes(
+        self,
+        graph: GraphSnapshot,
+        access: Mapping[str, Any],
+        *,
+        require_board: bool,
+    ) -> tuple[int, ...]:
+        coordinate = (float(access["latitude"]), float(access["longitude"]))
+        nearby = self._nearby_stop_groups(
+            graph,
+            coordinate,
+            radius_m=ENDPOINT_ACCESS_RADIUS_M,
+            excluded_group=None,
+        )
+        indexes: list[int] = []
+        for _distance, group_index in nearby:
+            for node_index in graph.stop_group_states[group_index]:
+                node = graph.nodes[node_index]
+                accessible = node.can_board if require_board else node.can_alight
+                if (
+                    accessible
+                    and node.latitude is not None
+                    and node.longitude is not None
+                ):
+                    indexes.append(node_index)
+        return tuple(sorted(set(indexes)))
+
+    @staticmethod
+    def _nearby_stop_groups(
+        graph: GraphSnapshot,
+        coordinate: tuple[float, float],
+        *,
+        radius_m: int,
+        excluded_group: int | None,
+    ) -> tuple[tuple[float, int], ...]:
+        cell = (
+            math.floor(coordinate[0] / graph.spatial_cell_degrees),
+            math.floor(coordinate[1] / graph.spatial_cell_degrees),
+        )
+        cell_radius_ratio = radius_m / graph.transfer_radius_m
+        latitude_cell_span = max(1, math.ceil(cell_radius_ratio))
+        latitude_margin_degrees = radius_m / 111_000.0
+        bounding_latitude = min(
+            89.999999,
+            abs(coordinate[0]) + latitude_margin_degrees,
+        )
+        longitude_scale = max(math.cos(math.radians(bounding_latitude)), 1e-9)
+        longitude_cell_span = max(
+            1, math.ceil(cell_radius_ratio / longitude_scale)
+        )
+        nearby_groups: list[tuple[float, int]] = []
+        for latitude_offset in range(
+            -latitude_cell_span, latitude_cell_span + 1
+        ):
+            for longitude_offset in range(
+                -longitude_cell_span, longitude_cell_span + 1
+            ):
+                for target_group in graph.spatial_buckets.get(
+                    (
+                        cell[0] + latitude_offset,
+                        cell[1] + longitude_offset,
+                    ),
+                    (),
+                ):
+                    if target_group == excluded_group:
+                        continue
+                    target_coordinate = graph.stop_group_coordinates[target_group]
+                    if target_coordinate is None:
+                        continue
+                    distance = _coordinate_distance(coordinate, target_coordinate)
+                    if distance <= radius_m:
+                        nearby_groups.append((distance, target_group))
+        if len(nearby_groups) > MAX_WALK_TARGET_STOPS:
+            raise PlannerLimitError(
+                "walk-transfer targets exceed "
+                f"the {MAX_WALK_TARGET_STOPS}-stop CPU bound"
+            )
+        return tuple(
+            sorted(
+                nearby_groups,
+                key=lambda item: (
+                    round(item[0], 6),
+                    graph.stop_group_keys[item[1]],
+                ),
+            )
+        )
+
     def _transfer_edges(self, graph: GraphSnapshot, node_index: int) -> tuple[GraphEdge, ...]:
         source = graph.nodes[node_index]
         if not source.can_alight:
@@ -519,26 +727,12 @@ class JourneyPlanner:
 
         coordinate = graph.stop_group_coordinates[group_index]
         if coordinate is not None:
-            cell = (
-                math.floor(coordinate[0] / graph.spatial_cell_degrees),
-                math.floor(coordinate[1] / graph.spatial_cell_degrees),
-            )
-            nearby_groups: list[tuple[float, int]] = []
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    for target_group in graph.spatial_buckets.get((cell[0] + dx, cell[1] + dy), ()):
-                        if target_group == group_index:
-                            continue
-                        target_coordinate = graph.stop_group_coordinates[target_group]
-                        if target_coordinate is None:
-                            continue
-                        distance = _coordinate_distance(coordinate, target_coordinate)
-                        if distance <= graph.transfer_radius_m:
-                            nearby_groups.append((distance, target_group))
-            for distance, target_group in sorted(
-                nearby_groups,
-                key=lambda item: (round(item[0], 6), graph.stop_group_keys[item[1]]),
-            )[:MAX_WALK_TARGET_STOPS]:
+            for distance, target_group in self._nearby_stop_groups(
+                graph,
+                coordinate,
+                radius_m=graph.transfer_radius_m,
+                excluded_group=group_index,
+            ):
                 for target_index in graph.stop_group_states[target_group]:
                     target = graph.nodes[target_index]
                     if (
@@ -626,6 +820,8 @@ class JourneyPlanner:
         criterion: str,
         service_evidence: Mapping[str, Any],
         passage_history: Mapping[str, Any],
+        origin_access: Mapping[str, Any] | None = None,
+        destination_access: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         ride_edges = [edge for edge in path if edge.kind == "ride"]
         route_ids: list[str] = []
@@ -633,27 +829,6 @@ class JourneyPlanner:
             if not route_ids or route_ids[-1] != edge.route_id:
                 route_ids.append(edge.route_id)
         transfer_edges = [edge for edge in path if edge.kind == "transfer"]
-        service_verified = [route for route in route_ids if self._service_verified(service_evidence.get(route))]
-        service_observed = [
-            route for route in route_ids
-            if self._has_service_observation(service_evidence.get(route))
-        ]
-        passage_covered = [
-            route
-            for route in route_ids
-            if self._observed_passage_ratio(passage_history.get(route)) is not None
-        ]
-        reasons: list[str] = []
-        if len(service_verified) != len(route_ids):
-            reasons.append("VERIFIED_TIMETABLE_REQUIRED")
-        if len(passage_covered) != len(route_ids):
-            reasons.append("PASSAGE_HISTORY_REQUIRED")
-        # Reconstructed consecutive vehicle passages are an observation
-        # coverage metric. They are not early/late, transfer, or whole-journey
-        # outcomes and must never be relabelled as a success probability.
-        reasons.append("VALIDATED_JOURNEY_SUCCESS_MODEL_REQUIRED")
-        success_probability: float | None = None
-
         steps = []
         for edge in path:
             source = graph.nodes[edge.source_index]
@@ -682,37 +857,50 @@ class JourneyPlanner:
                     "evidence": {"type": edge.evidence_type, "source": edge.evidence_source, "captured_at": edge.captured_at},
                 }
             )
-        structural_coverage = 1.0 if ride_edges else 0.0
-        return {
+        access_walking_m = 0.0
+        endpoint_access: list[dict[str, Any]] = []
+        if path and origin_access is not None:
+            target = graph.nodes[path[0].source_index]
+            distance = _coordinate_distance(
+                (float(origin_access["latitude"]), float(origin_access["longitude"])),
+                (float(target.latitude), float(target.longitude)),
+            )
+            access_walking_m += distance
+            step = self._endpoint_walk_step(
+                access=origin_access,
+                graph_node=target,
+                distance_m=distance,
+                access_kind="access",
+            )
+            steps.insert(0, step)
+            endpoint_access.append(step)
+        if path and destination_access is not None:
+            source = graph.nodes[path[-1].target_index]
+            distance = _coordinate_distance(
+                (float(source.latitude), float(source.longitude)),
+                (
+                    float(destination_access["latitude"]),
+                    float(destination_access["longitude"]),
+                ),
+            )
+            access_walking_m += distance
+            step = self._endpoint_walk_step(
+                access=destination_access,
+                graph_node=source,
+                distance_m=distance,
+                access_kind="egress",
+            )
+            steps.append(step)
+            endpoint_access.append(step)
+        return self.decorate_structural_candidate(
+            {
             "criterion": criterion,
-            "status": "DATA_GAP" if reasons else "READY",
-            "reasons": reasons,
-            "success_probability": success_probability,
-            "probability_basis": None,
-            "probability_scope": None,
-            "reliability": {
-                "status": "DATA_GAP",
-                "success_probability": None,
-                "historical_gtfs_prior": {
-                    "role": "model_weight_only",
-                    "matched_to_current_route": False,
-                    "value": None,
-                    "projection_allowed": False,
-                },
-                "trust_assumption": {
-                    "code": "USUALLY_ON_TIME",
-                    "empirical_probability": False,
-                },
-                "requirements": [
-                    "CURRENT_OFFICIAL_TIMETABLE",
-                    "MATCHED_ACTUAL_EARLY_LATE_OUTCOMES",
-                    "MATCHED_HISTORICAL_GTFS_PRIOR",
-                ],
-            },
-            "estimated_minutes": None,
-            "operating_assumption": False,
             "transfers": len(transfer_edges),
-            "walking_m": round(sum(edge.distance_m for edge in transfer_edges), 1),
+            "walking_m": round(
+                sum(edge.distance_m for edge in transfer_edges) + access_walking_m,
+                1,
+            ),
+            "endpoint_access": endpoint_access,
             "route_ids": route_ids,
             "steps": steps,
             "evidence": {
@@ -720,21 +908,166 @@ class JourneyPlanner:
                 "ride_edges": len(ride_edges),
                 "transfer_edges": len(transfer_edges),
                 "sources": sorted({edge.evidence_source for edge in path}),
+            },
+            },
+            criterion=criterion,
+            service_evidence=service_evidence,
+            passage_history=passage_history,
+        )
+
+    def decorate_structural_candidate(
+        self,
+        candidate: Mapping[str, Any],
+        *,
+        criterion: str,
+        service_evidence: Mapping[str, Any],
+        passage_history: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Apply the shared evidence contract to any structural path shape.
+
+        Both the legacy in-memory graph and the on-demand SQLite planner call
+        this method.  Therefore changing the topology materialization cannot
+        silently turn observed passages into a success probability or project
+        a historical GTFS prior as a current timetable.
+        """
+        route_ids = [str(value) for value in candidate.get("route_ids", ())]
+        service_verified = [
+            route
+            for route in route_ids
+            if self._service_verified(service_evidence.get(route))
+        ]
+        service_observed = [
+            route
+            for route in route_ids
+            if self._has_service_observation(service_evidence.get(route))
+        ]
+        passage_covered = [
+            route
+            for route in route_ids
+            if self._observed_passage_ratio(passage_history.get(route)) is not None
+        ]
+        reasons: list[str] = []
+        if len(service_verified) != len(route_ids):
+            reasons.append("VERIFIED_TIMETABLE_REQUIRED")
+        if len(passage_covered) != len(route_ids):
+            reasons.append("PASSAGE_HISTORY_REQUIRED")
+        # Consecutive vehicle passages measure observation coverage only.
+        # They are not a whole-journey success model.
+        reasons.append("VALIDATED_JOURNEY_SUCCESS_MODEL_REQUIRED")
+
+        steps = list(candidate.get("steps", ()))
+        base_evidence = candidate.get("evidence")
+        evidence = dict(base_evidence) if isinstance(base_evidence, Mapping) else {}
+        if "ride_edges" not in evidence:
+            evidence["ride_edges"] = sum(
+                1 for step in steps if step.get("kind") == "ride"
+            )
+        if "transfer_edges" not in evidence:
+            evidence["transfer_edges"] = sum(
+                1 for step in steps if step.get("kind") == "transfer"
+            )
+        if "sources" not in evidence:
+            evidence["sources"] = sorted(
+                {
+                    str((step.get("evidence") or {}).get("source") or (step.get("evidence") or {}).get("type"))
+                    for step in steps
+                    if (step.get("evidence") or {}).get("source")
+                    or (step.get("evidence") or {}).get("type")
+                }
+            )
+        evidence.update(
+            {
+                "topology": "all_active_hydrated_route_sequences",
                 "service_routes": {
-                    route: self._evidence_summary(service_evidence.get(route)) for route in route_ids
+                    route: self._evidence_summary(service_evidence.get(route))
+                    for route in route_ids
                 },
                 "passage_routes": {
-                    route: self._evidence_summary(passage_history.get(route)) for route in route_ids
+                    route: self._evidence_summary(passage_history.get(route))
+                    for route in route_ids
                 },
-            },
-            "coverage": {
-                "structural": structural_coverage,
-                "service_routes": len(service_verified),
-                "schedule_routes": len(service_verified),
-                "observed_service_routes": len(service_observed),
-                "passage_routes": len(passage_covered),
-                "total_routes": len(route_ids),
-                "minimum_passage_samples": self.min_passage_samples,
+            }
+        )
+        result = dict(candidate)
+        result.update(
+            {
+                "criterion": criterion,
+                "status": "DATA_GAP" if reasons else "READY",
+                "reasons": reasons,
+                "success_probability": None,
+                "probability_basis": None,
+                "probability_scope": None,
+                "reliability": {
+                    "status": "DATA_GAP",
+                    "success_probability": None,
+                    "historical_gtfs_prior": {
+                        "role": "model_weight_only",
+                        "matched_to_current_route": False,
+                        "value": None,
+                        "projection_allowed": False,
+                    },
+                    "trust_assumption": {
+                        "code": "USUALLY_ON_TIME",
+                        "empirical_probability": False,
+                    },
+                    "requirements": [
+                        "CURRENT_OFFICIAL_TIMETABLE",
+                        "MATCHED_ACTUAL_EARLY_LATE_OUTCOMES",
+                        "MATCHED_HISTORICAL_GTFS_PRIOR",
+                    ],
+                },
+                "estimated_minutes": None,
+                "operating_assumption": False,
+                "route_ids": route_ids,
+                "steps": steps,
+                "evidence": evidence,
+                "coverage": {
+                    "structural": 1.0 if route_ids else 0.0,
+                    "service_routes": len(service_verified),
+                    "schedule_routes": len(service_verified),
+                    "observed_service_routes": len(service_observed),
+                    "passage_routes": len(passage_covered),
+                    "total_routes": len(route_ids),
+                    "minimum_passage_samples": self.min_passage_samples,
+                },
+            }
+        )
+        return result
+
+    @staticmethod
+    def _endpoint_walk_step(
+        *,
+        access: Mapping[str, Any],
+        graph_node: GraphNode,
+        distance_m: float,
+        access_kind: str,
+    ) -> dict[str, Any]:
+        access_point = {
+            "city_code": access["city_code"],
+            "node_id": access["node_id"],
+            "node_name": access["node_name"],
+            "node_order": None,
+            "latitude": access["latitude"],
+            "longitude": access["longitude"],
+        }
+        graph_point = {
+            "city_code": graph_node.city_code,
+            "node_id": graph_node.node_id,
+            "node_name": graph_node.node_name,
+            "node_order": graph_node.node_order,
+            "latitude": graph_node.latitude,
+            "longitude": graph_node.longitude,
+        }
+        return {
+            "kind": "walk",
+            "route_id": None,
+            "from": access_point if access_kind == "access" else graph_point,
+            "to": graph_point if access_kind == "access" else access_point,
+            "distance_m": round(max(0.0, distance_m), 3),
+            "access_kind": access_kind,
+            "evidence": {
+                "type": "catalog_coordinate_access",
+                "source": "official_static_catalog_to_hydrated_topology",
             },
         }
 
@@ -787,21 +1120,38 @@ class JourneyPlanner:
 
     def _graph_metadata(self, graph: GraphSnapshot) -> dict[str, Any]:
         catalog_routes: int | None = graph.catalog_route_count or None
-        if catalog_routes is None:
+        topology_targets: int | None = graph.topology_target_count or None
+        if topology_targets is not None:
+            coverage_denominator = topology_targets
+            coverage_basis = "TAGO_DISCOVERED_TARGETS"
+            missing_routes = max(0, topology_targets - graph.topology_hydrated_count)
+            nationwide_complete = bool(
+                graph.topology_discovery_complete
+                and graph.topology_complete_count == topology_targets
+                and graph.topology_hydrated_count >= topology_targets
+            )
+            coverage_status = "COMPLETE" if nationwide_complete else "PARTIAL"
+        elif catalog_routes is None:
+            coverage_denominator = None
+            coverage_basis = "NONE"
             coverage_status = "UNVERIFIED"
             nationwide_complete: bool | None = None
             missing_routes: int | None = None
         else:
+            coverage_denominator = catalog_routes
+            coverage_basis = "STATIC_CATALOG_COUNT_UNVERIFIED_NAMESPACE"
             missing_routes = max(0, catalog_routes - graph.hydrated_route_count)
-            nationwide_complete = missing_routes == 0
-            coverage_status = "COMPLETE" if nationwide_complete else "PARTIAL"
+            nationwide_complete = False if missing_routes else None
+            coverage_status = "PARTIAL" if missing_routes else "UNVERIFIED"
         return {
             "version": graph.version,
             "catalog_version": graph.catalog_version,
             "algorithm": "directed_dijkstra",
             "alternative_algorithm": "deterministic_penalized_dijkstra",
             "topology_scope": "all_active_hydrated_route_sequences",
-            "directionality": "ascending_authoritative_node_order_only",
+            "directionality": (
+                "ascending_node_order_with_nonempty_direction_boundaries"
+            ),
             "nodes": len(graph.nodes),
             # Only authoritative ride edges are materialised. Transfer edges
             # are derived lazily from exact-ID and spatial stop indexes.
@@ -814,7 +1164,13 @@ class JourneyPlanner:
                 "status": coverage_status,
                 "nationwide_topology_complete": nationwide_complete,
                 "hydrated_routes": graph.hydrated_route_count,
+                "hydrated_discovered_targets": graph.topology_hydrated_count,
                 "catalog_routes": catalog_routes,
+                "discovered_targets": topology_targets,
+                "completed_targets": graph.topology_complete_count,
+                "discovery_complete": graph.topology_discovery_complete,
+                "denominator_routes": coverage_denominator,
+                "basis": coverage_basis,
                 "missing_routes": missing_routes,
                 "cities": graph.city_count,
                 "route_states": len(graph.nodes),

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from collections import Counter
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -16,6 +17,7 @@ sys.path.insert(0, str(SERVICE_DIR))
 
 from journey_planner import (  # noqa: E402
     JourneyPlanner,
+    MAX_WALK_TARGET_STOPS,
     PlannerLimitError,
     PlannerValidationError,
 )
@@ -44,7 +46,8 @@ class JourneyPlannerCase(unittest.TestCase):
 
     @staticmethod
     def stop(
-        node_id, order, latitude, longitude, *, can_board=True, can_alight=True
+        node_id, order, latitude, longitude, *, can_board=True, can_alight=True,
+        direction="",
     ):
         return {
             "node_id": node_id,
@@ -52,6 +55,7 @@ class JourneyPlannerCase(unittest.TestCase):
             "node_order": order,
             "latitude": latitude,
             "longitude": longitude,
+            "direction": direction,
             "can_board": can_board,
             "can_alight": can_alight,
         }
@@ -88,6 +92,286 @@ class JourneyPlannerCase(unittest.TestCase):
         self.assertEqual(first["graph"]["coverage"]["hydrated_routes"], 3)
         self.assertIsNone(first["graph"]["coverage"]["nationwide_topology_complete"])
         self.assertEqual(first["graph"]["transfer_edges"], "LAZY_STOP_INDEX")
+
+    def test_graph_coverage_uses_full_catalog_denominator(self):
+        self.hydrate(
+            "HYDRATED_ONLY",
+            [
+                self.stop("O", 1, 36.5000, 127.3000),
+                self.stop("D", 2, 36.5100, 127.3100),
+            ],
+        )
+        snapshot = replace(
+            self.catalog.planning_snapshot(),
+            catalog_route_count=3,
+        )
+
+        coverage = JourneyPlanner().plan(
+            snapshot,
+            origin_node_id="O",
+            destination_node_id="D",
+            alternatives=1,
+        )["graph"]["coverage"]
+
+        self.assertEqual(coverage["hydrated_routes"], 1)
+        self.assertEqual(coverage["catalog_routes"], 3)
+        self.assertEqual(coverage["missing_routes"], 2)
+        self.assertEqual(coverage["status"], "PARTIAL")
+        self.assertFalse(coverage["nationwide_topology_complete"])
+
+    def test_graph_coverage_counts_only_hydrated_discovered_targets(self):
+        self.hydrate(
+            "LEGACY_ONLY",
+            [
+                self.stop("O", 1, 36.5000, 127.3000),
+                self.stop("D", 2, 36.5100, 127.3100),
+            ],
+        )
+        snapshot = replace(
+            self.catalog.planning_snapshot(),
+            topology_target_count=5,
+            topology_complete_count=5,
+            topology_discovery_complete=True,
+            topology_hydrated_count=4,
+        )
+
+        coverage = JourneyPlanner().plan(
+            snapshot,
+            origin_node_id="O",
+            destination_node_id="D",
+            alternatives=1,
+        )["graph"]["coverage"]
+
+        self.assertEqual(coverage["hydrated_routes"], 1)
+        self.assertEqual(coverage["hydrated_discovered_targets"], 4)
+        self.assertEqual(coverage["missing_routes"], 1)
+        self.assertFalse(coverage["nationwide_topology_complete"])
+
+    def test_real_991_b1_607_direction_reaches_okcheon_with_two_transfers(self):
+        # Current TAGO IDs/orders/coordinates, compressed to the six stops
+        # needed to preserve the authoritative direction and transfer points.
+        self.hydrate(
+            "SJB293000331",
+            [
+                self.stop("SJB293001072", 20, 36.599743, 127.295111),
+                self.stop("SJB293062013", 34, 36.505150, 127.261382),
+            ],
+            city_code="12",
+        )
+        self.hydrate(
+            "DJB30300128",
+            [
+                self.stop(
+                    "DJB8007080", 35, 36.505080, 127.261510,
+                    direction="1",
+                ),
+                self.stop(
+                    "DJB8001420", 54, 36.333435, 127.431404,
+                    direction="1",
+                ),
+            ],
+            city_code="25",
+        )
+        self.hydrate(
+            "DJB30300074",
+            [
+                self.stop(
+                    "DJB8001420", 21, 36.333435, 127.431404,
+                    direction="0",
+                ),
+                self.stop(
+                    "DJB8005033", 53, 36.299640, 127.566340,
+                    direction="0",
+                ),
+            ],
+            city_code="25",
+        )
+        snapshot = self.catalog.snapshot()
+        planner = JourneyPlanner()
+
+        forward = planner.plan(
+            snapshot,
+            origin_node_id="SJB293001072",
+            destination_node_id="DJB8005033",
+            origin_city_code="12",
+            destination_city_code="25",
+            transfer_radius_m=50,
+            alternatives=1,
+        )
+
+        candidate = forward["alternatives"][0]
+        self.assertEqual(
+            candidate["route_ids"],
+            ["SJB293000331", "DJB30300128", "DJB30300074"],
+        )
+        self.assertEqual(candidate["transfers"], 2)
+        transfers = [step for step in candidate["steps"] if step["kind"] == "transfer"]
+        self.assertEqual(len(transfers), 2)
+        self.assertEqual(
+            (transfers[0]["from"]["node_id"], transfers[0]["to"]["node_id"]),
+            ("SJB293062013", "DJB8007080"),
+        )
+        self.assertEqual(transfers[0]["evidence"]["type"], "geodesic_proximity")
+        self.assertLess(transfers[0]["distance_m"], 15)
+        self.assertEqual(
+            (transfers[1]["from"]["node_id"], transfers[1]["to"]["node_id"]),
+            ("DJB8001420", "DJB8001420"),
+        )
+        self.assertEqual(transfers[1]["evidence"]["type"], "shared_node_id")
+
+        reverse = planner.plan(
+            snapshot,
+            origin_node_id="DJB8005033",
+            destination_node_id="SJB293001072",
+            origin_city_code="25",
+            destination_city_code="12",
+            transfer_radius_m=50,
+            alternatives=1,
+        )
+        self.assertEqual(reverse["alternatives"], [])
+        self.assertEqual(reverse["reason"], "NO_DIRECTED_PATH_IN_HYDRATED_GRAPH")
+
+    def test_explicit_direction_changes_split_rides_but_blank_and_distance_do_not(self):
+        self.hydrate(
+            "SPLIT",
+            [
+                self.stop("SO", 1, 36.00, 127.00, direction="0"),
+                self.stop("SA", 2, 36.01, 127.00, direction="0"),
+                self.stop("SB", 3, 36.10, 127.00, direction="1"),
+                self.stop("SD", 4, 36.11, 127.00, direction="1"),
+            ],
+        )
+        self.hydrate(
+            "BLANK_EVIDENCE",
+            [
+                self.stop("BO", 1, 37.00, 128.00, direction="0"),
+                self.stop("BX", 2, 37.01, 128.00, direction=""),
+                self.stop("BD", 3, 37.02, 128.00, direction="1"),
+            ],
+        )
+        self.hydrate(
+            "LONG_SAME_DIRECTION",
+            [
+                self.stop("LO", 1, 34.70, 126.30, direction="2"),
+                self.stop("LD", 2, 34.95, 126.30, direction="2"),
+            ],
+        )
+        self.hydrate(
+            "UNKNOWN_SPLIT",
+            [
+                self.stop("UO", 1, 35.50, 128.50, direction="1"),
+                self.stop("UD", 2, 35.51, 128.50, direction="2"),
+            ],
+        )
+        snapshot = self.catalog.snapshot()
+        planner = JourneyPlanner()
+
+        split = planner.plan(
+            snapshot,
+            origin_node_id="SO",
+            destination_node_id="SD",
+            transfer_radius_m=50,
+            alternatives=1,
+        )
+        self.assertEqual(split["alternatives"], [])
+        self.assertEqual(split["reason"], "NO_DIRECTED_PATH_IN_HYDRATED_GRAPH")
+        self.assertEqual(
+            planner.plan(
+                snapshot,
+                origin_node_id="SO",
+                destination_node_id="SA",
+                transfer_radius_m=50,
+                alternatives=1,
+            )["alternatives"][0]["route_ids"],
+            ["SPLIT"],
+        )
+        self.assertEqual(
+            planner.plan(
+                snapshot,
+                origin_node_id="SB",
+                destination_node_id="SD",
+                transfer_radius_m=50,
+                alternatives=1,
+            )["alternatives"][0]["route_ids"],
+            ["SPLIT"],
+        )
+
+        blank = planner.plan(
+            snapshot,
+            origin_node_id="BO",
+            destination_node_id="BD",
+            transfer_radius_m=50,
+            alternatives=1,
+        )
+        self.assertEqual(blank["alternatives"][0]["route_ids"], ["BLANK_EVIDENCE"])
+        self.assertEqual(
+            blank["graph"]["directionality"],
+            "ascending_node_order_with_nonempty_direction_boundaries",
+        )
+
+        long_same_direction = planner.plan(
+            snapshot,
+            origin_node_id="LO",
+            destination_node_id="LD",
+            transfer_radius_m=50,
+            alternatives=1,
+        )
+        self.assertEqual(
+            long_same_direction["alternatives"][0]["route_ids"],
+            ["LONG_SAME_DIRECTION"],
+        )
+        unknown_split = planner.plan(
+            snapshot,
+            origin_node_id="UO",
+            destination_node_id="UD",
+            transfer_radius_m=50,
+            alternatives=1,
+        )
+        self.assertEqual(unknown_split["alternatives"], [])
+        self.assertEqual(
+            unknown_split["reason"], "NO_DIRECTED_PATH_IN_HYDRATED_GRAPH"
+        )
+
+    def test_static_okcheon_stop_snaps_to_routable_terminal_with_walk_step(self):
+        self.hydrate(
+            "DJB30300074",
+            [
+                self.stop("O", 1, 36.290000, 127.550000),
+                self.stop("DJB8005033", 2, 36.299640, 127.566340),
+            ],
+            city_code="25",
+        )
+
+        result = JourneyPlanner().plan(
+            self.catalog.snapshot(),
+            origin_node_id="O",
+            destination_node_id="OCB276000024",
+            origin_city_code="25",
+            destination_city_code="33330",
+            transfer_radius_m=50,
+            alternatives=1,
+            destination_access={
+                "city_code": "33330",
+                "node_id": "OCB276000024",
+                "node_name": "옥천버스앞",
+                "latitude": 36.299573,
+                "longitude": 127.566392,
+            },
+        )
+
+        candidate = result["alternatives"][0]
+        self.assertEqual(candidate["route_ids"], ["DJB30300074"])
+        self.assertEqual(candidate["steps"][-1]["kind"], "walk")
+        self.assertEqual(candidate["steps"][-1]["access_kind"], "egress")
+        self.assertEqual(
+            (
+                candidate["steps"][-1]["from"]["node_id"],
+                candidate["steps"][-1]["to"]["node_id"],
+            ),
+            ("DJB8005033", "OCB276000024"),
+        )
+        self.assertGreater(candidate["walking_m"], 0)
+        self.assertLess(candidate["walking_m"], 50)
 
     def test_exact_shared_stop_builds_a_real_multi_route_journey(self):
         self.hydrate(
@@ -445,6 +729,80 @@ class JourneyPlannerCase(unittest.TestCase):
             planner.build_graph(self.catalog.snapshot(), transfer_radius_m=49)
         with self.assertRaises(PlannerValidationError):
             planner.build_graph(self.catalog.snapshot(), transfer_radius_m=801)
+
+    def test_proximity_transfer_searches_two_longitude_cells_at_korean_latitude(self):
+        self.hydrate(
+            "WEST",
+            [
+                self.stop("O", 1, 36.4900, 127.2900),
+                self.stop("X", 2, 36.5000, 127.3000),
+            ],
+        )
+        self.hydrate(
+            "EAST",
+            [
+                self.stop("Y", 1, 36.5000, 127.3030),
+                self.stop("D", 2, 36.5100, 127.3130),
+            ],
+        )
+        planner = JourneyPlanner()
+        graph = planner.build_graph(self.catalog.snapshot(), transfer_radius_m=300)
+        x_group = graph.state_stop_groups[graph.node_id_indexes["X"][0]]
+        y_group = graph.state_stop_groups[graph.node_id_indexes["Y"][0]]
+        x_coordinate = graph.stop_group_coordinates[x_group]
+        y_coordinate = graph.stop_group_coordinates[y_group]
+        x_cell = (
+            math.floor(x_coordinate[0] / graph.spatial_cell_degrees),
+            math.floor(x_coordinate[1] / graph.spatial_cell_degrees),
+        )
+        y_cell = (
+            math.floor(y_coordinate[0] / graph.spatial_cell_degrees),
+            math.floor(y_coordinate[1] / graph.spatial_cell_degrees),
+        )
+        self.assertEqual(abs(x_cell[1] - y_cell[1]), 2)
+
+        result = planner.plan(
+            self.catalog.snapshot(),
+            origin_node_id="O",
+            destination_node_id="D",
+            transfer_radius_m=300,
+            alternatives=1,
+        )
+
+        transfer = next(
+            step
+            for step in result["alternatives"][0]["steps"]
+            if step["kind"] == "transfer"
+        )
+        self.assertEqual((transfer["from"]["node_id"], transfer["to"]["node_id"]), ("X", "Y"))
+        self.assertLess(transfer["distance_m"], 300)
+
+    def test_walk_target_limit_fails_explicitly_instead_of_slicing_candidates(self):
+        self.assertGreaterEqual(MAX_WALK_TARGET_STOPS, 128)
+        self.hydrate(
+            "SOURCE",
+            [
+                self.stop("O", 1, 36.4900, 127.2900),
+                self.stop("X", 2, 36.5000, 127.3000),
+            ],
+        )
+        for index in range(MAX_WALK_TARGET_STOPS + 1):
+            self.hydrate(
+                f"TARGET_{index:03d}",
+                [
+                    self.stop(f"Y_{index:03d}", 1, 36.5000, 127.3000),
+                    self.stop(f"D_{index:03d}", 2, 36.5100, 127.3100),
+                ],
+            )
+        planner = JourneyPlanner()
+        graph = planner.build_graph(self.catalog.snapshot(), transfer_radius_m=300)
+        source_index = graph.node_id_indexes["X"][0]
+
+        with self.assertRaisesRegex(
+            PlannerLimitError,
+            rf"walk-transfer targets exceed the {MAX_WALK_TARGET_STOPS}-stop CPU bound",
+        ):
+            planner._transfer_edges(graph, source_index)
 
     def test_graph_snapshot_and_cache_are_immutable(self):
         self.hydrate_three_paths()

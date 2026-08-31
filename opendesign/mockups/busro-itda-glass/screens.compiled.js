@@ -46,35 +46,49 @@ function journeyStopsMatch(left, right) {
 function summarizeJourneySections(journey) {
   const sections = [];
   let currentRide = null;
+  const routeRefs = new Map((Array.isArray(journey?.routes) ? journey.routes : []).map((route) => [
+    String(route?.route_id || route?.routeId || ""),
+    String(route?.route_no || route?.routeNo || route?.route_id || route?.routeId || "")
+  ]));
   for (const step of Array.isArray(journey?.steps) ? journey.steps : []) {
     const from = step?.from || {};
     const to = step?.to || {};
     const distance = Number(step?.distance_m);
     if (step?.kind === "ride" && step.route_id) {
       const routeId = String(step.route_id);
+      const segmentStops = Array.isArray(step.segment_stops) && step.segment_stops.length >= 2 ? step.segment_stops : [from, to];
+      const explicitStopCount = Number(step.stop_count);
+      const orderDelta = Number(step.stop_order_delta);
+      const stepStopCount = Number.isFinite(explicitStopCount) && explicitStopCount >= 2 ? Math.round(explicitStopCount) : Number.isFinite(orderDelta) && orderDelta >= 1 ? Math.round(orderDelta) + 1 : Math.max(2, segmentStops.length);
+      const stepEdgeCount = Math.max(1, stepStopCount - 1);
       const continues = currentRide && currentRide.routeId === routeId && journeyStopsMatch(currentRide.to, from);
       if (continues) {
         currentRide.to = to;
-        currentRide.edgeCount += 1;
+        currentRide.edgeCount += stepEdgeCount;
+        currentRide.stopCount += stepEdgeCount;
         currentRide.distanceM += Number.isFinite(distance) ? distance : 0;
-        currentRide.stops.push(to);
+        currentRide.stops.push(...segmentStops.slice(1));
       } else {
         currentRide = {
           kind: "ride",
           routeId,
+          routeRef: routeRefs.get(routeId) || routeId,
           from,
           to,
-          edgeCount: 1,
+          edgeCount: stepEdgeCount,
+          stopCount: stepStopCount,
           distanceM: Number.isFinite(distance) ? distance : 0,
-          stops: [from, to]
+          stops: segmentStops
         };
         sections.push(currentRide);
       }
       continue;
     }
     currentRide = null;
+    const accessKind = String(step?.access_kind || "").toLowerCase();
+    const sectionKind = step?.kind === "transfer" ? "transfer" : step?.kind === "walk" && accessKind === "access" ? "access" : step?.kind === "walk" && accessKind === "egress" ? "egress" : "walk";
     sections.push({
-      kind: "transfer",
+      kind: sectionKind,
       routeId: "",
       from,
       to,
@@ -87,19 +101,25 @@ function summarizeJourneySections(journey) {
 }
 function buildJourneyMapPayload(sections) {
   const lines = [];
+  const walkingLines = [];
   const stops = [];
   for (const section of sections) {
-    if (section.kind !== "ride") continue;
-    const routeStops = section.stops.filter(validJourneyCoordinate).map(normalizeJourneyMapStop);
-    if (routeStops.length < 2) continue;
-    lines.push(routeStops.map((stop) => [stop.longitude, stop.latitude]));
-    routeStops.forEach((stop) => {
+    const sectionStops = section.stops.filter(validJourneyCoordinate).map(normalizeJourneyMapStop);
+    sectionStops.forEach((stop) => {
       const previous = stops[stops.length - 1];
       if (!previous || previous.node_id !== stop.node_id || previous.node_order !== stop.node_order) stops.push(stop);
     });
+    if (sectionStops.length < 2) continue;
+    const line = sectionStops.map((stop) => [stop.longitude, stop.latitude]);
+    if (!line.some((point, index) => index > 0 && (point[0] !== line[0][0] || point[1] !== line[0][1]))) continue;
+    lines.push(line);
+    if (section.kind !== "ride") walkingLines.push(line);
   }
-  const geometry = lines.length === 1 ? { type: "LineString", coordinates: lines[0] } : lines.length > 1 ? { type: "MultiLineString", coordinates: lines } : null;
-  return { geometry, stops };
+  return {
+    geometry: journeyGeometryFromLines(lines),
+    walkingGeometry: journeyGeometryFromLines(walkingLines),
+    stops
+  };
 }
 const JOURNEY_GEOMETRY_REQUEST_CACHE = /* @__PURE__ */ new Map();
 const MAX_JOURNEY_GEOMETRY_CACHE = 12;
@@ -130,9 +150,20 @@ function journeyGeometryLines(geometry) {
   if (geometry?.type === "LineString") return [geometry.coordinates];
   return geometry?.type === "MultiLineString" ? geometry.coordinates : [];
 }
+function journeyGeometryFromLines(lines) {
+  if (!Array.isArray(lines) || lines.length === 0) return null;
+  return lines.length === 1 ? { type: "LineString", coordinates: lines[0] } : { type: "MultiLineString", coordinates: lines };
+}
+function mergeJourneyGeometry(primary, supplemental) {
+  return journeyGeometryFromLines([
+    ...journeyGeometryLines(primary),
+    ...journeyGeometryLines(supplemental)
+  ]);
+}
 function buildJourneyGeometryRequests(sections) {
   return sections.filter((section) => section.kind === "ride" && section.routeId).map((section) => ({
     routeId: section.routeId,
+    routeRef: section.routeRef || section.routeId,
     stops: section.stops.filter(validJourneyCoordinate).map(normalizeJourneyMapStop)
   })).filter((request) => request.stops.length >= 2);
 }
@@ -140,6 +171,7 @@ function journeyGeometryRequestKey(requests) {
   if (requests.length === 0) return "journey-geometry:none";
   return JSON.stringify(requests.map((request) => [
     request.routeId,
+    request.routeRef,
     request.stops.map((stop) => [stop.node_id, stop.node_order, stop.latitude, stop.longitude])
   ]));
 }
@@ -148,24 +180,43 @@ function requestJourneyGeometry(requestKey, requests) {
   if (JOURNEY_GEOMETRY_REQUEST_CACHE.size >= MAX_JOURNEY_GEOMETRY_CACHE) {
     JOURNEY_GEOMETRY_REQUEST_CACHE.delete(JOURNEY_GEOMETRY_REQUEST_CACHE.keys().next().value);
   }
-  const request = Promise.allSettled(requests.map((item) => BusroApi.routeGeometry(item.routeId, item.stops))).then((outcomes) => {
-    if (outcomes.some((outcome) => outcome.status !== "fulfilled")) return { status: "gap" };
-    const payloads = outcomes.map((outcome) => outcome.value);
-    const sources = payloads.map((payload) => String(payload?.geometry_source || ""));
-    if (sources.some((source2) => !["osm_bus_relation", "osm_road_route_estimate"].includes(source2))) return { status: "gap" };
-    const geometries = payloads.map((payload) => normalizeJourneyGeometry(payload?.geometry));
-    if (geometries.some((geometry2) => !geometry2)) return { status: "gap" };
-    const lines = geometries.flatMap(journeyGeometryLines);
+  const request = Promise.allSettled(requests.map((item) => BusroApi.routeGeometry(item.routeRef, item.stops))).then((outcomes) => {
+    const resolved = [];
+    const fallbackRoutes = [];
+    const lines = [];
+    outcomes.forEach((outcome, index) => {
+      const requestItem = requests[index];
+      const payload = outcome.status === "fulfilled" ? outcome.value : null;
+      const source2 = String(payload?.geometry_source || "");
+      const geometry2 = ["osm_bus_relation", "osm_road_route_estimate"].includes(source2) ? normalizeJourneyGeometry(payload?.geometry) : null;
+      if (geometry2) {
+        lines.push(...journeyGeometryLines(geometry2));
+        resolved.push({ routeRef: requestItem.routeRef, source: source2, precision: String(payload?.precision || "") });
+        return;
+      }
+      const fallbackLine = requestItem.stops.filter(validJourneyCoordinate).map((stop) => [Number(stop.longitude), Number(stop.latitude)]);
+      if (fallbackLine.length >= 2) {
+        lines.push(fallbackLine);
+        fallbackRoutes.push(requestItem.routeRef);
+      }
+    });
     if (lines.length === 0) return { status: "gap" };
     const geometry = lines.length === 1 ? { type: "LineString", coordinates: lines[0] } : { type: "MultiLineString", coordinates: lines };
-    const source = sources.every((item) => item === "osm_bus_relation") ? "osm_bus_relation" : sources.every((item) => item === "osm_road_route_estimate") ? "osm_road_route_estimate" : "mixed_osm_geometry";
+    const sources = resolved.map((item) => item.source);
+    const source = fallbackRoutes.length > 0 && resolved.length > 0 ? "partial_osm_geometry" : fallbackRoutes.length > 0 ? "ordered_stop_fallback" : sources.every((item) => item === "osm_bus_relation") ? "osm_bus_relation" : sources.every((item) => item === "osm_road_route_estimate") ? "osm_road_route_estimate" : "mixed_osm_geometry";
     return {
       status: "ready",
       geometry,
       source,
-      precision: [...new Set(payloads.map((payload) => String(payload?.precision || "")).filter(Boolean))].join(",")
+      precision: [...new Set(resolved.map((item) => item.precision).filter(Boolean))].join(","),
+      resolvedRoutes: resolved.map((item) => item.routeRef),
+      fallbackRoutes,
+      retryable: fallbackRoutes.length > 0
     };
-  }).catch(() => ({ status: "gap" }));
+  }).catch(() => ({ status: "gap" })).then((result) => {
+    if (result.status !== "ready" || result.retryable) JOURNEY_GEOMETRY_REQUEST_CACHE.delete(requestKey);
+    return result;
+  });
   JOURNEY_GEOMETRY_REQUEST_CACHE.set(requestKey, request);
   return request;
 }
@@ -244,6 +295,20 @@ function journeyMapPresentation(state, stopCount) {
     tone: "mixed",
     detail: `\uB178\uC120\uBCC4 OSM \uAD00\uACC4 \uB610\uB294 \uB3C4\uB85C \uCD94\uC815 \uD615\uC0C1\uC744 \uC774\uC5B4 \uD45C\uC2DC\uD569\uB2C8\uB2E4. \uC2E4\uC81C \uCC28\uB7C9 GPS \uADA4\uC801\uC740 \uC544\uB2D9\uB2C8\uB2E4.`
   };
+  if (state.source === "partial_osm_geometry") return {
+    title: "OSM \uB178\uC120 \uD615\uC0C1 \xB7 \uC815\uB958\uC7A5 \uC21C\uC11C \uBCF4\uC644",
+    badge: "\uAD6C\uAC04\uBCC4 \uAC80\uC99D",
+    icon: "map-trifold",
+    tone: "mixed",
+    detail: `OSM \uD615\uC0C1 ${state.resolvedRoutes?.length || 0}\uAC1C \uAD6C\uAC04\uACFC \uACF5\uC2DD \uC815\uB958\uC7A5 \uC21C\uC11C \uBCF4\uC644 ${state.fallbackRoutes?.length || 0}\uAC1C \uAD6C\uAC04\uC744 \uD568\uAED8 \uD45C\uC2DC\uD569\uB2C8\uB2E4. \uC2E4\uC81C \uCC28\uB7C9 GPS \uADA4\uC801\uC740 \uC544\uB2D9\uB2C8\uB2E4.`
+  };
+  if (state.source === "ordered_stop_fallback") return {
+    title: "\uACF5\uC2DD \uC815\uB958\uC7A5 \uC21C\uC11C \uACBD\uB85C",
+    badge: "OSM \uD615\uC0C1 \uC7AC\uC2DC\uB3C4 \uAC00\uB2A5",
+    icon: "path",
+    tone: "estimate",
+    detail: `\uACF5\uC2DD \uACBD\uC720 \uC815\uB958\uC7A5 ${stopCount}\uAC1C\uC758 \uC21C\uC11C\uB97C \uC5F0\uACB0\uD588\uC2B5\uB2C8\uB2E4. \uB3C4\uB85C \uD615\uC0C1\uC774\uB098 \uC2E4\uC81C \uCC28\uB7C9 GPS \uADA4\uC801\uC740 \uC544\uB2D9\uB2C8\uB2E4.`
+  };
   return {
     title: "\uBC84\uC2A4 \uC774\uB3D9 \uACBD\uB85C",
     badge: state.status === "loading" ? "\uB3C4\uB85C \uACBD\uB85C \uBD88\uB7EC\uC624\uB294 \uC911" : "\uB300\uB7B5\uC801\uC778 \uACBD\uB85C",
@@ -275,8 +340,9 @@ function JourneyRouteMap({ sections, fromName, toName }) {
     };
   }, [requestKey]);
   const geometryState = resolvedGeometry.key === requestKey ? resolvedGeometry : { key: requestKey, status: geometryRequests.length ? "loading" : "gap", geometry: null, source: "" };
-  const displayedGeometry = geometryState.status === "ready" && geometryState.geometry ? geometryState.geometry : mapPayload.geometry;
-  const presentation = journeyMapPresentation(geometryState, mapPayload.stops.length);
+  const displayedGeometry = geometryState.status === "ready" && geometryState.geometry ? mergeJourneyGeometry(geometryState.geometry, mapPayload.walkingGeometry) : mapPayload.geometry;
+  const routeStopCount = sections.filter((section) => section.kind === "ride").reduce((sum, section) => sum + Math.max(2, Number(section.stopCount) || section.stops.length), 0);
+  const presentation = journeyMapPresentation(geometryState, routeStopCount || mapPayload.stops.length);
   if (!mapPayload.geometry) {
     return /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "map-trifold", title: "\uC9C0\uB3C4\uB97C \uD45C\uC2DC\uD560 \uC218 \uC5C6\uC5B4\uC694" }, "\uC774 \uACBD\uB85C\uC758 \uC815\uB958\uC7A5 \uC704\uCE58\uB97C \uB2E4\uC2DC \uD655\uC778\uD574 \uC8FC\uC138\uC694.");
   }
@@ -321,10 +387,16 @@ function JourneyScreen({ journey, connection, onExplore }) {
     const stepFrom = section.from || {};
     const stepTo = section.to || {};
     const isTransfer = section.kind === "transfer";
-    const stopCount = section.edgeCount + 1;
+    const isAccess = section.kind === "access";
+    const isEgress = section.kind === "egress";
+    const isWalk = section.kind !== "ride";
+    const stopCount = Number(section.stopCount) || section.edgeCount + 1;
     const intermediateCount = Math.max(0, stopCount - 2);
-    const stepLabel = isTransfer ? "\uD658\uC2B9" : routeLabels.get(section.routeId) || section.routeId || "\uBC84\uC2A4";
-    return /* @__PURE__ */ React.createElement("article", { key: `${section.kind || "step"}-${section.routeId || "none"}-${index}`, className: index === 0 ? "current" : "" }, /* @__PURE__ */ React.createElement("div", { className: "leg-rail" }, /* @__PURE__ */ React.createElement("span", null, index + 1), /* @__PURE__ */ React.createElement("i", null)), /* @__PURE__ */ React.createElement("div", { className: "leg-card" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", null, /* @__PURE__ */ React.createElement("span", { className: "line-chip blue" }, stepLabel), isTransfer ? "\uAC78\uC5B4\uC11C \uD658\uC2B9" : "\uBC84\uC2A4 \uC774\uB3D9"), /* @__PURE__ */ React.createElement("h3", null, stepFrom.node_name || stepFrom.node_id || "\uC2B9\uCC28 \uC815\uB958\uC7A5", " \u2192 ", stepTo.node_name || stepTo.node_id || "\uD558\uCC28 \uC815\uB958\uC7A5"), /* @__PURE__ */ React.createElement("small", null, isTransfer ? `\uB3C4\uBCF4 ${formatJourneyDistance(section.distanceM)}` : `${stopCount}\uAC1C \uC815\uB958\uC7A5 \xB7 \uC911\uAC04 \uC815\uB958\uC7A5 ${intermediateCount}\uAC1C`))));
+    const stepLabel = isAccess ? "\uCD9C\uBC1C \uC811\uADFC" : isEgress ? "\uB3C4\uCC29 \uC774\uD0C8" : isTransfer ? "\uD658\uC2B9" : isWalk ? "\uB3C4\uBCF4" : routeLabels.get(section.routeId) || section.routeId || "\uBC84\uC2A4";
+    const movementLabel = isAccess ? "\uCCAB \uC2B9\uCC28 \uC815\uB958\uC7A5\uAE4C\uC9C0 \uAC77\uAE30" : isEgress ? "\uD558\uCC28 \uD6C4 \uB3C4\uCC29 \uC815\uB958\uC7A5\uAE4C\uC9C0 \uAC77\uAE30" : isTransfer ? "\uAC78\uC5B4\uC11C \uD658\uC2B9" : isWalk ? "\uAC78\uC5B4\uC11C \uC774\uB3D9" : "\uBC84\uC2A4 \uC774\uB3D9";
+    const fromFallback = isAccess ? "\uC120\uD0DD \uCD9C\uBC1C \uC815\uB958\uC7A5" : isEgress ? "\uB9C8\uC9C0\uB9C9 \uD558\uCC28 \uC815\uB958\uC7A5" : "\uC2B9\uCC28 \uC815\uB958\uC7A5";
+    const toFallback = isAccess ? "\uCCAB \uC2B9\uCC28 \uC815\uB958\uC7A5" : isEgress ? "\uC120\uD0DD \uB3C4\uCC29 \uC815\uB958\uC7A5" : "\uD558\uCC28 \uC815\uB958\uC7A5";
+    return /* @__PURE__ */ React.createElement("article", { key: `${section.kind || "step"}-${section.routeId || "none"}-${index}`, className: index === 0 ? "current" : "" }, /* @__PURE__ */ React.createElement("div", { className: "leg-rail" }, /* @__PURE__ */ React.createElement("span", null, index + 1), /* @__PURE__ */ React.createElement("i", null)), /* @__PURE__ */ React.createElement("div", { className: "leg-card" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", null, /* @__PURE__ */ React.createElement("span", { className: "line-chip blue" }, stepLabel), movementLabel), /* @__PURE__ */ React.createElement("h3", null, stepFrom.node_name || stepFrom.node_id || fromFallback, " \u2192 ", stepTo.node_name || stepTo.node_id || toFallback), /* @__PURE__ */ React.createElement("small", null, isWalk ? `\uB3C4\uBCF4 ${formatJourneyDistance(section.distanceM)}` : `${stopCount}\uAC1C \uC815\uB958\uC7A5 \xB7 \uC911\uAC04 \uC815\uB958\uC7A5 ${intermediateCount}\uAC1C`))));
   })), steps.length === 0 && /* @__PURE__ */ React.createElement(InlineNotice, { tone: "warning", icon: "warning-circle", title: "\uC0C1\uC138 \uACBD\uB85C\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC5B4\uC694" }, "\uB2E4\uB978 \uACBD\uB85C\uB97C \uC120\uD0DD\uD574 \uC8FC\uC138\uC694."), sources.length > 0 && /* @__PURE__ */ React.createElement("details", { className: "journey-evidence" }, /* @__PURE__ */ React.createElement("summary", null, /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement(Icon, { name: "seal-check" }), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("strong", null, "\uB370\uC774\uD130 \uCD9C\uCC98"), /* @__PURE__ */ React.createElement("small", null, "\uB178\uC120 \uC815\uBCF4\uAC00 \uC5B4\uB514\uC5D0\uC11C \uC654\uB294\uC9C0 \uD655\uC778\uD560 \uC218 \uC788\uC5B4\uC694."))), /* @__PURE__ */ React.createElement(Icon, { name: "caret-down" })), /* @__PURE__ */ React.createElement("div", { className: "journey-evidence-list" }, sources.map((source) => /* @__PURE__ */ React.createElement("article", { key: source.key }, /* @__PURE__ */ React.createElement("span", null, source.type), /* @__PURE__ */ React.createElement("strong", null, source.label), source.date && /* @__PURE__ */ React.createElement("small", null, "\uAE30\uC900\uC77C ", source.date), source.url && /* @__PURE__ */ React.createElement("a", { href: source.url, target: "_blank", rel: "noreferrer" }, "\uACF5\uC2DD \uC6D0\uBB38 \uBCF4\uAE30 ", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-square-out" })))))), /* @__PURE__ */ React.createElement("button", { className: "liquid-button sticky-action", type: "button", onClick: onExplore }, "\uB2E4\uB978 \uACBD\uB85C \uCC3E\uAE30 ", /* @__PURE__ */ React.createElement(Icon, { name: "arrow-right" })));
 }
 function SettingsSheet({ open, onClose, apiBase, setApiBase, connection, journey, mappings, legs, mappingSummary, settingsError, onMappingChange, onVerifyMapping, onReconnect }) {

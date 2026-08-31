@@ -1,20 +1,20 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-08-31",
-  "sha256": "ebb13fab3315bc3cf1c88d248a99bc4dfdf56e8da580c80797ab69b1ec81e014",
-  "bytes": 95125504,
+  "generated_at": "2026-08-31T21:30:00+09:00",
+  "catalog_revision": 4385,
+  "sha256": "0a547fa0f186739e870e11c8dbd7f7dcdb75cd05d7475e3e529840c0de486832",
+  "bytes": 168718336,
+  "uncompressed_sha256": "0a547fa0f186739e870e11c8dbd7f7dcdb75cd05d7475e3e529840c0de486832",
+  "uncompressed_bytes": 168718336,
+  "archive_sha256": "c326f3c88e2a4363c783b7c9c50f5c185c73c020ce6c3ac523e6c65a2aa4d36f",
+  "archive_bytes": 40939722,
+  "archive_member": "network_catalog.sqlite3",
   "catalog_routes": 7239,
   "catalog_stops": 227054,
-  "active_route_sequences": 3374,
-  "directed_stop_rows": 202977,
-  "unique_graph_stops": 78064,
-  "city_count": 137,
-  "storage_role": "read_only_deployment_catalog",
-  "excluded_runtime_tables": [
-    "topology_discovery_progress",
-    "topology_pages",
-    "topology_progress",
-    "topology_runs",
-    "topology_targets"
-  ]
+  "active_route_sequences": 5247,
+  "directed_stop_rows": 301379,
+  "unique_graph_stops": 107306,
+  "city_count": 138,
+  "storage_role": "immutable_read_only_deployment_catalog",
+  "coverage_state": "partial_official_snapshot"
 }

@@ -267,6 +267,12 @@ LIVE replay는 현재 시간표로 명시적으로 활성화된 동일 feed·서
 - 운영에서는 `collector.py` 또는 동등한 별도 수집 작업을 상시 운영해야 과거 표본이 누적됩니다.
 - SQLite WAL·busy timeout·정규화 인덱스를 사용하지만, 이 표준 라이브러리 서버는 로컬 검증용입니다. 실제 200 동시접속 운영은 별도 배포 서버·작업 큐·공유 DB 구성이 필요합니다.
 
+### Vercel 카탈로그 배포
+
+원본 `data/network_catalog.sqlite3`는 Git과 함수 번들에 넣지 않습니다. 배포 환경의 `BUSRO_CATALOG_ARCHIVE_URL`에는 `latest`가 아닌 고정 GitHub Release 자산 또는 Supabase public object의 HTTPS `.tar.gz` URL만 지정합니다. 아카이브는 정확히 한 개의 regular member `network_catalog.sqlite3`만 가져야 합니다.
+
+런타임은 `data/network_catalog.meta.json`에 고정한 압축 크기·SHA-256과 해제 크기·SHA-256, SQLite magic을 모두 검사한 뒤 `/tmp`에 원자적으로 게시합니다. 압축 상한은 50,000,000 bytes, 해제 상한은 400 MiB입니다. 같은 warm instance에서는 검증된 파일을 재사용합니다.
+
 ## 테스트
 
 ```powershell

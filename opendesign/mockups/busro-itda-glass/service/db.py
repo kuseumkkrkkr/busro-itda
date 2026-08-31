@@ -28,15 +28,33 @@ class Store:
         # this process's short write transactions ordered so a burst of 200
         # distinct collections cannot exhaust busy_timeout and become HTTP 500.
         self._write_lock = threading.RLock()
+        self._write_state_lock = threading.Lock()
+        self._pending_writes = 0
+        self._writer_pins = 0
+        self._writer_connection: sqlite3.Connection | None = None
         path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=5.0)
+    def _open_connection(
+        self, *, check_same_thread: bool = True
+    ) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            self.path,
+            timeout=5.0,
+            check_same_thread=check_same_thread,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=5000")
+        # Keep SQLite's power-loss durability guarantee explicit. Throughput
+        # comes from reusing the serialized WAL writer during a burst, not from
+        # weakening synchronous commit semantics.
+        connection.execute("PRAGMA synchronous=FULL")
+        return connection
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        connection = self._open_connection()
         try:
             yield connection
         finally:
@@ -44,9 +62,64 @@ class Store:
 
     @contextmanager
     def write_connect(self) -> Iterator[sqlite3.Connection]:
+        # Count waiters before entering the writer lock.  During a burst this
+        # keeps one WAL writer connection open across the queued transactions,
+        # avoiding a checkpoint/open/close cycle for every request.  The last
+        # writer closes it, so tests and short-lived services retain the old
+        # deterministic file-lifetime behavior on Windows.
+        with self._write_state_lock:
+            self._pending_writes += 1
         with self._write_lock:
-            with self.connect() as connection:
+            connection: sqlite3.Connection | None = None
+            try:
+                with self._write_state_lock:
+                    if self._writer_connection is None:
+                        self._writer_connection = self._open_connection(
+                            check_same_thread=False
+                        )
+                    connection = self._writer_connection
                 yield connection
+            except BaseException:
+                if connection is not None and connection.in_transaction:
+                    connection.rollback()
+                raise
+            finally:
+                if connection is not None and connection.in_transaction:
+                    connection.rollback()
+                close_connection: sqlite3.Connection | None = None
+                with self._write_state_lock:
+                    self._pending_writes -= 1
+                    if self._pending_writes == 0 and self._writer_pins == 0:
+                        close_connection = self._writer_connection
+                        self._writer_connection = None
+                if close_connection is not None:
+                    close_connection.close()
+
+    def pin_writer(self) -> None:
+        """Keep the serialized WAL writer open for one server lifetime."""
+        with self._write_lock:
+            with self._write_state_lock:
+                if self._writer_connection is None:
+                    self._writer_connection = self._open_connection(
+                        check_same_thread=False
+                    )
+                self._writer_pins += 1
+
+    def unpin_writer(self) -> None:
+        """Release one server pin and close the idle writer deterministically."""
+        close_connection: sqlite3.Connection | None = None
+        with self._write_lock:
+            with self._write_state_lock:
+                if self._writer_pins <= 0:
+                    return
+                self._writer_pins -= 1
+                if self._writer_pins == 0 and self._pending_writes == 0:
+                    close_connection = self._writer_connection
+                    self._writer_connection = None
+            if close_connection is not None:
+                if close_connection.in_transaction:
+                    close_connection.rollback()
+                close_connection.close()
 
     def _initialize(self) -> None:
         with self.connect() as connection:
@@ -251,7 +324,10 @@ class Store:
             return int(row["attempted_calls"]) if row else 0
 
     def get_snapshot_by_idempotency(self, key: str) -> dict[str, Any] | None:
-        with self.connect() as connection:
+        # Collection immediately follows this indexed lookup with a serialized
+        # snapshot insert. Reuse that same guarded connection so a 200-request
+        # burst does not open 200 short-lived SQLite handles on Windows.
+        with self.write_connect() as connection:
             row = connection.execute(
                 "SELECT * FROM snapshots WHERE idempotency_key=?", (key,)
             ).fetchone()
@@ -398,7 +474,7 @@ class Store:
             return [dict(row) for row in rows]
 
     def get_position_snapshot_by_idempotency(self, key: str) -> dict[str, Any] | None:
-        with self.connect() as connection:
+        with self.write_connect() as connection:
             row = connection.execute(
                 "SELECT * FROM position_snapshots WHERE idempotency_key=?", (key,)
             ).fetchone()

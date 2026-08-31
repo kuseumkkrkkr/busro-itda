@@ -3,9 +3,11 @@
 work
 outputs
 opendesign/mockups/busro-itda
-opendesign/mockups/busro-itda-glass/service/tests
-opendesign/mockups/busro-itda-glass/service/data/busro_itda.sqlite3
-opendesign/mockups/busro-itda-glass/service/data/*.sqlite3-wal
-opendesign/mockups/busro-itda-glass/service/data/*.sqlite3-shm
+**/service/data/*.sqlite3
+**/service/data/*.sqlite3-*
+**/service/data/*.lock
+**/service/tests/**
+**/service/benchmarks/**
+**/service/__pycache__/**
 **/__pycache__
 **/*.pyc

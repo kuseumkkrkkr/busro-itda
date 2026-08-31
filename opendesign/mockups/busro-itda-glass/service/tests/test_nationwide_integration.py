@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from urllib.parse import quote
+from unittest.mock import patch
 
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
@@ -18,8 +19,10 @@ if str(SERVICE_DIR) not in sys.path:
 
 from app import BusroService  # noqa: E402
 from config import Settings  # noqa: E402
+from journey_planner import PlannerLimitError  # noqa: E402
 from network_catalog import CatalogValidationError, NetworkCatalog  # noqa: E402
 from server import BusroHTTPServer, Handler  # noqa: E402
+from sqlite_journey_planner import PlannerBusyError  # noqa: E402
 
 
 FIXED_NOW = datetime(2026, 8, 31, 3, 0, tzinfo=timezone.utc)
@@ -27,6 +30,7 @@ STOP_CSV = """정류장번호,정류장명,위도,경도,정보수집일,모바�
 DJB_FIXTURE_STOP_001,샘플기점,36.3504,127.3845,2025-10-31,90001,25,대전광역시,대전BIS
 DJB_FIXTURE_STOP_002,샘플환승점,36.3541,127.3901,2025-10-31,90002,25,대전광역시,대전BIS
 DJB_FIXTURE_STOP_003,샘플종점,36.3582,127.3972,2025-10-31,90003,25,대전광역시,대전BIS
+DJB_FIXTURE_STOP_004,별칭전용종점,36.3582,127.3972,2025-10-31,90004,25,대전광역시,대전BIS
 """.encode("utf-8")
 ROUTE_CSV = """노선 아이디,노선명,기점노드 아이디,종점노드 아이디,기점정류장,종점정류장,지자체코드,지자체명
 DJB_FIXTURE_001,샘플1,DJB_FIXTURE_STOP_001,DJB_FIXTURE_STOP_003,샘플기점,샘플종점,25,대전광역시
@@ -87,6 +91,55 @@ class NationwideIntegrationCase(unittest.TestCase):
         self.assertEqual(candidate["status"], "DATA_GAP")
         self.assertIsNone(candidate["success_probability"])
         self.assertIn("VERIFIED_TIMETABLE_REQUIRED", candidate["reasons"])
+        self.assertEqual(result["graph"]["algorithm"], "sqlite_route_level_dijkstra")
+        self.assertEqual(
+            result["graph"]["topology_materialization"],
+            "on_demand_indexed_sqlite",
+        )
+        self.assertGreater(result["graph"]["nodes"], 0)
+        self.assertGreater(result["graph"]["edges"], 0)
+
+    def test_static_endpoint_alias_keeps_explicit_egress_walk(self) -> None:
+        self.service.network_catalog.hydrate_route_sequence(
+            city_code="25",
+            route_id="ALIAS_ROUTE",
+            ordered_stops=[
+                {
+                    "node_id": "ALIAS_ORIGIN",
+                    "node_name": "별도 기점",
+                    "node_order": 1,
+                    "latitude": 36.3400,
+                    "longitude": 127.3700,
+                },
+                {
+                    "node_id": "HYDRATED_DEST_ALIAS",
+                    "node_name": "샘플종점 승강장",
+                    "node_order": 2,
+                    "latitude": 36.35819,
+                    "longitude": 127.39719,
+                },
+            ],
+            source="TEST:ALIAS",
+            captured_at="2026-08-31T03:00:00Z",
+        )
+
+        result = self.service.generate_journeys(
+            {
+                "from_stop_id": "ALIAS_ORIGIN",
+                "to_stop_id": "DJB_FIXTURE_STOP_004",
+                "from_city_code": "25",
+                "to_city_code": "25",
+                "max_alternatives": 1,
+            }
+        )
+
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["route_ids"], ["ALIAS_ROUTE"])
+        walks = [step for step in candidate["steps"] if step["kind"] == "walk"]
+        self.assertEqual(len(walks), 1)
+        self.assertEqual(walks[0]["access_kind"], "egress")
+        self.assertEqual(walks[0]["to"]["node_id"], "DJB_FIXTURE_STOP_004")
+        self.assertLess(walks[0]["distance_m"], 2)
 
     def test_live_observations_never_substitute_for_verified_timetable(self) -> None:
         route_id = "LIVE_ROUTE_1"
@@ -169,6 +222,62 @@ class NationwideIntegrationCase(unittest.TestCase):
             observed["evidence"]["passage_routes"][route_id]["sample_count"], 8
         )
 
+    def test_app_returns_distinct_bounded_sqlite_alternatives(self) -> None:
+        fixtures = {
+            "DIRECT_APP": [
+                ("APP_O", 1, 36.10, 127.10),
+                ("APP_D", 10, 36.14, 127.14),
+            ],
+            "APP_A1": [
+                ("APP_O", 1, 36.10, 127.10),
+                ("APP_X", 2, 36.11, 127.11),
+            ],
+            "APP_A2": [
+                ("APP_X", 1, 36.11, 127.11),
+                ("APP_D", 2, 36.14, 127.14),
+            ],
+            "APP_B1": [
+                ("APP_O", 1, 36.10, 127.10),
+                ("APP_Y", 2, 36.125, 127.10),
+            ],
+            "APP_B2": [
+                ("APP_Y", 1, 36.125, 127.10),
+                ("APP_D", 2, 36.14, 127.14),
+            ],
+        }
+        for route_id, stops in fixtures.items():
+            self.service.network_catalog.hydrate_route_sequence(
+                city_code="25",
+                route_id=route_id,
+                ordered_stops=[
+                    {
+                        "node_id": node_id,
+                        "node_name": node_id,
+                        "node_order": order,
+                        "latitude": latitude,
+                        "longitude": longitude,
+                    }
+                    for node_id, order, latitude, longitude in stops
+                ],
+                source="TEST:ALTERNATIVES",
+                captured_at="2026-08-31T03:00:00Z",
+            )
+
+        result = self.service.generate_journeys(
+            {
+                "from_stop_id": "APP_O",
+                "to_stop_id": "APP_D",
+                "preference": "diverse",
+                "max_alternatives": 3,
+            }
+        )
+
+        paths = [tuple(candidate["route_ids"]) for candidate in result["candidates"]]
+        self.assertEqual(result["count"], 3)
+        self.assertEqual(len(set(paths)), 3)
+        self.assertTrue(all(candidate["status"] == "DATA_GAP" for candidate in result["candidates"]))
+        self.assertTrue(all(candidate["success_probability"] is None for candidate in result["candidates"]))
+
     def test_invalid_official_rows_are_only_excluded_in_explicit_quarantine_mode(self) -> None:
         payload = STOP_CSV + (
             "DJB_BAD,좌표오류,127.1,36.1,2025-10-31,99999,25,대전광역시,대전BIS\n"
@@ -189,7 +298,7 @@ class NationwideIntegrationCase(unittest.TestCase):
         )
         self.assertEqual(imported["quality"]["rejected_row_count"], 1)
         self.assertEqual(imported["quality"]["coordinates_corrected"], 0)
-        self.assertEqual(len(quarantined.search_stops("", limit=10)), 3)
+        self.assertEqual(len(quarantined.search_stops("", limit=10)), 4)
         self.assertEqual(quarantined.provenance()[0]["quality"]["rejected_row_count"], 1)
 
     def test_fifty_concurrent_journey_reads_are_deterministic(self) -> None:
@@ -239,6 +348,45 @@ class NationwideHTTPCase(NationwideIntegrationCase):
         result = (response.status, dict(response.headers), raw)
         connection.close()
         return result
+
+    def test_sqlite_planner_busy_is_503_with_retry_after(self) -> None:
+        with patch.object(
+            self.service.sqlite_journey_planner,
+            "plan",
+            side_effect=PlannerBusyError("busy"),
+        ):
+            status, headers, raw = self.request(
+                "POST",
+                "/api/journeys/generate",
+                {
+                    "from_stop_id": "DJB_FIXTURE_STOP_001",
+                    "to_stop_id": "DJB_FIXTURE_STOP_003",
+                },
+            )
+        payload = json.loads(raw)
+        self.assertEqual(status, 503)
+        self.assertEqual(headers["Retry-After"], "1")
+        self.assertEqual(payload["error"]["code"], "JOURNEY_PLANNER_BUSY")
+
+    def test_sqlite_planner_limit_is_429_not_input_invalid(self) -> None:
+        with patch.object(
+            self.service.sqlite_journey_planner,
+            "plan",
+            side_effect=PlannerLimitError("bounded query limit"),
+        ):
+            status, headers, raw = self.request(
+                "POST",
+                "/api/journeys/generate",
+                {
+                    "from_stop_id": "DJB_FIXTURE_STOP_001",
+                    "to_stop_id": "DJB_FIXTURE_STOP_003",
+                },
+            )
+        payload = json.loads(raw)
+        self.assertEqual(status, 429)
+        self.assertNotIn("Retry-After", headers)
+        self.assertEqual(payload["error"]["code"], "SEARCH_BUDGET_REACHED")
+        self.assertNotEqual(payload["error"]["code"], "JOURNEY_PLANNER_INPUT_INVALID")
 
     def test_single_origin_web_network_search_generator_and_source_registry(self) -> None:
         status, headers, raw = self.request("GET", "/")
