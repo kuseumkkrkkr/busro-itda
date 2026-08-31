@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from dataclasses import asdict
 import hashlib
 import json
 import math
@@ -16,6 +17,7 @@ from typing import Any
 from config import Settings
 from db import IdempotencyConflict, Store
 from journey_planner import JourneyPlanner, PlannerError, PlannerLimitError
+from municipal_source_discovery import DataGoKrMunicipalDiscovery, DiscoveryError
 from network_catalog import CatalogError, NetworkCatalog
 from osm import OSMError, resolve_route_geometry
 from sqlite_journey_planner import PlannerBusyError, SQLiteJourneyPlanner
@@ -171,6 +173,11 @@ class BusroService:
         }
         self._fixture_delays: dict[str, Any] | None = None
         self._singleflight = _KeyedSingleFlight()
+        # Discovery is read-only and candidate-only.  Keep a short in-process
+        # cache so a public search box cannot fan out identical portal calls.
+        self._municipal_discovery = DataGoKrMunicipalDiscovery(timeout_seconds=8.0)
+        self._municipal_discovery_cache: dict[str, tuple[float, tuple[dict[str, Any], ...]]] = {}
+        self._municipal_discovery_cache_lock = threading.Lock()
 
     def _tago_upstream_call(self, operation: str, callback):
         """Admit and account exactly one live TAGO network attempt."""
@@ -516,6 +523,78 @@ class BusroService:
             "priority_order": self.source_registry.priority_order,
             "sources": records,
             "collection_policy": "TAGO first; permission required where registry says so",
+        }
+
+    def municipal_discover(self, query: dict[str, str]) -> dict[str, Any]:
+        """Search the official portal for reviewable municipal bus sources.
+
+        This endpoint never downloads or activates a result.  It is deliberately
+        separate from ``/api/sources`` so a UI search cannot silently change the
+        graph or turn an arbitrary URL into a server-side fetch.
+        """
+        self._only_fields(query, {"q", "pages", "per_page"}, "query")
+        raw_query = str(query.get("q") or "").strip()
+        if not raw_query:
+            raise AppError("INVALID_MUNICIPAL_DISCOVERY_QUERY", "q is required")
+        if len(raw_query) > 80 or any(ord(character) < 32 for character in raw_query):
+            raise AppError(
+                "INVALID_MUNICIPAL_DISCOVERY_QUERY",
+                "q must contain 1-80 printable characters",
+            )
+        try:
+            pages = self._bounded_int(query.get("pages", 1), "pages", 1, 2)
+            per_page = self._bounded_int(query.get("per_page", 20), "per_page", 1, 50)
+        except (TypeError, ValueError) as exc:
+            raise AppError("INVALID_MUNICIPAL_DISCOVERY_QUERY", "pages and per_page are invalid") from exc
+        cache_key = canonical_hash({"q": raw_query, "pages": pages, "per_page": per_page})
+
+        def discover() -> tuple[tuple[dict[str, Any], ...], bool]:
+            now = time.monotonic()
+            with self._municipal_discovery_cache_lock:
+                cached = self._municipal_discovery_cache.get(cache_key)
+                if cached and cached[0] > now:
+                    return cached[1], True
+                if cached:
+                    del self._municipal_discovery_cache[cache_key]
+            try:
+                candidates = self._municipal_discovery.discover(
+                    [raw_query], pages=pages, per_page=per_page
+                )
+            except DiscoveryError as exc:
+                raise AppError(
+                    "MUNICIPAL_DISCOVERY_UNAVAILABLE",
+                    "공식 지자체 데이터 검색을 잠시 사용할 수 없습니다.",
+                    status=503,
+                ) from exc
+            normalized = tuple(
+                {
+                    **asdict(candidate),
+                    "verification_status": "DISCOVERED_ONLY",
+                    "activation_allowed": False,
+                }
+                for candidate in candidates
+            )
+            with self._municipal_discovery_cache_lock:
+                self._municipal_discovery_cache[cache_key] = (now + 600.0, normalized)
+                if len(self._municipal_discovery_cache) > 32:
+                    oldest = min(self._municipal_discovery_cache.items(), key=lambda item: item[1][0])[0]
+                    self._municipal_discovery_cache.pop(oldest, None)
+            return normalized, False
+
+        discovery_result, shared_hit = self._singleflight.do(
+            "municipal-discovery:" + cache_key, discover
+        )
+        candidates, local_cache_hit = discovery_result
+        return {
+            "ok": True,
+            "source": "DATA_GO_KR_OFFICIAL_SEARCH",
+            "query": raw_query,
+            "pages": pages,
+            "per_page": per_page,
+            "count": len(candidates),
+            "cache_hit": bool(local_cache_hit or shared_hit),
+            "candidates": list(candidates),
+            "policy": "CANDIDATE_ONLY_REVIEW_REQUIRED",
         }
 
     def network_cities(self, query: dict[str, str]) -> dict[str, Any]:

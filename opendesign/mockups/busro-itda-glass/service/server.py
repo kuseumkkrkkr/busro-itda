@@ -207,6 +207,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(200, self.service.network_routes(query))
             elif method == "GET" and parsed.path == "/api/sources":
                 self._json_response(200, self.service.sources(query))
+            elif method == "GET" and parsed.path == "/api/sources/discover":
+                self._json_response(200, self.service.municipal_discover(query))
             elif method == "GET" and parsed.path == "/api/passages":
                 self._json_response(200, self.service.passage_history(query))
             elif method == "POST" and parsed.path == "/api/collect":

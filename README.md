@@ -62,6 +62,9 @@ TAGO가 일시적으로 제공되지 않거나 특정 지자체의 원천이 더
 후보는 `municipal_source_fetch.py`로 원본을 격리 다운로드한 뒤 지자체별
 스키마 importer와 ID·순번 검증을 거쳐야 활성화됩니다.
 
+웹에서도 `GET /api/sources/discover?q=춘천%20버스`로 같은 공식 검색을 호출할 수
+있습니다. 응답은 검수용 후보만 반환하며 자동 수집·활성화하지 않습니다.
+
 ```powershell
 python -B opendesign/mockups/busro-itda-glass/service/municipal_source_discovery.py `
   --query "버스 노선 정류장" `

@@ -23,6 +23,7 @@ if str(SERVICE_DIR) not in sys.path:
 from app import AppError, BusroService  # noqa: E402
 from config import Settings  # noqa: E402
 from db import Store  # noqa: E402
+from municipal_source_discovery import MunicipalCandidate  # noqa: E402
 from server import BusroHTTPServer, Handler  # noqa: E402
 from tago import POSITIONS_URL, TagoError, fetch_positions  # noqa: E402
 
@@ -70,6 +71,39 @@ class ServiceCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_municipal_discovery_is_bounded_candidate_only_and_cached(self) -> None:
+        class FakeDiscovery:
+            def __init__(self):
+                self.calls = []
+
+            def discover(self, queries, *, pages, per_page):
+                self.calls.append((tuple(queries), pages, per_page))
+                return (
+                    MunicipalCandidate(
+                        public_data_pk="15000001",
+                        title="춘천시 버스 노선 정류장",
+                        detail_url="https://www.data.go.kr/data/15000001/fileData.do",
+                        dataset_kind="fileData",
+                        query="춘천 버스",
+                        page=1,
+                    ),
+                )
+
+        fake = FakeDiscovery()
+        self.service._municipal_discovery = fake
+        first = self.service.municipal_discover({"q": "춘천 버스", "pages": "1", "per_page": "20"})
+        second = self.service.municipal_discover({"q": "춘천 버스", "pages": "1", "per_page": "20"})
+        self.assertEqual(first["source"], "DATA_GO_KR_OFFICIAL_SEARCH")
+        self.assertEqual(first["policy"], "CANDIDATE_ONLY_REVIEW_REQUIRED")
+        self.assertFalse(first["candidates"][0]["activation_allowed"])
+        self.assertEqual(first["candidates"][0]["verification_status"], "DISCOVERED_ONLY")
+        self.assertFalse(first["cache_hit"])
+        self.assertTrue(second["cache_hit"])
+        self.assertEqual(len(fake.calls), 1)
+
+        with self.assertRaises(AppError):
+            self.service.municipal_discover({"q": ""})
 
     def test_guard_settings_are_bounded_and_operator_token_is_validated(self) -> None:
         with patch.dict(
