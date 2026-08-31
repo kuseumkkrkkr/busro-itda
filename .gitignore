@@ -14,6 +14,7 @@ work/
 *.py[cod]
 .pytest_cache/
 node_modules/
+.vercel/
 
 # Downloadable build archives are regenerated from source
 outputs/*.zip

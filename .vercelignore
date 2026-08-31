@@ -1,0 +1,11 @@
+.git
+.vercel
+work
+outputs
+opendesign/mockups/busro-itda
+opendesign/mockups/busro-itda-glass/service/tests
+opendesign/mockups/busro-itda-glass/service/data/busro_itda.sqlite3
+opendesign/mockups/busro-itda-glass/service/data/*.sqlite3-wal
+opendesign/mockups/busro-itda-glass/service/data/*.sqlite3-shm
+**/__pycache__
+**/*.pyc

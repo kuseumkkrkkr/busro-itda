@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-31",
+  "sha256": "ebb13fab3315bc3cf1c88d248a99bc4dfdf56e8da580c80797ab69b1ec81e014",
+  "bytes": 95125504,
+  "catalog_routes": 7239,
+  "catalog_stops": 227054,
+  "active_route_sequences": 3374,
+  "directed_stop_rows": 202977,
+  "unique_graph_stops": 78064,
+  "city_count": 137,
+  "storage_role": "read_only_deployment_catalog",
+  "excluded_runtime_tables": [
+    "topology_discovery_progress",
+    "topology_pages",
+    "topology_progress",
+    "topology_runs",
+    "topology_targets"
+  ]
+}
