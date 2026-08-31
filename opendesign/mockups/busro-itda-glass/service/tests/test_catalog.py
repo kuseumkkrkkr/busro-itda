@@ -192,6 +192,40 @@ class CatalogCase(unittest.TestCase):
                 )
         self.assertEqual(raised.exception.code, "UPSTREAM_MALFORMED_RESPONSE")
 
+    def test_catalog_preserves_http_200_service_error_envelope(self) -> None:
+        response_body = {
+            "OpenAPI_ServiceResponse": {
+                "cmmMsgHeader": {
+                    "errMsg": "HTTP_ERROR",
+                    "returnAuthMsg": "HTTP 에러",
+                    "returnReasonCode": "04",
+                }
+            }
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return json.dumps(response_body).encode("utf-8")
+
+        with patch("tago.urlopen", return_value=FakeResponse()):
+            with self.assertRaises(TagoError) as raised:
+                fetch_catalog(
+                    operation="routes",
+                    parameters={"cityCode": "25"},
+                    service_key="decoded-key",
+                    timeout_seconds=3,
+                    fixture_mode=False,
+                    fixture_path=SERVICE_DIR / "fixtures" / "tago_catalog.json",
+                )
+        self.assertEqual(raised.exception.code, "04")
+        self.assertNotIn("decoded-key", raised.exception.message)
+
     def _live_service(self, name: str) -> BusroService:
         return BusroService(
             replace(

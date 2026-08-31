@@ -414,6 +414,25 @@ def fetch_catalog(
         if payload.lstrip().startswith(b"<"):
             raise _error_from_xml(payload) from exc
         raise TagoError("UPSTREAM_INVALID_JSON", "TAGO returned invalid JSON") from exc
+    # The portal sometimes wraps provider/gateway failures in a HTTP 200
+    # ``OpenAPI_ServiceResponse`` envelope instead of the normal ``response``
+    # shape. Preserve its public reason code so ingestion can retry or classify
+    # the target without collapsing it into an opaque malformed-response error.
+    service_response = data.get("OpenAPI_ServiceResponse") if isinstance(data, dict) else None
+    service_header = (
+        service_response.get("cmmMsgHeader")
+        if isinstance(service_response, dict)
+        else None
+    )
+    if isinstance(service_header, dict):
+        service_code = str(service_header.get("returnReasonCode") or "").strip()
+        if service_code:
+            service_message = str(
+                service_header.get("returnAuthMsg")
+                or service_header.get("errMsg")
+                or "TAGO request failed"
+            )[:240]
+            raise TagoError(service_code, service_message)
     response = data.get("response") if isinstance(data, dict) else None
     header = response.get("header") if isinstance(response, dict) else None
     result_code = (
