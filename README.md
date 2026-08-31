@@ -8,6 +8,10 @@
 
 **[웹 앱 열기](https://busro-itda.vercel.app)** · **[서비스/API 문서](opendesign/mockups/busro-itda-glass/service/README.md)**
 
+<p align="center">
+  <img src="docs/assets/github-social-preview.png" width="960" alt="버스로 잇다 소셜 미리보기">
+</p>
+
 ## 핵심 기능
 
 - 전국 정류장·노선 검색과 방향성 Dijkstra 경로 탐색
