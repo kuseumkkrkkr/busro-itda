@@ -50,6 +50,34 @@ Vercel에서는 고정 버전 압축 자산의 크기·압축 SHA-256·해제 SH
 
 경로 결과는 카탈로그 revision을 키에 포함한 bounded LRU와 singleflight로 합칩니다. 동일 warm instance의 반복 요청과 같은 브라우저의 최근 후보 경로는 즉시 재사용하지만, Vercel 인스턴스 사이의 공유 캐시는 아직 아닙니다.
 
+## 지자체 공식 데이터 탐색
+
+TAGO가 일시적으로 제공되지 않거나 특정 지자체의 원천이 더 최신인 경우를
+대비해 공공데이터포털의 API 목록을 bounded discovery로 검색할 수 있습니다.
+검색 결과는 후보 링크일 뿐이며 자동으로 그래프에 반영하지 않습니다. 선택한
+후보는 `municipal_source_fetch.py`로 원본을 격리 다운로드한 뒤 지자체별
+스키마 importer와 ID·순번 검증을 거쳐야 활성화됩니다.
+
+```powershell
+python -B opendesign/mockups/busro-itda-glass/service/municipal_source_discovery.py `
+  --query "버스 노선 정류장" `
+  --query "시내버스 시간표" `
+  --query "버스 정보시스템" `
+  --pages 2 `
+  --per-page 50 `
+  --output .\work\municipal-discovery.json
+```
+
+2026-09-01에 공식 검색에서 71개 후보를 확인했지만, 후보의 최신성·사용권·호출
+승인·실제 스키마는 각 상세 페이지에서 별도로 확인해야 합니다. 검색 도구는
+`www.data.go.kr` HTTPS 페이지만 읽고 리디렉션·외부 호스트·2MiB 초과 응답을
+거부합니다.
+
+상용 지도 화면을 크롤링해 버스 원천 데이터를 대체하지 않습니다. 버스
+노선·정류장 원장은 공식 API/파일을 사용하고, 지도 형상은 OSM `route=bus`
+관계와 OSRM 보완 경로를 사용합니다. 네이버·카카오·Google 지도 SDK를 붙일
+때는 별도 키·쿼터·표시/캐시 약관을 확인한 뒤 좌표 시각화 용도로만 추가합니다.
+
 ## 로컬 실행
 
 ```powershell
