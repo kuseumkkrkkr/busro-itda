@@ -1358,7 +1358,13 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
     if args.service_key_stdin:
-        service_key = getpass.getpass("TAGO decoded service key: ")
+        # Browser relays and CI pass the approved key over a pipe.  On Windows
+        # getpass insists on a console and can block forever when stdin is a
+        # pipe, so use a non-echoing prompt only for an interactive terminal.
+        if sys.stdin.isatty():
+            service_key = getpass.getpass("TAGO decoded service key: ")
+        else:
+            service_key = sys.stdin.readline().strip()
         if not service_key:
             raise SystemExit("TAGO service key is required")
 
