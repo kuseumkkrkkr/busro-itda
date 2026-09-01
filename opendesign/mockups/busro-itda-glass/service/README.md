@@ -148,6 +148,24 @@ TAGO의 일부 `route_stops` 범위는 `numOfRows=100`에서 게이트웨이 오
 
 현재 키가 노선/정류소 API에 승인되지 않았다면 첫 인증 오류에서 실행을 중단하고 `DATA_GAP`을 기록합니다. 7천여 노선에 같은 실패 요청을 반복하지 않습니다.
 
+남은 `PENDING`·`DEFERRED` 노선을 자동으로 이어서 채우려면 같은 명령에 `--fill-loop`를 붙입니다. 각 사이클은 별도 실행·요청 예산·체크포인트를 사용하며, API 쿼터/인증 오류·진전 없는 반복에서는 안전하게 멈춥니다. 일시적 upstream/timeout 실패를 3회 초과한 대상까지 한 번 새로 시도하려면 `--retry-exhausted-transient`를 명시합니다. 영구적인 `INVALID_ROUTE_TOPOLOGY`와 격리된 단일 지점 급증 노선은 자동 재시도하지 않습니다.
+
+```powershell
+python -B topology_ingest.py `
+  --catalog-db .\data\network_catalog.sqlite3 `
+  --service-key-stdin `
+  --request-budget 9000 `
+  --requests-per-second 2 `
+  --workers 4 `
+  --target-source tago `
+  --fill-loop `
+  --retry-exhausted-transient `
+  --max-cycles 4 `
+  --cycle-pause-seconds 30
+```
+
+`BUDGET_EXHAUSTED`가 나오면 그날의 요청 예산을 소진한 것이므로 프로세스를 재시작하지 않고 다음 쿼터 창에 같은 명령을 재실행합니다. 최종 `COMPLETE` 전에는 그래프 상태를 전국 완성으로 표시하지 않습니다.
+
 ### 공식 지자체 방향 그래프 적재
 
 TAGO 전국 적재와 별개로, 정확한 노선 ID·정류장 ID·순번·좌표를 함께 공개한 공식 지자체 CSV는 전용 importer로 넣을 수 있습니다. 아래 예시는 춘천시 공식 2026-03-26 파일입니다. Git에 포함된 57MB 정적 카탈로그는 직접 변경하지 않고 `work`의 런타임 복사본을 사용합니다.

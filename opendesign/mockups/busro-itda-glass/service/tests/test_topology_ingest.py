@@ -29,6 +29,7 @@ from topology_ingest import (  # noqa: E402
     LocalLiveApiFetcher,
     TopologyProcessLocked,
     TopologyIngestor,
+    run_fill_loop,
     _catalog_process_lock,
     _local_live_api_origin,
     _only_route_target,
@@ -393,6 +394,38 @@ class TopologyIngestTests(unittest.TestCase):
         route_pages = [params["pageNo"] for operation, params in second.calls if operation == "route_stops"]
         self.assertEqual(route_pages, ["2"])
         self.assertEqual(second_result["coverage"]["complete"], 1)
+
+    def test_fill_loop_drains_resumable_queue(self):
+        result = run_fill_loop(
+            catalog=self.catalog,
+            fetcher=FakeTago(),
+            config=self.config(),
+            max_cycles=2,
+            pause_seconds=0,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(result["cycles"], 1)
+        self.assertEqual(result["coverage"]["complete"], 1)
+
+    def test_exhausted_transient_failures_can_be_requeued_explicitly(self):
+        self.seed_targets(1)
+        with self.catalog.connect() as connection:
+            connection.execute(
+                "UPDATE topology_progress SET status='FAILED',attempts=3,error_code='TAGO_TIMEOUT',error_message='TAGO request timed out' "
+                "WHERE provider='TAGO' AND city_code='25' AND route_id='ROUTE_000'"
+            )
+            connection.commit()
+        requeued = self.catalog.requeue_topology_failures(
+            provider="TAGO",
+            error_codes={"TAGO_TIMEOUT"},
+        )
+        self.assertEqual(requeued, 1)
+        with self.catalog.connect() as connection:
+            row = connection.execute(
+                "SELECT status,attempts,error_code FROM topology_progress WHERE provider='TAGO' AND city_code='25' AND route_id='ROUTE_000'"
+            ).fetchone()
+        self.assertEqual(dict(row), {"status": "PENDING", "attempts": 0, "error_code": None})
 
     def test_failed_validation_retry_restarts_from_page_one(self):
         self.seed_targets(1)
@@ -1274,6 +1307,9 @@ class LocalLiveApiTests(unittest.TestCase):
         self.assertEqual(args.local_live_api, "http://127.0.0.1:8791")
         self.assertFalse(args.service_key_stdin)
         self.assertEqual(args.workers, 1)
+        self.assertFalse(args.fill_loop)
+        self.assertEqual(args.max_cycles, 4)
+        self.assertEqual(args.max_no_progress_cycles, 2)
         worker_args = _parser().parse_args(
             base
             + [
@@ -1281,9 +1317,16 @@ class LocalLiveApiTests(unittest.TestCase):
                 "http://127.0.0.1:8791",
                 "--workers",
                 "7",
+                "--fill-loop",
+                "--max-cycles",
+                "9",
+                "--retry-exhausted-transient",
             ]
         )
         self.assertEqual(worker_args.workers, 7)
+        self.assertTrue(worker_args.fill_loop)
+        self.assertEqual(worker_args.max_cycles, 9)
+        self.assertTrue(worker_args.retry_exhausted_transient)
         selected_args = _parser().parse_args(
             base
             + [

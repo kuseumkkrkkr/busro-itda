@@ -3526,6 +3526,56 @@ class NetworkCatalog:
             connection.commit()
         return len(rows)
 
+    def requeue_topology_failures(
+        self,
+        *,
+        provider: str,
+        error_codes: Iterable[str],
+        min_attempts: int = 3,
+    ) -> int:
+        """Requeue only explicitly approved transient failures.
+
+        Exhausted failures are normally fail-closed after three attempts.  A
+        fill loop may opt into one fresh retry round for upstream/transient
+        codes, but permanent validation failures and quarantined route spikes
+        remain untouched.  Resetting staged pages is intentional: a retry must
+        not combine pages from different upstream responses.
+        """
+        provider_id = _safe_code(provider, "provider")
+        codes = tuple(dict.fromkeys(_safe_text(code, "error_code", required=True, maximum=64) for code in error_codes))
+        if len(codes) > 16:
+            raise CatalogLimitError("too many topology retry error codes")
+        attempts = int(min_attempts)
+        if not 1 <= attempts <= 100:
+            raise CatalogLimitError("min_attempts must be 1..100")
+        if not codes:
+            return 0
+        placeholders = ",".join("?" for _ in codes)
+        now = self.clock().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                f"SELECT city_code,route_id FROM topology_progress "
+                f"WHERE provider=? AND status='FAILED' AND attempts>=? "
+                f"AND error_code IN ({placeholders}) ORDER BY city_code,route_id",
+                (provider_id, attempts, *codes),
+            ).fetchall()
+            targets = [(row["city_code"], row["route_id"]) for row in rows]
+            if targets:
+                connection.executemany(
+                    "DELETE FROM topology_pages WHERE provider=? AND city_code=? AND route_id=?",
+                    [(provider_id, city, route) for city, route in targets],
+                )
+                connection.executemany(
+                    "UPDATE topology_progress SET status='PENDING',next_page=1,total_count=NULL,"
+                    "pages_fetched=0,attempts=0,staged_count=0,error_code=NULL,error_message=NULL,"
+                    "last_run_id=NULL,updated_at=?,completed_at=NULL "
+                    "WHERE provider=? AND city_code=? AND route_id=? AND status='FAILED'",
+                    [(now, provider_id, city, route) for city, route in targets],
+                )
+            connection.commit()
+        return len(targets)
+
     def stage_topology_page(
         self,
         *,

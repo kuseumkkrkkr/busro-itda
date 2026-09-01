@@ -202,6 +202,20 @@ _STATUS_PRIORITY = {
     "FAILED": 4,
 }
 
+# These codes describe an upstream/transport failure that is safe to retry
+# from page one.  Route-shape validation failures and quarantined spikes are
+# deliberately excluded; they need an operator or a better source.
+TRANSIENT_RETRY_ERROR_CODES = frozenset(
+    {
+        "04",
+        "99",
+        "TAGO_TIMEOUT",
+        "LOCAL_API_TIMEOUT",
+        "LOCAL_API_HTTP_ERROR",
+        "UPSTREAM_MALFORMED_RESPONSE",
+    }
+)
+
 
 def _stronger_status(current: str, candidate: str) -> str:
     return (
@@ -1281,6 +1295,110 @@ class TopologyIngestor:
         return result
 
 
+def run_fill_loop(
+    *,
+    catalog: NetworkCatalog,
+    fetcher: Callable[[str, dict[str, str]], dict[str, Any]],
+    config: IngestConfig,
+    max_cycles: int = 1,
+    pause_seconds: float = 0.0,
+    max_no_progress_cycles: int = 2,
+    retry_exhausted_transient: bool = False,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Run resumable topology ingestion cycles until the queue is drained.
+
+    Each cycle has its own request budget and run row, so a process crash or a
+    daily TAGO quota stop leaves the SQLite checkpoint available for the next
+    invocation.  The loop never retries permanent validation failures and
+    stops on access/quota errors instead of spinning.
+    """
+    if not 1 <= int(max_cycles) <= 365:
+        raise ValueError("max_cycles must be 1..365")
+    if not 0 <= float(pause_seconds) <= 86_400:
+        raise ValueError("pause_seconds must be 0..86400")
+    if not 1 <= int(max_no_progress_cycles) <= 20:
+        raise ValueError("max_no_progress_cycles must be 1..20")
+
+    requeued = 0
+    if retry_exhausted_transient:
+        requeued = catalog.requeue_topology_failures(
+            provider=PROVIDER,
+            error_codes=TRANSIENT_RETRY_ERROR_CODES,
+            min_attempts=3,
+        )
+
+    runs: list[dict[str, Any]] = []
+    last_coverage: dict[str, Any] | None = None
+    previous_marker: tuple[Any, ...] | None = None
+    no_progress_cycles = 0
+    terminal_reason = "MAX_CYCLES"
+    for cycle in range(1, int(max_cycles) + 1):
+        result = TopologyIngestor(
+            catalog=catalog,
+            fetcher=fetcher,
+            config=config,
+        ).run()
+        coverage = result.get("coverage") or {}
+        last_coverage = coverage if isinstance(coverage, dict) else None
+        run_summary = dict(result.get("run") or {})
+        run_summary["coverage"] = coverage
+        runs.append(run_summary)
+        statuses = coverage.get("statuses") or {}
+        marker = (
+            int(coverage.get("complete") or 0),
+            int(coverage.get("hydrated_active_sequences") or 0),
+            int(statuses.get("PENDING") or 0),
+            int(statuses.get("DEFERRED") or 0),
+            int(statuses.get("FAILED") or 0),
+        )
+        if previous_marker == marker:
+            no_progress_cycles += 1
+        else:
+            no_progress_cycles = 0
+        previous_marker = marker
+
+        discovery = coverage.get("discovery") or {}
+        target_count = int(coverage.get("targets") or 0)
+        complete_count = int(coverage.get("complete") or 0)
+        if (
+            bool(discovery.get("complete"))
+            and target_count > 0
+            and complete_count >= target_count
+        ):
+            terminal_reason = "COMPLETE"
+            return {
+                "ok": True,
+                "status": "COMPLETE",
+                "cycles": cycle,
+                "requeued_transient_failures": requeued,
+                "runs": runs,
+                "coverage": coverage,
+                "stop_reason": terminal_reason,
+            }
+
+        run_status = str((result.get("run") or {}).get("status") or "")
+        if run_status in {"DATA_GAP", "BUDGET_EXHAUSTED", "FAILED"}:
+            terminal_reason = run_status
+            break
+        if no_progress_cycles >= int(max_no_progress_cycles):
+            terminal_reason = "NO_PROGRESS"
+            break
+        if cycle < int(max_cycles) and float(pause_seconds) > 0:
+            sleeper(float(pause_seconds))
+
+    final_coverage = last_coverage or catalog.topology_coverage(provider=PROVIDER)
+    return {
+        "ok": terminal_reason in {"COMPLETE", "MAX_CYCLES", "NO_PROGRESS"},
+        "status": "COMPLETE" if terminal_reason == "COMPLETE" else "PARTIAL",
+        "cycles": len(runs),
+        "requeued_transient_failures": requeued,
+        "runs": runs,
+        "coverage": final_coverage,
+        "stop_reason": terminal_reason,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Discover and ingest nationwide TAGO route-stop topology"
@@ -1300,6 +1418,34 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-route-pages", type=int, default=10)
     parser.add_argument("--max-discovery-pages", type=int, default=200)
     parser.add_argument("--target-limit", type=int)
+    parser.add_argument(
+        "--fill-loop",
+        action="store_true",
+        help="repeat resumable ingestion cycles until the queue is drained or a safe stop",
+    )
+    parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=4,
+        help="maximum fill-loop cycles (1..365; each cycle has its own request budget)",
+    )
+    parser.add_argument(
+        "--cycle-pause-seconds",
+        type=float,
+        default=5.0,
+        help="pause between fill-loop cycles (0..86400)",
+    )
+    parser.add_argument(
+        "--max-no-progress-cycles",
+        type=int,
+        default=2,
+        help="stop after this many cycles without coverage movement (1..20)",
+    )
+    parser.add_argument(
+        "--retry-exhausted-transient",
+        action="store_true",
+        help="requeue exhausted upstream/timeout failures once before the fill loop",
+    )
     parser.add_argument("--target-source", choices=("tago", "catalog"), default="tago")
     parser.add_argument("--trust-catalog-identifiers", action="store_true")
     parser.add_argument(
@@ -1340,6 +1486,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if not 0.5 <= args.timeout_seconds <= 30:
         raise SystemExit("--timeout-seconds must be 0.5..30")
+    if not 1 <= args.max_cycles <= 365:
+        raise SystemExit("--max-cycles must be 1..365")
+    if not 0 <= args.cycle_pause_seconds <= 86_400:
+        raise SystemExit("--cycle-pause-seconds must be 0..86400")
+    if not 1 <= args.max_no_progress_cycles <= 20:
+        raise SystemExit("--max-no-progress-cycles must be 1..20")
     config = IngestConfig(
         request_budget=args.request_budget,
         requests_per_second=args.requests_per_second,
@@ -1395,9 +1547,20 @@ def main(argv: list[str] | None = None) -> int:
                 if args.repair_corrupt_retries
                 else 0
             )
-            result = TopologyIngestor(
-                catalog=catalog, fetcher=live_fetch, config=config
-            ).run()
+            if args.fill_loop:
+                result = run_fill_loop(
+                    catalog=catalog,
+                    fetcher=live_fetch,
+                    config=config,
+                    max_cycles=args.max_cycles,
+                    pause_seconds=args.cycle_pause_seconds,
+                    max_no_progress_cycles=args.max_no_progress_cycles,
+                    retry_exhausted_transient=args.retry_exhausted_transient,
+                )
+            else:
+                result = TopologyIngestor(
+                    catalog=catalog, fetcher=live_fetch, config=config
+                ).run()
             if args.repair_corrupt_retries:
                 result["repaired_corrupt_retries"] = repaired_corrupt_retries
     except TopologyProcessLocked as exc:
