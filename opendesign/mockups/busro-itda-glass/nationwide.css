@@ -226,6 +226,25 @@
 .alternative-hint.warning { color: var(--route-warn); }
 .scheduled-results .catalog-heading > span { white-space: nowrap; }
 
+.research-journeys { margin-top: 24px; }
+.research-intro { margin: -4px 2px 11px; color: var(--route-muted); font-size: 11px; line-height: 1.5; }
+.research-list { display: grid; gap: 9px; }
+.research-card { min-width: 0; padding: 13px; border: 1px solid var(--route-line); border-radius: 17px; background: #fbfcfd; }
+.research-card.verified { border-color: #cceade; background: #f7fcfa; }
+.research-card-head { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 9px; }
+.research-card-head > div { min-width: 0; }
+.research-card-head p { color: var(--route-muted); font-size: 10px; }
+.research-card-head h3 { margin-top: 3px; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.research-card-head > span { flex: 0 0 auto; min-height: 24px; display: inline-flex; align-items: center; padding: 4px 7px; border-radius: 999px; color: #526174; font-size: 9px; font-weight: 750; background: #eef1f4; }
+.research-card.verified .research-card-head > span { color: #176847; background: #e7f7ef; }
+.research-route-pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 9px; }
+.research-route-pills span,.research-route-pills small { min-height: 23px; display: inline-flex; align-items: center; padding: 3px 7px; border-radius: 7px; color: var(--route-blue); font-size: 9px; font-weight: 750; background: var(--route-blue-soft); }
+.research-route-pills small { color: var(--route-muted); background: #f0f2f5; }
+.research-note { margin-top: 8px; color: var(--route-muted); font-size: 10px; line-height: 1.45; }
+.research-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--route-line); color: var(--route-faint); font-size: 9px; }
+.research-card-foot a { display: inline-flex; align-items: center; gap: 3px; color: var(--route-blue); font-weight: 700; text-decoration: none; }
+.research-card-foot a i { font-size: 12px; }
+
 .route-admin-tools { margin-top: 16px; padding: 6px; border: 1px solid var(--route-line); border-radius: 18px; background: white; }
 .route-admin-tools > summary { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 9px; border-radius: 14px; color: var(--route-muted); cursor: pointer; list-style: none; }
 .route-admin-tools > summary::-webkit-details-marker { display: none; }

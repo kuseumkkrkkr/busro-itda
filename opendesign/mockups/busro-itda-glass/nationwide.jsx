@@ -654,6 +654,7 @@ function GraphCoverage({ networkStatus, result }) {
   const topologyReady = graph && Number(graph.nodes) > 0 && Number(graph.edges) > 0;
   const scheduleGraph = Boolean(schedule.ready && graph && (String(graph.algorithm || "").includes("time_dependent") || ["expanded_stops", "departures_scanned", "search_complete"].some((key) => Object.prototype.hasOwnProperty.call(graph, key))));
   const staticAlternativeCount = Array.isArray(result?.static_alternatives) ? result.static_alternatives.length : 0;
+  const walkingRadius = Number(networkStatus?.walking_transfer_policy?.radius_m || 0);
   const scheduleSearchState = graph?.search_complete === true ? "검색 완료" : graph?.search_complete === false ? "검색 미완료" : "완료 상태 DATA_GAP";
   const scheduleDetailReason = graph?.detail_reason || result?.schedule?.detail_reason || "";
   const primaryStatus = nationwideComplete ? "전국 경로망 연결됨" : graphReady ? "공식 검증 구간 연결됨" : "전국 경로망 준비 중";
@@ -674,6 +675,7 @@ function GraphCoverage({ networkStatus, result }) {
     {scheduleGraph && <small className={schedule.ready ? "coverage-query" : "coverage-gap"}>이번 일정 검색: {formatCount(graph.expanded_stops)}개 정류장 확장 · {formatCount(graph.departures_scanned)}개 출발편 확인 · {scheduleSearchState} · {graph.algorithm}</small>}
     {scheduleGraph && scheduleDetailReason && <small className="coverage-gap">시간표 상세: {scheduleDetailReason}</small>}
     {staticAlternativeCount > 0 && <small className="coverage-query">현재 TAGO 방향 경로 {formatCount(staticAlternativeCount)}건 확인 · 정류장별 시각이 없어도 우선 표시</small>}
+    {walkingRadius > 0 && <small className="coverage-query">도보 {formatCount(walkingRadius)}m 이내 정류장은 연결 노드로 계산 · 그보다 긴 도보는 별도 구간</small>}
     {schedule.historical && <small className="coverage-prior">과거 GTFS는 모델 가중치 전용 · 현재 날짜 시간표로 투영하지 않음</small>}
     {graph && !scheduleGraph && <small className={topologyReady ? "coverage-query" : "coverage-gap"}>이번 검색: {formatCount(graph.nodes)}개 상태 · {formatCount(graph.edges)}개 승차 간선 · {graph.algorithm || "directed_dijkstra"}</small>}
     {graph && !scheduleGraph && !topologyReady && staticAlternativeCount === 0 && <small className="coverage-gap">DATA_GAP · 검색 가능한 검증 노선 순서가 없습니다.</small>}
@@ -803,9 +805,44 @@ function JourneyGenerator({ seededStop, onChooseJourney, connection }) {
   );
 }
 
+const RESEARCH_VERIFICATION_LABELS = {
+  ROUTE_LABELS_HYDRATED: "현재 그래프 확인",
+  ROUTE_LABELS_PARTIAL: "일부 노선 확인",
+  ROUTE_LABELS_NOT_FOUND: "카탈로그 미확인",
+  PLANNED_NEEDS_LIVE_VERIFY: "계획안 · 재검증 필요",
+  WALK_GAP_OVER_300M: "도보 공백 · 버스 연결 아님",
+  RESEARCH_ONLY: "참고 기록",
+};
+
+function ResearchJourneyCards() {
+  const [payload, setPayload] = useState(null);
+  useEffect(() => {
+    let active = true;
+    BusroApi.journeyResearch({ limit: 10 }).then((value) => active && setPayload(value)).catch(() => active && setPayload({ cases: [] }));
+    return () => { active = false; };
+  }, []);
+  const cases = Array.isArray(payload?.cases) ? payload.cases : [];
+  if (cases.length === 0) return null;
+  return <section className="research-journeys">
+    <div className="catalog-heading"><div><p className="eyebrow">PUBLIC TRIP RESEARCH</p><h2>실제 여행 기록에서 찾기</h2></div><span>300m 도보 연결</span></div>
+    <p className="research-intro">공개 여행기의 노선번호를 현재 TAGO 카탈로그와 대조했습니다. 정류장·방향·시간표가 모두 확인된 경우에만 실제 검색 결과로 승격합니다.</p>
+    <div className="research-list">{cases.map((item) => {
+      const status = RESEARCH_VERIFICATION_LABELS[item.verification] || "검증 상태 확인 중";
+      const labels = Array.isArray(item.route_labels) ? item.route_labels : [];
+      const hydrated = Array.isArray(item.hydrated_route_labels) ? item.hydrated_route_labels.length : 0;
+      return <article key={item.id} className={`research-card ${item.verification === "ROUTE_LABELS_HYDRATED" ? "verified" : ""}`}>
+        <div className="research-card-head"><div><p>{item.region}</p><h3>{item.title}</h3></div><span>{status}</span></div>
+        <div className="research-route-pills">{labels.length > 0 ? labels.map((label, index) => <span key={`${item.id}-${label}-${index}`}>{label}</span>) : <small>상세 노선번호 미기재</small>}</div>
+        <p className="research-note">{item.notes}</p>
+        <div className="research-card-foot"><span>{hydrated}/{labels.length || 0} 현재 그래프 노선</span><a href={item.source_url} target="_blank" rel="noreferrer">원문 보기 <Icon name="arrow-square-out" /></a></div>
+      </article>;
+    })}</div>
+  </section>;
+}
+
 function NationwideScreen({ connection, onChooseJourney }) {
   const [seededStop, setSeededStop] = useState(null);
   const [toolsOpen, setToolsOpen] = useState(false);
   const adminEnabled = new URLSearchParams(window.location.search).get("admin") === "1";
-  return <main className="screen nationwide-screen"><JourneyGenerator seededStop={seededStop} onChooseJourney={onChooseJourney} connection={connection} />{adminEnabled && <details className="route-admin-tools" open={toolsOpen} onToggle={(event) => setToolsOpen(event.currentTarget.open)}><summary><span><Icon name="wrench" /><strong>노선 데이터 도구</strong><small>운영·검증용</small></span><Icon name="caret-down" /></summary>{toolsOpen && <><div className="route-admin-intro"><p>개별 노선 조회와 경유 순서 점검용 화면입니다.</p></div><RouteBrowser connection={connection} onUseStop={setSeededStop} /></>}</details>}</main>;
+  return <main className="screen nationwide-screen"><JourneyGenerator seededStop={seededStop} onChooseJourney={onChooseJourney} connection={connection} /><ResearchJourneyCards />{adminEnabled && <details className="route-admin-tools" open={toolsOpen} onToggle={(event) => setToolsOpen(event.currentTarget.open)}><summary><span><Icon name="wrench" /><strong>노선 데이터 도구</strong><small>운영·검증용</small></span><Icon name="caret-down" /></summary>{toolsOpen && <><div className="route-admin-intro"><p>개별 노선 조회와 경유 순서 점검용 화면입니다.</p></div><RouteBrowser connection={connection} onUseStop={setSeededStop} /></>}</details>}</main>;
 }

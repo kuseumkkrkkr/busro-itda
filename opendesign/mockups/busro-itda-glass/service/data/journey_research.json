@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-09-01",
+  "policy": {
+    "purpose": "공개 여행기에서 실제로 언급된 시내·농어촌버스 연계를 검증 큐로 보존",
+    "route_labels_are_not_ids": true,
+    "verification": "현재 TAGO 카탈로그의 노선번호 존재 여부만 자동 확인하며, 정류장·날짜·방향이 일치해야 운행 가능으로 판정",
+    "walk_connection_radius_m": 300
+  },
+  "cases": [
+    {
+      "id": "jochiwon-okcheon-991-b1-607",
+      "title": "조치원역뒤편 → 옥천버스앞",
+      "region": "세종·대전·옥천",
+      "evidence_level": "observed_report",
+      "from_hint": "조치원역뒤편",
+      "to_hint": "옥천버스앞",
+      "route_labels": ["991", "B1", "607"],
+      "notes": "정류장 사이 도보 환승을 포함한 핵심 검증 사례",
+      "source_title": "약 스압)어제 짧게 갔다온거",
+      "source_url": "https://gall.dcinside.com/mgallery/board/view/?id=transit&no=803924"
+    },
+    {
+      "id": "jeonju-seoul-2023",
+      "title": "전주 → 서울",
+      "region": "전북·대전·세종·천안·평택·서울",
+      "evidence_level": "observed_report",
+      "from_hint": "전주 동부시장",
+      "to_hint": "신분당선 강남역",
+      "route_labels": ["535", "300", "34", "314", "B1", "801", "700", "110", "130", "1502", "M5438"],
+      "notes": "2023-08-06 실제 완주 기록. 991 대신 801을 이용한 대체 경로",
+      "source_title": "약스압) 전주-서울 시내버스 여행기",
+      "source_url": "https://gall.dcinside.com/mgallery/board/view/?id=transit&no=634766"
+    },
+    {
+      "id": "busan-seoul-2024",
+      "title": "부산 → 서울",
+      "region": "부산·울산·경주·영천·대구·성주·구미·상주·괴산·음성·안성·서울",
+      "evidence_level": "observed_report",
+      "from_hint": "부산 노포동역",
+      "to_hint": "서울 고속터미널",
+      "route_labels": ["1147", "402", "605", "300", "760", "55", "급행5", "급행3", "250", "11", "171", "541", "840", "108", "106-1", "610", "900", "17", "370", "4402", "452"],
+      "notes": "2024-11-24 기록. 상주 구간은 주말에도 연계 실패 가능성이 명시됨",
+      "source_title": "[2024.11.24]부산→서울 당일치기 시내버스 여행",
+      "source_url": "https://gall.dcinside.com/mgallery/board/view/?id=transit&no=765161"
+    },
+    {
+      "id": "incheon-busan-2026-excerpt",
+      "title": "인천 → 부산 (대구·영천 구간 발췌)",
+      "region": "인천·구미·대구·영천",
+      "evidence_level": "observed_report_excerpt",
+      "from_hint": "금오산사거리",
+      "to_hint": "영천버스터미널앞",
+      "route_labels": ["885", "730", "직행1", "518", "급행5", "555"],
+      "notes": "공개 여행기의 후반부 발췌. 전체 출발·도착 정류장은 원문에서 추가 확인 필요",
+      "source_title": "[2026. 06. 08.] 인천 → 부산 시내버스 여행기",
+      "source_url": "https://gall.dcinside.com/mgallery/board/view/?id=transit&no=931230"
+    },
+    {
+      "id": "masan-daejeon-2022",
+      "title": "마산 → 대전",
+      "region": "경남·합천·거창·무주·영동·옥천·대전",
+      "evidence_level": "observed_report",
+      "from_hint": "마산터미널",
+      "to_hint": "판암역",
+      "route_labels": ["113-32", "무번호", "800", "400", "51", "111", "112", "414", "31", "607"],
+      "notes": "농어촌 무번호 구간과 옥천·대전 환승을 포함한 동서 횡단 사례",
+      "source_title": "마산 ~ 대전 시내버스 여행",
+      "source_url": "https://gall.dcinside.com/mgallery/board/view/?id=transit&no=533823"
+    },
+    {
+      "id": "jeonju-sangju-2025",
+      "title": "전주 → 상주 (대전·보은 구간)",
+      "region": "전북·대전·보은·상주",
+      "evidence_level": "observed_report_excerpt",
+      "from_hint": "사정동",
+      "to_hint": "회남",
+      "route_labels": ["34", "311", "63", "810"],
+      "notes": "대전 311·63과 보은 810의 실제 환승 기록이 확인되는 구간",
+      "source_title": "전주->상주 시내버스 여행기 / 상주-구미 + 구미-전주",
+      "source_url": "https://gall.dcinside.com/mgallery/board/view/?id=transit&no=891797"
+    },
+    {
+      "id": "seoul-gwangju-2024-plan",
+      "title": "서울 → 광주 (작성 계획)",
+      "region": "서울·평택·천안·세종·논산·익산·전주·정읍·담양·광주",
+      "evidence_level": "planned_report",
+      "from_hint": "신분당선 강남역",
+      "to_hint": "광천터미널",
+      "route_labels": ["5401", "1150", "130", "100", "110", "700", "991", "801", "3002", "303-1", "101", "333", "39", "111", "1001", "1002", "383", "644", "241", "무번호", "60-1", "311"],
+      "notes": "원문 작성자의 계획안이며 실제 운행 성공 기록으로 승격하지 않음",
+      "source_title": "뉴비 서울->광주 루트 짜봤어요",
+      "source_url": "https://gall.dcinside.com/mini/board/view/?id=bustrip&no=7270"
+    },
+    {
+      "id": "daegu-gwangju-2025-walk-gap",
+      "title": "대구 → 광주 (묘산 도보 구간)",
+      "region": "대구·합천·광주",
+      "evidence_level": "observed_walk_gap",
+      "from_hint": "석사",
+      "to_hint": "합천터미널",
+      "route_labels": ["606", "400"],
+      "walk_gap_m": 8600,
+      "notes": "8.6km 도보가 필요한 구간. 300m 연결 노드 정책으로 억지로 버스 환승 처리하면 안 되는 음성 검증 사례",
+      "source_title": "대구-광주 시내버스 여행:묘산 도보 후기",
+      "source_url": "https://gall.dcinside.com/mgallery/board/view/?id=transit&no=804911"
+    },
+    {
+      "id": "seoul-busan-2015-history",
+      "title": "서울 ↔ 부산 시내버스 국토대장정",
+      "region": "수도권·영남권",
+      "evidence_level": "historical_report",
+      "from_hint": "서울 사당역 또는 연천",
+      "to_hint": "부산 해운대 또는 부산역",
+      "route_labels": [],
+      "notes": "기사에 20~28회 환승, 약 19~25시간 사례가 소개되지만 상세 노선 목록은 원문에 없음. 노선 추정에 사용하지 않음",
+      "source_title": "서울에서 부산까지 시내버스만 타고 간다",
+      "source_url": "https://www.wikitree.co.kr/articles/229549"
+    }
+  ]
+}

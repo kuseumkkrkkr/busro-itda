@@ -250,6 +250,7 @@ python -B multi_collector.py `
 - `GET /api/network/cities?q=서울&limit=20`
 - `GET /api/network/stops?q=서울역&limit=20`
 - `GET /api/network/routes?q=601&limit=20`
+- `GET /api/journeys/research?limit=20` — 공개 시내버스 여행 기록을 Obsidian형 원문 DB와 현재 TAGO 노선번호에 대조한 검증 큐입니다. 노선번호 존재만 확인하며 정류장·방향·시간표가 맞기 전에는 실제 경로로 승격하지 않습니다.
 - `GET /api/sources?status=VERIFIED_ROUTE_ONLY&limit=25` (`status`는 호환용이며 응답은 `origin_status`와 `ingestion_status`를 분리합니다.)
 - `GET /api/sources/discover?q=춘천%20버스&pages=1&per_page=20` — 공공데이터포털의 공식 오픈 API·파일데이터 후보를 검색합니다. 결과는 `DISCOVERED_ONLY`/`activation_allowed=false`로 반환되며 자동 다운로드·그래프 반영은 하지 않습니다.
 - `GET /api/arrivals?city_code=25&node_id=DJB8001793`

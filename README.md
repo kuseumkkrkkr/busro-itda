@@ -65,6 +65,12 @@ TAGO가 일시적으로 제공되지 않거나 특정 지자체의 원천이 더
 웹에서도 `GET /api/sources/discover?q=춘천%20버스`로 같은 공식 검색을 호출할 수
 있습니다. 응답은 검수용 후보만 반환하며 자동 수집·활성화하지 않습니다.
 
+공개 여행기 기반 검증 큐는 `docs/obsidian/bus-travel-research/`와
+`service/data/journey_research.json`에 보관합니다. `GET /api/journeys/research`는
+각 기록의 노선번호를 현재 TAGO 카탈로그와 대조해 `HYDRATED`·부분 확인·재검증
+필요로 나눕니다. 노선번호만 일치한 기록은 실제 경로로 가장하지 않으며, 정류장·
+방향·시간표가 확인된 뒤에만 여행 검색 결과로 사용합니다.
+
 ```powershell
 python -B opendesign/mockups/busro-itda-glass/service/municipal_source_discovery.py `
   --query "버스 노선 정류장" `

@@ -17,10 +17,15 @@ from typing import Any
 from config import Settings
 from db import IdempotencyConflict, Store
 from journey_planner import JourneyPlanner, PlannerError, PlannerLimitError
+from journey_research import JourneyResearchError, research_report
 from municipal_source_discovery import DataGoKrMunicipalDiscovery, DiscoveryError
 from network_catalog import CatalogError, NetworkCatalog
 from osm import OSMError, resolve_route_geometry
-from sqlite_journey_planner import PlannerBusyError, SQLiteJourneyPlanner
+from sqlite_journey_planner import (
+    DEFAULT_TRANSFER_RADIUS_M,
+    PlannerBusyError,
+    SQLiteJourneyPlanner,
+)
 from source_registry import RegistryError, load_default_registry
 from tago import (
     TagoError,
@@ -489,6 +494,11 @@ class BusroService:
             "topology_coverage": topology_coverage,
             "path_algorithm": "directed_dijkstra",
             "topology_policy": "all_active_verified_route_sequences",
+            "walking_transfer_policy": {
+                "radius_m": DEFAULT_TRANSFER_RADIUS_M,
+                "node_semantics": "within_radius_is_walk_connected",
+                "long_walks_are_explicit_steps": True,
+            },
             "id_join_policy": "exact_identifiers_only",
             "success_probability_policy": (
                 "current_verified_timetable_plus_matched_actual_early_late_outcomes_"
@@ -639,6 +649,19 @@ class BusroService:
             raise AppError("INVALID_NETWORK_QUERY", str(exc)) from exc
         return {"ok": True, "source": "OFFICIAL_STATIC_CATALOG", "count": len(routes), "routes": routes}
 
+    def journey_research(self, query: dict[str, str]) -> dict[str, Any]:
+        """Return source-linked public travel cases with current label checks."""
+        self._only_fields(query, {"limit", "evidence_level"}, "query")
+        try:
+            limit = self._bounded_int(query.get("limit", 20), "limit", 1, 50)
+            return research_report(
+                self.network_catalog,
+                limit=limit,
+                evidence_level=query.get("evidence_level") or None,
+            )
+        except JourneyResearchError as exc:
+            raise AppError("JOURNEY_RESEARCH_INVALID", str(exc), status=500) from exc
+
     def hydrate_network_route(self, body: dict[str, Any]) -> dict[str, Any]:
         self._only_fields(body, {"city_code", "route_id"}, "body")
         city_code = self._city_code(body.get("city_code"), "city_code")
@@ -719,8 +742,12 @@ class BusroService:
         if preference not in {"diverse", "low_transfer", "reliable", "challenge"}:
             raise AppError("INVALID_PREFERENCE", "preference is not supported")
         alternatives = self._bounded_int(body.get("max_alternatives", 3), "max_alternatives", 1, 5)
+        # A short walk is part of the public-transport connection, regardless
+        # of the route preference.  Keep the default in one planner constant
+        # so "버스 많이" cannot silently change the meaning of a connected
+        # node; callers may still request a bounded explicit radius.
         transfer_radius = self._bounded_int(
-            body.get("transfer_radius_m", 500 if preference == "challenge" else 300),
+            body.get("transfer_radius_m", DEFAULT_TRANSFER_RADIUS_M),
             "transfer_radius_m",
             50,
             800,

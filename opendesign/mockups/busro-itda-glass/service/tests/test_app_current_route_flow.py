@@ -167,6 +167,24 @@ class CurrentRouteFlowCase(unittest.TestCase):
         )
         self.assertNotIn("status", current["sources"][0])
 
+    def test_every_preference_uses_300m_walk_connection_by_default(self) -> None:
+        for preference in ("diverse", "low_transfer", "reliable", "challenge"):
+            request = self._request()
+            request["preference"] = preference
+            planned = {
+                "status": "DATA_GAP",
+                "reason": "EVIDENCE_INCOMPLETE",
+                "graph": {"algorithm": "directed_dijkstra", "nodes": 2, "edges": 1},
+                "alternatives": [self.structural],
+            }
+            with (
+                patch.object(self.service.network_catalog, "planning_stop_reference", side_effect=[{}, {}]),
+                patch.object(self.service.network_catalog, "topology_coverage", return_value={"targets": 1, "complete": 1, "hydrated_active_sequences": 1, "coverage_ratio": 1.0}),
+                patch.object(self.service.sqlite_journey_planner, "plan", return_value=planned) as planner,
+            ):
+                self.service.generate_journeys(request)
+            self.assertEqual(planner.call_args.kwargs["transfer_radius_m"], 300)
+
     def test_prior_only_gtfs_cannot_return_ready_or_current_times(self) -> None:
         ready_historical = {
             "status": "READY",
