@@ -1,6 +1,6 @@
 ---
 title: 버스로 잇다 · 시내버스 여행 검증 DB
-updated: 2026-09-01
+updated: 2026-09-02
 tags: [busro-itda, bus-travel, verification]
 ---
 
@@ -21,8 +21,8 @@ tags: [busro-itda, bus-travel, verification]
 | --- | --- | --- | --- | --- |
 | [[jochiwon-okcheon-991-b1-607]] | 세종·대전·옥천 | 실제 여행기 | 3/3 hydrated | 앱에서 경로 생성·OSM 지도 확인 |
 | [[jeonju-seoul-2023]] | 전북·충청·수도권 | 실제 완주 기록 | 9/11 hydrated | 일부 노선번호는 지역 중복 |
-| [[busan-seoul-2024]] | 부산·울산·경북·충청·서울 | 실제 여행기 | 18/21 hydrated | 주말 연계 실패 가능성 원문 명시 |
-| [[incheon-busan-2026-excerpt]] | 인천·구미·대구·영천 | 여행기 발췌 | 5/6 hydrated | 전체 여정 미수록 |
+| [[busan-seoul-2024]] | 부산·울산·경북·충청·서울 | 실제 여행기 | 15/21 hydrated | 주말 연계 실패 가능성 원문 명시 |
+| [[incheon-busan-2026-excerpt]] | 인천·구미·대구·영천 | 여행기 발췌 | 4/6 hydrated | 전체 여정 미수록 |
 | [[masan-daejeon-2022]] | 경남·합천·거창·무주·영동·옥천·대전 | 실제 여행기 | 8/10 hydrated | 무번호 농어촌 구간 포함 |
 | [[jeonju-sangju-2025]] | 전북·대전·보은·상주 | 실제 여행기 발췌 | 4/4 hydrated | 회남 연결 확인 |
 | [[seoul-gwangju-2024-plan]] | 수도권·충청·호남 | 작성 계획 | 계획안 | 실행 기록으로 승격 금지 |
