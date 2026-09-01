@@ -105,6 +105,20 @@ class NetworkCatalogCase(unittest.TestCase):
         self.assertEqual({item["dataset_kind"] for item in provenance}, {"stops", "routes"})
         self.assertTrue(all(item["source_url"].startswith("https://") for item in provenance))
 
+    def test_stop_search_accepts_common_duipyeon_spelling_variant(self):
+        self.catalog.import_stops_csv(
+            csv_bytes(
+                STOP_COLUMNS,
+                [stop_row(**{"정류장번호": "NODE-DW", "정류장명": "조치원역뒤편"})],
+            ),
+            source_url="https://data.go.kr/stops.csv",
+            source_date="2026-08-31",
+        )
+
+        matches = self.catalog.search_stops("조치원역뒷편", limit=8)
+
+        self.assertEqual([item["node_id"] for item in matches], ["NODE-DW"])
+
     def test_stop_resolution_fallback_has_source_node_index(self):
         with closing(sqlite3.connect(self.catalog.path)) as connection:
             plan = " ".join(

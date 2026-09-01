@@ -337,6 +337,31 @@ def _like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _stop_search_variants(value: str) -> tuple[str, ...]:
+    """Return bounded, human-input variants for Korean stop-name search.
+
+    Municipal feeds are not consistent about the common ``뒤편``/``뒷편``
+    spelling, and users often include or omit a space.  Keep the canonical
+    query first for deterministic ordering, then add only these safe aliases;
+    this is still a substring search and never aliases a transport ID.
+    """
+    text = str(value)
+    variants: list[str] = []
+
+    def add(candidate: str) -> None:
+        if candidate not in variants:
+            variants.append(candidate)
+
+    add(text)
+    compact = re.sub(r"\s+", "", text)
+    add(compact)
+    add(text.replace("뒷편", "뒤편"))
+    add(text.replace("뒤편", "뒷편"))
+    add(compact.replace("뒷편", "뒤편"))
+    add(compact.replace("뒤편", "뒷편"))
+    return tuple(variants)
+
+
 class NetworkCatalog:
     """Owns a dedicated SQLite catalog database, never the runtime history DB."""
 
@@ -3906,11 +3931,13 @@ class NetworkCatalog:
     ) -> list[dict[str, Any]]:
         """Search exact stop IDs that participate in the active directed graph."""
         text, bounded = self._bounded_query(query, limit)
-        pattern = f"%{_like(text)}%"
-        clauses = [
+        patterns = tuple(f"%{_like(term)}%" for term in _stop_search_variants(text))
+        name_clauses = [
             "(s.node_name LIKE ? ESCAPE '\\' OR s.node_id LIKE ? ESCAPE '\\')"
+            for _ in patterns
         ]
-        params: list[Any] = [pattern, pattern]
+        clauses = ["(" + " OR ".join(name_clauses) + ")"]
+        params: list[Any] = [value for pattern in patterns for value in (pattern, pattern)]
         if city_code:
             clauses.append("v.city_code=?")
             params.append(_safe_code(city_code, "city_code"))
@@ -3967,9 +3994,20 @@ class NetworkCatalog:
 
     def search_stops(self, query: str = "", *, city_code: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         text, bounded = self._bounded_query(query, limit)
-        clauses = ["cs.source_id=(SELECT value FROM catalog_meta WHERE key='active_stops_source_id')", "(cs.node_name LIKE ? ESCAPE '\\' OR cs.node_id LIKE ? ESCAPE '\\' OR cs.mobile_short_no LIKE ? ESCAPE '\\')"]
-        pattern = f"%{_like(text)}%"
-        params: list[Any] = [pattern, pattern, pattern]
+        patterns = tuple(f"%{_like(term)}%" for term in _stop_search_variants(text))
+        name_clauses = [
+            "(cs.node_name LIKE ? ESCAPE '\\' OR cs.node_id LIKE ? ESCAPE '\\' OR cs.mobile_short_no LIKE ? ESCAPE '\\')"
+            for _ in patterns
+        ]
+        clauses = [
+            "cs.source_id=(SELECT value FROM catalog_meta WHERE key='active_stops_source_id')",
+            "(" + " OR ".join(name_clauses) + ")",
+        ]
+        params: list[Any] = [
+            value
+            for pattern in patterns
+            for value in (pattern, pattern, pattern)
+        ]
         if city_code:
             clauses.append("cs.city_code=?")
             params.append(_safe_code(city_code, "city_code"))
