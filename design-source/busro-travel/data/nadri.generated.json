@@ -1,7 +1,7 @@
 {
   "version": 2,
   "reviewed_at": "2026-09-06",
-  "policy": "외곽의 자연·전원·역사 장소를 선정한다. 개별 점포·프랜차이즈·협찬은 추천 순위에 반영하지 않는다. 대표 승차 지점의 버스 접근 안내이며 사용자 출발지의 환승 수·시간표 보장이 아니다.",
+  "policy": "외곽 자연·전원·역사 장소 중심. 개별 점포·협찬 제외. 추천에는 도착 정류장을 경유하는 안내 노선만 표시하며 출발지·환승 지시는 제공하지 않는다. 현행 운행과 방향은 출발 전 확인한다.",
   "places": [
     {
       "id": "daecheong-dam",
@@ -23,14 +23,13 @@
         127.48042
       ],
       "graph_ready": false,
-      "access": "신탄진에서 72·73번 → 대청댐 방면",
-      "origin": "신탄진",
-      "transfers": 0,
       "routes": [
         "72",
         "73"
       ],
       "caution": "주말·공휴일에는 종점 대신 금강로하스공원까지만 운행한다는 안내가 있습니다. 하차 위치와 귀가편을 먼저 확인하세요. 앱 내 경로 연결 데이터는 준비 중입니다.",
+      "route_scope": "destination_stop",
+      "access": "대청댐(종점) · 72·73번",
       "reviewed_at": "2026-09-06",
       "point_kind": "bus_stop",
       "sponsored": false,
@@ -75,14 +74,13 @@
         127.338394
       ],
       "graph_ready": true,
-      "access": "대전역 20번 또는 서남부터미널 22번 → 장태산",
-      "origin": "대전역 또는 서남부터미널",
-      "transfers": 0,
       "routes": [
         "20",
         "22"
       ],
       "caution": "운행 간격과 돌아오는 편을 출발 전에 확인하세요. 숲 시설은 날씨·현장 통제로 이용이 달라질 수 있습니다.",
+      "route_scope": "destination_stop",
+      "access": "장태산자연휴양림 · 20·22번",
       "reviewed_at": "2026-09-06",
       "point_kind": "bus_stop",
       "sponsored": false,
@@ -127,13 +125,12 @@
         127.49452953
       ],
       "graph_ready": true,
-      "access": "청주시외버스터미널에서 311번 → 문의문화유산단지",
-      "origin": "청주시외버스터미널",
-      "transfers": 0,
       "routes": [
         "311"
       ],
       "caution": "311번 접근은 2026 행사 주최 측 교통 안내를 참고했습니다. 행사 셔틀은 추천 경로에 포함하지 않습니다. 관람시간·휴관·요금과 귀가편은 방문 전 확인하세요.",
+      "route_scope": "destination_stop",
+      "access": "문의문화유산단지 종점 · 311번",
       "reviewed_at": "2026-09-06",
       "point_kind": "bus_stop",
       "sponsored": false,
@@ -178,13 +175,12 @@
         127.5421853
       ],
       "graph_ready": false,
-      "access": "청주의료원 방면에서 862번 → 상당산성",
-      "origin": "청주의료원",
-      "transfers": 0,
       "routes": [
         "862"
       ],
       "caution": "성곽길에는 경사와 계단이 있습니다. 862번은 청주시 2026년 답변 기준이며 출발일 시간표를 확인하세요. 앱 내 경로 연결 데이터는 준비 중입니다.",
+      "route_scope": "destination_stop",
+      "access": "상당산성종점 · 862번",
       "reviewed_at": "2026-09-06",
       "point_kind": "bus_stop",
       "sponsored": false,
@@ -229,13 +225,12 @@
         127.6002278
       ],
       "graph_ready": false,
-      "access": "청주시외버스터미널에서 101번 → 초정삼거리",
-      "origin": "청주시외버스터미널",
-      "transfers": 0,
       "routes": [
         "101"
       ],
       "caution": "행궁 관람·체험은 운영시간과 예약 조건을 별도로 확인하세요. 지도는 초정삼거리 정류장 위치입니다. 앱 내 경로 연결 데이터는 준비 중입니다.",
+      "route_scope": "destination_stop",
+      "access": "초정삼거리(초정행궁) · 101번",
       "reviewed_at": "2026-09-06",
       "point_kind": "bus_stop",
       "sponsored": false,
@@ -280,14 +275,12 @@
         127.66348818
       ],
       "graph_ready": true,
-      "access": "청주시외버스터미널 833번 → 상당공원에서 211번 환승",
-      "origin": "청주시외버스터미널",
-      "transfers": 1,
       "routes": [
-        "833",
         "211"
       ],
-      "caution": "공식 이용안내의 터미널 출발 경로입니다. 휴원일·입장 마감과 귀가편을 확인하세요. 안내 페이지 간 공항·청주역 접근 정보가 달라 해당 경로는 싣지 않았습니다.",
+      "caution": "미동산수목원 정류장에 들어오는 안내 노선은 211번입니다. 휴원일·입장 마감과 귀가편을 확인하세요. 장소까지의 도보 경로는 별도 확인이 필요합니다.",
+      "route_scope": "destination_stop",
+      "access": "미동산수목원 · 211번",
       "reviewed_at": "2026-09-06",
       "point_kind": "bus_stop",
       "sponsored": false,
@@ -332,13 +325,12 @@
         127.44938
       ],
       "graph_ready": false,
-      "access": "대전복합터미널·대전역 방면에서 501번 → 만인산휴양림",
-      "origin": "대전복합터미널 또는 대전역",
-      "transfers": 0,
       "routes": [
         "501"
       ],
       "caution": "정류장 좌표는 만인산휴양림 양방향 정류장 중 한 곳입니다. 501번 운행 간격·귀가편과 휴양림 시설 운영 여부는 출발 전에 확인하세요. 앱 내 경로 연결 데이터는 준비 중입니다.",
+      "route_scope": "destination_stop",
+      "access": "만인산휴양림 · 501번",
       "reviewed_at": "2026-09-06",
       "point_kind": "bus_stop",
       "sponsored": false,
@@ -383,15 +375,14 @@
         127.47793
       ],
       "graph_ready": true,
-      "access": "관광 안내의 60·61·71-1번 → 마산B지구 하차 · 현행 노선 재확인",
-      "origin": null,
-      "transfers": null,
       "routes": [
         "60",
         "61",
         "71-1"
       ],
-      "caution": "버스 번호는 2021-05-26 수정된 동구 관광 안내 기준으로 현행 운행 여부를 재확인해야 합니다. 승차 지점·환승 수는 미확인입니다. 수위 상승 시 진입 제한과 귀가편을 확인하세요. 좌표는 마산B지구 정류장으로 정원 입구까지 도보 경로는 별도 확인이 필요합니다.",
+      "caution": "노선 번호는 2021-05-26 수정된 동구 관광 안내 기준이며 현행 운행 여부를 재확인해야 합니다. 수위 상승 시 진입 제한과 귀가편을 확인하세요. 지도 핀은 마산B지구 정류장으로 정원 입구까지 도보 경로는 별도 확인이 필요합니다.",
+      "route_scope": "destination_stop",
+      "access": "마산B지구 · 60·61·71-1번",
       "reviewed_at": "2026-09-06",
       "point_kind": "bus_stop",
       "sponsored": false,

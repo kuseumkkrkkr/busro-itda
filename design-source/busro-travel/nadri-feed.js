@@ -37,7 +37,7 @@ export function NadriFeed({places,select,saved=[],toggleSave,compact=false}) {
           <span className="feed-story-label">시내버스로 만나는 {place.tag==='호수·물가'?'물가':place.tag==='숲·수목원'?'숲':'전원'}</span>
           <h3>{place.title}</h3><p>{place.desc}</p><span className="feed-story-footer">어떤 곳인지 살펴보기<ArrowUpRight size={22}/></span>
         </button>
-        <div className="feed-caption"><div className="feed-access"><BusFront size={18}/><p>{place.access}</p><button className={'icon-button '+(saved.includes(place.id)?'saved':'')} aria-label={`${place.title} ${saved.includes(place.id)?'저장 해제':'저장'}`} aria-pressed={saved.includes(place.id)} onClick={()=>toggleSave(place.id)}><Bookmark size={21}/></button></div><small>{place.origin?'대표 승차 지점 기준 · 귀가편은 출발 전 확인':'승차 지점·환승 수 미확인 · 상세 안내 확인'}</small></div>
+        <div className="feed-caption"><div className="feed-access"><BusFront size={18}/><p>{place.access}</p><button className={'icon-button '+(saved.includes(place.id)?'saved':'')} aria-label={`${place.title} ${saved.includes(place.id)?'저장 해제':'저장'}`} aria-pressed={saved.includes(place.id)} onClick={()=>toggleSave(place.id)}><Bookmark size={21}/></button></div><small>도착 정류장 경유 노선 · 운행·방향은 출발 전 확인</small></div>
       </article>)}
     </div>
     <div className="feed-navigation"><button aria-label="이전 나드리" disabled={index===0} onClick={()=>jump(index-1)}><ChevronLeft size={20}/></button><span>옆으로 넘겨 다음 풍경 보기</span><button aria-label="다음 나드리" disabled={index===list.length-1} onClick={()=>jump(index+1)}><ChevronRight size={20}/></button></div>

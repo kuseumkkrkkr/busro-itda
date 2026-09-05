@@ -7,6 +7,7 @@ const browser=await chromium.launch({executablePath:'C:/Users/user/AppData/Local
 const page=await browser.newPage({viewport:{width:390,height:844},hasTouch:true,isMobile:true}),errors=[];
 page.on('pageerror',e=>errors.push(e.message));
 await page.goto(base);await page.getByRole('tab',{name:'나드리',exact:true}).click();
+const access=await page.locator('.feed-access').allTextContents();assert(access.every(t=>!t.includes('833')&&!t.includes('→')&&!t.includes('환승')&&!t.includes('터미널')));assert(places.every(p=>p.route_scope==='destination_stop'&&!('origin' in p)&&!('transfers' in p)));const mid=places.find(p=>p.id==='midongsan');assert.deepEqual(mid.routes,['211']);
 const track=page.locator('.feed-track'),active=page.locator('.feed-slide[aria-hidden=false]');
 async function at(i){await page.waitForFunction(i=>document.querySelector('.feed-counter')?.textContent?.startsWith(i+' /'),i);await page.waitForTimeout(500);assert.equal(await active.count(),1);assert.equal(await page.locator('.feed-slide[inert]').count(),await page.locator('.feed-slide').count()-1);}
 await at(1);assert(await page.getByRole('button',{name:'이전 나드리',exact:true}).isDisabled());await page.getByRole('button',{name:'다음 나드리',exact:true}).click();await at(2);

@@ -15,9 +15,9 @@ try {
   const source=db.prepare('INSERT INTO sources VALUES(?,?,?,?,?)');
   const ids=new Set();
   seed.places.forEach((p,i)=>{
-    assert(!ids.has(p.id));ids.add(p.id);assert(['대전','청주'].includes(p.region));assert(['호수·물가','숲·수목원','산성·전원'].includes(p.tag));assert(p.sources.length>=2);assert(p.point.length===2&&p.point.every(Number.isFinite));assert(p.node_id&&p.city_code&&p.query);assert(p.transfers===null||(Number.isInteger(p.transfers)&&p.transfers>=0&&p.transfers<=1));assert(p.transfers===null||p.origin);
+    assert(!ids.has(p.id));ids.add(p.id);assert(['대전','청주'].includes(p.region));assert(['호수·물가','숲·수목원','산성·전원'].includes(p.tag));assert(p.sources.length>=2);assert(p.point.length===2&&p.point.every(Number.isFinite));assert(p.node_id&&p.city_code&&p.query);assert(p.route_scope==='destination_stop');assert(Array.isArray(p.routes)&&p.routes.length>0);assert(!('origin' in p)&&!('transfers' in p));
     const {sources,...place}=p;
-    up.run(p.id,p.region,p.tag,i,JSON.stringify({...place,reviewed_at:seed.reviewed_at,point_kind:'bus_stop',sponsored:false}));
+    up.run(p.id,p.region,p.tag,i,JSON.stringify({...place,access:`${p.stop_name} · ${p.routes.join('·')}번`,reviewed_at:seed.reviewed_at,point_kind:'bus_stop',sponsored:false}));
     db.prepare('DELETE FROM sources WHERE place_id=?').run(p.id);
     sources.forEach(s=>{assert(new URL(s.url).protocol==='https:');source.run(p.id,s.url,s.label,s.claim,seed.reviewed_at)});
     source.run(p.id,'https://busro-itda.vercel.app/api/network/stops?'+new URLSearchParams({q:p.query,city_code:p.city_code,limit:'8'}),'정류장 데이터 · 버스로 잇다',`${p.node_id}: 정류장 좌표·노선 데이터 등록 여부. 장소 좌표나 운행 보장이 아님.`,seed.reviewed_at);
