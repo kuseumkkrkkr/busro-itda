@@ -5,6 +5,7 @@
       "id": "mockups",
       "label": "Mockups",
       "groups": [
+        { "slug": "busro-travel", "files": [{"label":"버스로 잇다 · 모바일 리디자인","path":"mockups/busro-travel/index.html"}] },
         {
           "slug": "busro-itda-glass",
           "files": [

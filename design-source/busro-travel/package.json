@@ -1,0 +1,1 @@
+{"name":"busro-travel","private":true,"version":"2.0.0","type":"module","scripts":{"build":"node build.mjs"},"dependencies":{"leaflet":"^1.9.4","lucide-react":"0.468.0","react":"18.3.1","react-dom":"18.3.1"},"devDependencies":{"esbuild":"0.25.10","playwright":"1.58.2"}}

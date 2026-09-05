@@ -11,7 +11,7 @@
   },
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api/index?path=:path*" },
-    { "source": "/", "destination": "/opendesign/mockups/busro-itda-glass/index.html" },
+    { "source": "/", "destination": "/opendesign/mockups/busro-travel/index.html" },
     { "source": "/:asset*", "destination": "/opendesign/mockups/busro-itda-glass/:asset*" }
   ],
   "headers": [
