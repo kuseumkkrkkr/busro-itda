@@ -1,0 +1,11 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {checkLocation} from './location-check.js';
+const now=1788631000000,stop={latitude:36.35,longitude:127.38};
+const position=()=>({coords:{...stop,accuracy:20},timestamp:now});
+test('accepts fresh accurate location, retains no raw coordinates',()=>{const r=checkLocation(position(),stop,now);assert.equal(r.ok,true);assert.equal(r.scope,'device-start-only');assert.equal(r.coords,undefined)});
+test('rejects stale and future readings',()=>{for(const offset of [-30001,5001])assert.equal(checkLocation({...position(),timestamp:now+offset},stop,now).ok,false)});
+test('rejects inaccurate, negative and invalid accuracy',()=>{for(const accuracy of [101,-1,NaN,Infinity])assert.equal(checkLocation({...position(),coords:{...stop,accuracy}},stop,now).ok,false)});
+test('rejects remote coordinates',()=>assert.equal(checkLocation({...position(),coords:{latitude:37,longitude:127,accuracy:10}},stop,now).ok,false));
+test('rejects missing and coerced coordinates',()=>{for(const target of [{latitude:null,longitude:127},{latitude:'36.35',longitude:127.38},{latitude:91,longitude:127},{}])assert.equal(checkLocation(position(),target,now).ok,false)});
+test('includes uncertainty in the boundary',()=>assert.equal(checkLocation({...position(),coords:{latitude:36.3515,longitude:127.38,accuracy:50}},stop,now).ok,false));
